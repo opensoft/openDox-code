@@ -104,7 +104,9 @@ openxFactory and never what a destination assembles (RULED OQ-C).
 
 from __future__ import annotations
 
+import collections
 import contextlib
+import contextvars
 import dataclasses
 import errno
 import hashlib
@@ -339,8 +341,10 @@ REASON_INLINE_SCRIPT = (
 #: xargs, which builds what it runs from its input (ruling 5988818366);
 #: launchers nested past what is unwrapped; a path whose symbolic links
 #: pass the kernel's own bound, or loop (`_LINK_HOPS`; ruling 5986391296);
-#: or a member past the bounds of what is judged (`_unbounded_member`;
-#: ruling 5989835334). What it runs cannot be judged, so it is
+#: a member past the bounds of what is judged (`_unbounded_member`;
+#: ruling 5989835334); a bare program name after sudo or doas, found on a
+#: search path their policy picks; or a command whose judgment would pass
+#: its work budget (`_WORK_BUDGET`; ruling 5990845570). What it runs cannot be judged, so it is
 #: refused FAIL-CLOSED, with the inline-script remedy. (An `env -S` string
 #: env would not split as a shell does is an inline script:
 #: `REASON_INLINE_SCRIPT`.)
@@ -350,9 +354,10 @@ REASON_UNREADABLE_COMMAND = (
     "which what runs cannot be judged, a launcher given two working "
     "directories, an assignment given to sudo, xargs, which builds what it "
     "runs from its input, launchers nested too deeply, a path whose links "
-    "go deeper than the system follows, or a member longer than "
-    "the system's path limit or holding more than 32 paths), so what it "
-    "runs cannot be judged")
+    "go deeper than the system follows, a member longer than the "
+    "system's path limit or holding more than 32 paths, a bare program "
+    "name after sudo or doas, or more than its judgment may take), so what "
+    "it runs cannot be judged")
 
 #: What an operator is told to do about such a binding.
 REMEDY_INLINE_SCRIPT = (
@@ -987,8 +992,9 @@ def _inherited_pythonpath(*, root: Path | str) -> list[str]:
         "PYTHONPATH")
     if not inherited:
         return []
-    return [entry for entry in inherited.split(os.pathsep)
-            if not (entry and names_a_path_inside(entry, root=root))]
+    return _outside_the_budget(lambda: [
+        entry for entry in inherited.split(os.pathsep)
+        if not (entry and names_a_path_inside(entry, root=root))])
 
 
 def _python_roots(context: _Context, *, root: Path | str) -> list[str]:
@@ -1003,8 +1009,9 @@ def _python_roots(context: _Context, *, root: Path | str) -> list[str]:
     5988818366)."""
     entries = (context.pythonpath if context.pythonpath is not None
                else _inherited_pythonpath(root=root))
-    return [context.cwd, *(os.path.join(context.cwd, entry)
-                           for entry in entries)]
+    # each once: a repeated entry is no other directory (r4182002696)
+    return list(dict.fromkeys([context.cwd, *(
+        os.path.join(context.cwd, entry) for entry in entries)]))
 
 
 def _which(name: str, context: _Context) -> str | None:
@@ -1014,6 +1021,7 @@ def _which(name: str, context: _Context) -> str | None:
     it, never from this process's (r4179366288)."""
     search = context.path if context.path is not None else os.defpath
     for entry in search.split(os.pathsep):
+        _spend()
         candidate = os.path.join(context.cwd, entry, name)
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
@@ -1062,10 +1070,11 @@ def _traversed(path: str) -> list[Path]:
     links pass `_LINK_HOPS` raises `_TooManyLinks`."""
     names: list[Path] = []
     real = Path(os.sep)
-    pending = list(Path(path).parts[1:])
+    pending = collections.deque(Path(path).parts[1:])
     hops = 0
     while pending:
-        part = pending.pop(0)
+        _spend()
+        part = pending.popleft()
         if part == os.curdir:
             continue
         if part == os.pardir:
@@ -1085,7 +1094,7 @@ def _traversed(path: str) -> list[Path]:
         if os.path.isabs(target):
             real = Path(os.sep)
             parts = parts[1:]
-        pending[:0] = parts
+        pending.extendleft(reversed(parts))
     names.append(real)
     return names
 
@@ -1103,6 +1112,73 @@ _MAX_ABSOLUTE_PATHS = 32
 
 #: The separators a path is written with on this system.
 _SEPARATORS = tuple(sep for sep in (os.sep, os.altsep) if sep)
+
+
+#: The work judging one broker command may take, in steps: each name
+#: looked up on the way to a path (`_traversed`), each candidate path a
+#: `-m` name could be imported from, before it is built (`_module_paths`),
+#: each directory a program is looked for in (`_which`), each entry of a
+#: bytecode cache directory, and each member and option letter a scan reads.
+#: Past it the command is refused as unreadable, FAIL-CLOSED: the bindings
+#: document lives in the served repository, so a pull must not be able to
+#: hang verdict computation (Copilot at openDox-code#86, r4182002696; the
+#: holder's ruling, openxFactory#656 comment 5990845570). A command's
+#: budget is `_WORK_PER_MEMBER` steps for each of its members, at most
+#: `_WORK_BUDGET`, so the ceiling on the members one bindings document
+#: declares (`doxbench_binding.MAX_JUDGED_MEMBERS`) bounds the work of the
+#: whole document too. An ordinary command takes a few hundred steps; at
+#: their slowest, deep paths, steps take some 15 microseconds each.
+_WORK_PER_MEMBER = 2_000
+_WORK_BUDGET = 20_000
+
+#: The steps left in the judgment being made, or None outside one.
+_STEPS_LEFT: contextvars.ContextVar[list[int] | None] = (
+    contextvars.ContextVar("opendox_trust_steps_left", default=None))
+
+
+class _OverBudget(Exception):
+    """A judgment that would pass `_WORK_BUDGET`."""
+
+
+def _spend(steps: int = 1) -> None:
+    """Spend `steps` of the judgment's budget. Raises `_OverBudget` past
+    it."""
+    left = _STEPS_LEFT.get()
+    if left is None:
+        return
+    left[0] -= steps
+    if left[0] < 0:
+        raise _OverBudget()
+
+
+def _within_budget(work, *, over, members=None):
+    """`work()` within one command's work budget: the one already being
+    spent, whose owner answers for it, or a new one for the command
+    `members` (`_WORK_PER_MEMBER` for each, at most `_WORK_BUDGET`; the
+    cap for none), where a judgment past it answers `over()` instead."""
+    if _STEPS_LEFT.get() is not None:
+        return work()
+    steps = _WORK_BUDGET if members is None else min(
+        _WORK_BUDGET, _WORK_PER_MEMBER * max(1, len(members)))
+    token = _STEPS_LEFT.set([steps])
+    try:
+        return work()
+    except _OverBudget:
+        return over()
+    finally:
+        _STEPS_LEFT.reset(token)
+
+
+def _outside_the_budget(work):
+    """`work()` as no command's work: what the operator's own environment
+    holds (the search path and the module path a broker inherits, filtered
+    of the served root), which no pull chooses. Each judgment in it has a
+    budget of its own."""
+    token = _STEPS_LEFT.set(None)
+    try:
+        return work()
+    finally:
+        _STEPS_LEFT.reset(token)
 
 
 def _unbounded_member(members) -> str | None:
@@ -1198,6 +1274,7 @@ def _bytecode_caches(source: str) -> list[str]:
         present = sorted(os.listdir(pycache))
     except (OSError, ValueError):
         present = []
+    _spend(1 + len(present))
     caches += [os.path.join(pycache, entry) for entry in present
                if entry.startswith(stem + ".") and entry.endswith(".pyc")]
     return caches
@@ -1231,7 +1308,9 @@ def _module_paths(name: str, *, roots: list[str]) -> list[str]:
         found.append(base)
         for count in range(1, len(parts) + 1):
             # each prefix, the whole name last, as a module file and as a
-            # package's initializer, with every suffix
+            # package's initializer, with every suffix, paid for before it
+            # is built
+            _spend(count)
             package = os.path.join(root, *parts[:count])
             found += [package + suffix for suffix in _MODULE_SUFFIXES]
             found += [os.path.join(package, "__init__" + suffix)
@@ -1272,6 +1351,7 @@ def _module_operands(members) -> dict[int, str]:
         if not member.startswith("-") or member.startswith("--"):
             continue
         for at in range(1, len(member)):
+            _spend()
             letter = member[at]
             if letter == "m":
                 if member[at + 1:]:
@@ -1370,7 +1450,9 @@ def in_repository_argv(members, *, root: Path | str) -> str | None:
     unbounded = _unbounded_member(members)
     if unbounded is not None:
         return unbounded
-    return _named_inside(members, root=root)
+    return _within_budget(lambda: _named_inside(members, root=root),
+                          over=lambda: _first_member(members),
+                          members=members)
 
 
 def _named_inside(members, *, root: Path | str) -> str | None:
@@ -1388,15 +1470,22 @@ def _in_repository_member(members, *, root: Path | str) -> str | None:
     member, for a member whose links pass `_LINK_HOPS`."""
     served = Path(resolved_root(root))
 
+    under = str(served).rstrip(os.sep) + os.sep
+
+    def lies_under(name: Path) -> bool:
+        # strictly under the served root: a prefix of the name's text, which
+        # `_traversed` builds with no `.` or `..` in it, linear in its depth
+        return str(name).startswith(under)
+
     def inside(found: list[str]) -> bool:
         # A name on the way counts where it lies INSIDE the root (a link the
         # repository holds); the root itself is passed through by every path
         # joined to it, so only the end may be the root itself.
         for path in found:
             *on_the_way, end = _traversed(path)
-            if end == served or served in end.parents:
+            if end == served or lies_under(end):
                 return True
-            if any(served in name.parents for name in on_the_way):
+            if any(lies_under(name) for name in on_the_way):
                 return True
         return False
 
@@ -1417,6 +1506,7 @@ def _in_repository_member(members, *, root: Path | str) -> str | None:
         return found
 
     def judged(member: str, found: list[str]) -> bool:
+        _spend(len(found))
         try:
             return inside(found)
         except _TooManyLinks:
@@ -1457,9 +1547,10 @@ def names_a_path_inside(value: str, *, root: Path | str) -> bool:
     `doxbench_provider.broker_environment`), and no part past the bounds of
     what is judged either (`_unbounded_member`, FAIL-CLOSED; the holder's
     ruling, openxFactory#656 comment 5989835334)."""
-    return any(part and (_unbounded_member([part]) is not None or _named_inside(
-        ["opendox-environment", f"--value={part}"], root=root) is not None)
-        for part in value.split(os.pathsep))
+    return _within_budget(lambda: any(part and (
+        _unbounded_member([part]) is not None or _named_inside(
+            ["opendox-environment", f"--value={part}"], root=root) is not None)
+        for part in value.split(os.pathsep)), over=lambda: True)
 
 
 #: Shells: an option cluster holding `c` gives one an inline script.
@@ -1802,6 +1893,7 @@ def _launcher_options(name: str, rest: tuple[str, ...], context: _Context,
 
     index = 0
     while index < len(rest):
+        _spend()
         member = rest[index]
         if member == "--":
             return index + 1, context, None
@@ -1865,13 +1957,22 @@ def _unwrapped(members) -> _Unwrapped:
     launchers: list[tuple[str, _Context]] = []
     values: list[tuple[str, _Context]] = []
     chdirs = [0]
+    reread: str | None = None
     for _depth in range(_LAUNCHER_DEPTH):
         if not command:
             break
-        name = _launcher_name(command[0], context=context)
-        if name is None:
-            break
-        launchers.append((command[0], context))
+        if reread is not None:
+            # `env -S`: the same launcher reads its split string, judged
+            # once, as the member it is and in the context it was judged
+            # in, however the string moves the working directory (Copilot
+            # at openDox-code#86, r4182002510; the holder's ruling,
+            # openxFactory#656 comment 5990845570)
+            name, reread = reread, None
+        else:
+            name = _launcher_name(command[0], context=context)
+            if name is None:
+                break
+            launchers.append((command[0], context))
         rest = command[1:]
         try:
             index, context, split = _launcher_options(name, rest, context,
@@ -1883,7 +1984,7 @@ def _unwrapped(members) -> _Unwrapped:
         if split is not None:
             # `env -S STRING`: STRING's words are env's own arguments, read
             # again by env's grammar, before what followed them.
-            launchers.pop()
+            reread = name
             command = (command[0],) + tuple(split) + rest[index:]
             continue
         chdirs = [0]                # the next launcher is another program
@@ -1894,6 +1995,16 @@ def _unwrapped(members) -> _Unwrapped:
             # is refused as unreadable, `PATH=` included (FAIL-CLOSED; the
             # writer's sibling of r4181006390; the holder's ruling,
             # openxFactory#656 comment 5988818366)
+            return _Unwrapped(tuple(launchers), tuple(values), (), context,
+                              unreadable=rest[index],
+                              unreadable_because=REASON_UNREADABLE_COMMAND)
+        if name in ("sudo", "doas") and index < len(rest) and not (
+                _has_a_separator(rest[index])):
+            # the search path sudo's or doas's policy picks (`secure_path`)
+            # is not judged, so a bare program name is refused as
+            # unreadable and an absolute path is required (FAIL-CLOSED;
+            # Copilot at openDox-code#86, r4182002567; the holder's ruling,
+            # openxFactory#656 comment 5990845570)
             return _Unwrapped(tuple(launchers), tuple(values), (), context,
                               unreadable=rest[index],
                               unreadable_because=REASON_UNREADABLE_COMMAND)
@@ -1927,16 +2038,37 @@ def _unversioned(name: str) -> str:
     return re.sub(r"[-.\d]+$", "", name) or name
 
 
-def _program_names(member: str, *, first: bool,
-                   context: _Context) -> set[str]:
+def _program_names(member: str, *, first: bool, context: _Context,
+                   search: _Context | None = None) -> set[str]:
     """The names `member` could run as: its own file name and, where it
     names a file (`_located`), that file's, links followed (`/bin/sh` may be
     `dash`, and a link named `broker` may be `python3`), each without a
-    version suffix."""
+    version suffix. Given `search`, a bare word is also looked for on its
+    search path (`_which`), as a wrapper that runs it would find it."""
     names = {Path(member).name}
-    names.update(Path(_resolved_path(path)).name for path in _located(
-        member, first=first, context=context))
+    found = _located(member, first=first, context=context)
+    if search is not None and not _has_a_separator(member):
+        located = _which(member, search)
+        if located is not None:
+            found.append(located)
+    _spend(len(found) + sum(path.count(os.sep) for path in found))
+    names.update(Path(_resolved_path(path)).name for path in found)
     return {_unversioned(name) for name in names if name}
+
+
+def _search_context(context: _Context, *, root: Path | str | None) -> _Context:
+    """`context` with the search path a broker is given: the one it
+    inherits, filtered as `doxbench_provider.broker_environment` filters
+    it, with no entry inside the served root; or the one a launcher
+    assigned (Copilot at openDox-code#86, r4182002637; the holder's ruling,
+    openxFactory#656 comment 5990845570)."""
+    if root is None or context.path != os.environ.get("PATH"):
+        return context
+    from opendox import doxbench_provider
+
+    return context._replace(path=_outside_the_budget(
+        lambda: doxbench_provider.broker_environment(
+            os.environ, root=root).get("PATH")))
 
 
 #: deno's global options, which may stand before its subcommand (lane
@@ -2018,6 +2150,7 @@ def _reads_an_inline_script(spec: _Interpreter, rest: tuple[str, ...],
     state in `read` was read already, by this reading or another, which
     read on from it as this one would, so this one stops there."""
     while index < len(rest):
+        _spend()
         if (index, operands) in read:
             return False
         read.add((index, operands))
@@ -2045,6 +2178,7 @@ def _reads_an_inline_script(spec: _Interpreter, rest: tuple[str, ...],
             letters = member[1:]
             at = 0
             while at < len(letters):
+                _spend()
                 letter = letters[at]
                 if letter in spec.inline:
                     return True
@@ -2080,8 +2214,9 @@ def inline_script(members, *, root: Path | str | None = None) -> str | None:
     the same class that is not in `_LAUNCHERS` (`busybox sh -c`, `xargs sh
     -c`, `sudo bash -c`) hides none. A member's name is its own file name
     and, where it resolves to a file, that file's, each without a version
-    suffix (`_program_names`). `root` is not needed: the rule is the same
-    for every repository.
+    suffix (`_program_names`); a bare word after the first is looked for on
+    the broker's search path as well, filtered of every entry inside `root`
+    where it is given (`_search_context`; r4182002637).
 
     THE ACCEPTED LIMIT (the same ruling, item 4): a general program that
     runs code from its own arguments, such as `awk 'PROGRAM'`, `sed` or
@@ -2093,23 +2228,41 @@ def inline_script(members, *, root: Path | str | None = None) -> str | None:
     options cannot be read (an unknown leading option of deno's) is
     returned as well, FAIL-CLOSED; `broker_command_refused` refuses it as
     unreadable."""
-    try:
-        return _inline_member(members)
-    except _Unreadable as unreadable:
-        return unreadable.member
+    def work() -> str | None:
+        try:
+            return _inline_member(members, root=root)
+        except _Unreadable as unreadable:
+            return unreadable.member
+
+    return _within_budget(work, over=lambda: _first_member(members),
+                          members=members)
 
 
-def _inline_member(members) -> str | None:
+def _first_member(members) -> str | None:
+    """The command's first member, which a judgment past its work budget
+    names, FAIL-CLOSED, or None for an empty command."""
+    return next(iter(members), None)
+
+
+def _inline_member(members, *, root: Path | str | None = None) -> str | None:
     """`inline_script`'s work. Raises `_Unreadable` for a member whose own
-    options cannot be read."""
+    options cannot be read. A member after the first, a bare word, is
+    looked for on the broker's filtered search path as well as in its start
+    directory (`_search_context`; r4182002637), so an alias a wrapper not
+    in `_LAUNCHERS` runs is judged by what it resolves to."""
     unwrapped = _unwrapped(members)
     for command, context in ((tuple(members), _broker_context()),
                              (unwrapped.command, unwrapped.context)):
+        search: _Context | None = None
         for index, member in enumerate(command):
+            _spend()
             if not member or (index and member.startswith("-")):
                 continue
+            if index and search is None:
+                search = _search_context(context, root=root)
             for name in _program_names(member, first=index == 0,
-                                       context=context):
+                                       context=context,
+                                       search=search if index else None):
                 if _gives_an_inline_script(name, command[index + 1:]):
                     return member
     return None
@@ -2137,15 +2290,25 @@ def broker_command_refused(members, *,
     (`REASON_UNREADABLE_COMMAND`; `_builds_its_command`). A member past the
     bounds of what is judged is refused as unreadable before anything else
     is asked (`_unbounded_member`; the holder's ruling, openxFactory#656
-    comment 5989835334). Asked where trust is recorded and wherever it is
-    judged, and of the console intake's broker."""
+    comment 5989835334), and so is one whose judgment would pass its work
+    budget (`_WORK_BUDGET`; the holder's ruling, openxFactory#656 comment
+    5990845570). Asked where trust is recorded and wherever it is judged,
+    and of the console intake's broker."""
     if _unbounded_member(members) is not None:
         return REASON_UNREADABLE_COMMAND
+    return _within_budget(lambda: _command_refused(members, root=root),
+                          over=lambda: REASON_UNREADABLE_COMMAND,
+                          members=members)
+
+
+def _command_refused(members, *, root: Path | str | None) -> str | None:
+    """`broker_command_refused`'s work, within the command's work budget
+    (`_WORK_BUDGET`). Raises `_OverBudget` past it."""
     unwrapped = _unwrapped(members)
     if unwrapped.unreadable is not None:
         return unwrapped.unreadable_because
     try:
-        if _inline_member(members) is not None:
+        if _inline_member(members, root=root) is not None:
             return REASON_INLINE_SCRIPT
     except _Unreadable:
         return REASON_UNREADABLE_COMMAND

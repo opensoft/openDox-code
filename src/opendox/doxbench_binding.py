@@ -643,6 +643,17 @@ def document_present(path: Path) -> bool:
         return False
 
 
+#: The most broker command members one bindings document may declare
+#: across its bindings, every one of which is judged where trust is asked
+#: (`doxbench_trust.broker_command_refused`). Past it the document is
+#: refused by name, FAIL-CLOSED: it lives in the served repository, so a
+#: pull must not be able to hang verdict computation, and each command's
+#: judgment is bounded (`doxbench_trust._WORK_BUDGET`) while their number
+#: is bounded here (Copilot at openDox-code#86, r4182002696; the holder's
+#: ruling, openxFactory#656 comment 5990845570).
+MAX_JUDGED_MEMBERS = 256
+
+
 def read_settings_document(path: Path, *, what: str, yaml, refused):
     """The YAML document at `path`, parsed, or a refusal BY NAME (`refused`,
     the caller's own refusal class) for one that cannot be read (T100
@@ -1225,6 +1236,12 @@ class BindingStore:
                     f"the bindings document at {self.path} declares the id "
                     f"{binding.id!r} twice")
             seen.add(binding.id)
+        judged = sum(len(binding.broker_argv) for binding in bindings)
+        if judged > MAX_JUDGED_MEMBERS:
+            raise BindingRefused(
+                f"the bindings document at {self.path} declares {judged} "
+                "broker command members across its bindings, more than the "
+                f"{MAX_JUDGED_MEMBERS} judged in one document")
         return bindings
 
     def _save(self, bindings: Iterable[ModelProviderBinding]) -> None:

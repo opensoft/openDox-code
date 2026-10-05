@@ -3183,6 +3183,14 @@ def _in_repository_argv(served, where, monkeypatch):
         monkeypatch.setenv("PATH", os.path.relpath(program.parent, broker_cwd)
                            + os.pathsep + os.environ.get("PATH", ""))
         return [program.name]
+    if where == "relative-launcher-in-the-repository-re-read-after-its-split":
+        # r4182002510; the holder's ruling, #656 5990845570: `-C` before `-S`
+        # moves the directory the split string is read in, not the one the
+        # launcher itself was found from
+        launcher = served.repo / "env"
+        launcher.symlink_to(shutil.which("env"))
+        return [os.path.relpath(launcher, broker_cwd), "-C", str(served.tmp),
+                "-S", f"{sys.executable} {served.broker}"]
     if where.endswith("bytecode-cache-linked-into-the-repository"):
         # r4181465499; the holder's ruling, #656 5989835334: Python imports
         # a source's bytecode cache from `__pycache__` in its place
@@ -3364,6 +3372,7 @@ IN_REPOSITORY = ("absolute", "relative-to-the-broker-directory",
                  "program-past-an-assignment-whose-name-is-no-identifier",
                  "value-of-an-assignment-whose-name-is-no-identifier",
                  "member-an-unknown-option-may-take",
+                 "relative-launcher-in-the-repository-re-read-after-its-split",
                  "module-bytecode-cache-linked-into-the-repository",
                  "initializer-bytecode-cache-linked-into-the-repository",
                  "main-bytecode-cache-linked-into-the-repository",
@@ -3504,20 +3513,170 @@ def test_R6_the_old_worst_cases_are_judged_in_under_a_second(served):
     that delivers a bindings document must not hang the judgment. One
     member of 400 absolute paths took 29 s at fe56c0c4, and 4000 options
     node does not know took seconds, growing with their square; each is
-    judged now in under a second."""
+    judged now in under a second (4000 such options now pass the work
+    budget, ruling 5990845570, so 1500 are judged here)."""
     trust_mod = _trust_mod()
     for argv, reason in (
             (["/opt/opendox-test/broker", "/x" * 400],
              trust_mod.REASON_UNREADABLE_COMMAND),
             (["/opt/opendox-test/broker", "/x" * 2048],
              trust_mod.REASON_UNREADABLE_COMMAND),
-            (["node", *(["--a"] * 4000)], None),
+            (["node", *(["--a"] * 1500)], None),
             (["node", *(["--a"] * 4000), "-e", "x"],
              trust_mod.REASON_INLINE_SCRIPT)):
         started = time.monotonic()
         assert trust_mod.broker_command_refused(
             argv, root=served.repo) == reason, argv[:2]
         assert time.monotonic() - started < 1, argv[:2]
+
+
+def test_R7_an_alias_a_wrapper_runs_is_judged_on_the_brokers_search_path(
+        served, monkeypatch, capsys):
+    """r4182002637; the holder's ruling, #656 5990845570: a bare word after
+    the program, which a wrapper not in the launcher table may run, is
+    looked for on the broker's FILTERED search path as well, so an alias
+    that resolves to an interpreter given its inline flag is an inline
+    script; an alias of a program that is no interpreter is not, and one
+    only an entry inside the repository holds is no program the broker
+    finds."""
+    trust_mod = _trust_mod()
+    aliases = served.tmp / "aliases"
+    aliases.mkdir()
+    (aliases / "opref-alias").symlink_to(sys.executable)
+    (aliases / "opref-tool").symlink_to(shutil.which("true"))
+    hidden = served.repo / "bin"
+    hidden.mkdir()
+    (hidden / "opref-hidden").symlink_to(sys.executable)
+    monkeypatch.setenv("PATH", os.pathsep.join(
+        [str(aliases), str(hidden), os.environ.get("PATH", "")]))
+    for wrapper in (["prlimit", "--"], ["setpriv", "--"]):
+        assert trust_mod.broker_command_refused(
+            [*wrapper, "opref-alias", "-c", "x"], root=served.repo) == (
+                trust_mod.REASON_INLINE_SCRIPT), wrapper
+        for word in ("opref-tool", "opref-hidden"):
+            assert trust_mod.broker_command_refused(
+                [*wrapper, word, "-c", "x"], root=served.repo) is None, word
+    served.hand_write(served.record(
+        "broker", broker_argv=["prlimit", "--", "opref-alias", "-c", "x"]))
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+    assert trust_mod.REASON_INLINE_SCRIPT in capsys.readouterr().err
+    assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
+
+
+#: Each residual form of the judgment's cost the writer measured at
+#: 5324ca4c, with what it answers now (the holder's ruling, #656
+#: 5990845570): every one past its work budget is refused as unreadable.
+RESIDUAL_FORMS = {
+    "a-module-of-100-dotted-parts": (
+        lambda py: [py, "-m", ".".join(["a"] * 100)], "unreadable"),
+    "a-module-of-2000-dotted-parts-under-two-roots": (
+        lambda py: ["env", "PYTHONPATH=x", py, "-m",
+                    ".".join(["a"] * 2000)], "unreadable"),
+    "2000-repeated-pythonpath-entries": (
+        lambda py: ["env", "PYTHONPATH=" + ":".join(["a"] * 2000), py, "-m",
+                    "a"], None),
+    "700-distinct-pythonpath-entries": (
+        lambda py: ["env", "PYTHONPATH=" + ":".join(
+            f"e{i}" for i in range(700)), py, "-m", "a"], "unreadable"),
+    "6000-members-of-32-separators": (
+        lambda py: ["/opt/opendox-test/broker", *(["/a" * 32] * 6000)],
+        "unreadable"),
+    "4000-short-members": (
+        lambda py: ["/opt/opendox-test/broker", *(["w"] * 4000)],
+        "unreadable"),
+    "3000-su-members": (
+        lambda py: ["/opt/opendox-test/broker", *(["su"] * 3000)],
+        "unreadable"),
+    "1000-words-on-a-search-path-of-700-entries": (
+        lambda py: ["env", "PATH=" + ":".join(f"p{i}" for i in range(700)),
+                    "prlimit", "--", *(["w"] * 1000)], "unreadable"),
+    "2000-interpreter-option-clusters-of-4095-letters": (
+        lambda py: [py, *(["-" + "B" * 4095] * 2000)], "unreadable"),
+    "2000-option-clusters-of-4095-letters": (
+        lambda py: ["/opt/opendox-test/broker",
+                    *(["-" + "B" * 4095] * 2000)], "unreadable"),
+    "4000-options-node-does-not-know": (
+        lambda py: ["node", *(["--a"] * 4000)], "unreadable"),
+}
+
+
+@pytest.mark.parametrize("form", sorted(RESIDUAL_FORMS))
+def test_R7_each_residual_form_is_judged_in_under_a_second(served, form):
+    """r4182002696 and the writer's residual measurements; the holder's
+    ruling, #656 5990845570: import roots are judged once each, and one
+    work budget per command counts the names traversed, the module
+    candidates before they are built, the directories searched, and every
+    member and option letter a scan reads; past it the command is refused
+    as unreadable, FAIL-CLOSED, so a pull cannot hang verdict computation.
+    Each form the writer measured (100 dotted parts took 7 s, and 2000 su
+    members, 1 s) is judged in under a second."""
+    trust_mod = _trust_mod()
+    build, answer = RESIDUAL_FORMS[form]
+    argv = build(sys.executable)
+    started = time.monotonic()
+    refused = trust_mod.broker_command_refused(argv, root=served.repo)
+    assert time.monotonic() - started < 1
+    assert refused == (trust_mod.REASON_UNREADABLE_COMMAND
+                       if answer == "unreadable" else None)
+
+
+def test_R7_a_commands_budget_grows_with_its_members(served, monkeypatch):
+    """The work budget is `_WORK_PER_MEMBER` steps for each member, at most
+    `_WORK_BUDGET`, so the bindings document's ceiling on members bounds a
+    whole document's work: the same module of 30 dotted parts is past the
+    budget of a command of 2 members and within that of 10. An ordinary
+    command spends little of its budget, and the operator's own search
+    path, filtered of the served root, is no command's work."""
+    trust_mod = _trust_mod()
+    module = "-m" + ".".join(["a"] * 30)
+    assert trust_mod.broker_command_refused(
+        [sys.executable, module], root=served.repo) == (
+            trust_mod.REASON_UNREADABLE_COMMAND)
+    assert trust_mod.broker_command_refused(
+        [sys.executable, module, *(["-q"] * 8)], root=served.repo) is None
+    entries = []
+    for index in range(300):
+        entry = served.tmp / "path" / f"d{index}"
+        entry.mkdir(parents=True)
+        entries.append(str(entry))
+    monkeypatch.setenv("PATH", os.pathsep.join(
+        [*entries, os.environ.get("PATH", "")]))
+    assert trust_mod.broker_command_refused(
+        ["/opt/opendox-test/broker", "show"], root=served.repo) is None
+
+
+def test_R7_a_bindings_document_past_its_ceiling_is_refused_by_name(
+        served, capsys):
+    """The holder's ruling, #656 5990845570: a bindings document declaring
+    more broker command members across its bindings than
+    `MAX_JUDGED_MEMBERS` is refused by name, FAIL-CLOSED, before any of
+    them is judged; one at the ceiling is read."""
+    trust_mod = _trust_mod()
+    ceiling = binding_mod.MAX_JUDGED_MEMBERS
+    assert ceiling == 256
+
+    def document(members: int) -> Path:
+        # bindings of 64 members each, the last taking the rest
+        sizes = [64] * (members // 64)
+        sizes[-1] += members % 64
+        return served.hand_write(*(served.record(
+            "broker", id=f"{BINDING_ID}-{number}",
+            broker_argv=[sys.executable, str(served.broker),
+                         *(["--flag"] * (size - 2))])
+            for number, size in enumerate(sizes)))
+
+    path = document(ceiling)
+    assert len(binding_mod.BindingStore(path).list()) == 4
+    path = document(ceiling + 1)
+    with pytest.raises(binding_mod.BindingRefused) as refused:
+        binding_mod.BindingStore(path).list()
+    assert f"{ceiling + 1} broker command members" in str(refused.value)
+    assert f"more than the {ceiling} judged" in str(refused.value)
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                f"{BINDING_ID}-0") == 1
+    assert f"more than the {ceiling} judged" in capsys.readouterr().err
+    assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
 
 
 def test_R5_xargs_is_refused_after_the_other_two_judgments(served):
@@ -4761,7 +4920,7 @@ INLINE = {
     "busybox-wrapped": ["busybox", "sh", "-c", "x"],
     "unknown-wrapper": ["/opt/opendox-test/wrap", "sh", "-c", "x"],
     "xargs-wrapped": ["xargs", "-0", "sh", "-c", "x"],
-    "sudo-wrapped": ["sudo", "-u", "bob", "bash", "-c", "x"],
+    "sudo-wrapped": ["sudo", "-u", "bob", "/bin/bash", "-c", "x"],
     "env-python": ["/usr/bin/env", "python3", "-c", "x"],
     "env-split-python": ["env", "-S", "python3 -c x"],
     # Copilot at openDox-code#86, r4179241583: an attached script, and an
@@ -5052,8 +5211,9 @@ LAUNCHED = {
     "xargs": ["xargs", "-0", "PROG"],
     "busybox": ["busybox", "env", "PROG"],
     "flock": ["flock", "-w", "5", "/tmp/opendox-lock", "PROG"],
-    "sudo": ["sudo", "-u", "bob", "PROG"],
-    "doas": ["doas", "-u", "bob", "PROG"],
+    # r4182002567; #656 5990845570: an absolute path after sudo or doas
+    "sudo": ["sudo", "-u", "bob", "BIN/PROG"],
+    "doas": ["doas", "-u", "bob", "BIN/PROG"],
     "nested": ["env", "nice", "-n", "1", "timeout", "5", "PROG"],
 }
 
@@ -5221,6 +5381,13 @@ UNREADABLE_COMMANDS = {
     "member-past-the-length-bound": ["/opt/opendox-test/broker",
                                      "a" * 4097],
     "member-past-the-path-bound": ["/opt/opendox-test/broker", "/a" * 33],
+    # r4182002567; the holder's ruling, #656 5990845570: a bare program
+    # name after sudo or doas is found on a search path their policy picks
+    "sudo-bare-program": ["sudo", "true"],
+    "sudo-option-then-bare-program": ["sudo", "-u", "bob", "true"],
+    "sudo-bare-launcher": ["sudo", "env", "/bin/true"],
+    "doas-bare-program": ["doas", "true"],
+    "doas-option-then-bare-program": ["doas", "-u", "bob", "true"],
 }
 
 
@@ -5365,6 +5532,7 @@ def test_C1_a_launchers_own_options_are_read_as_its_getopt_reads_them(
                  ["env", "A-B=x", *program],
                  ["env", "1A=x", "A.B=y", *program],
                  ["sudo", "--user=bob", *program],
+                 ["doas", "-u", "bob", *program],
                  ["env", "--default-signal", *program],
                  ["env", "--help"]):
         assert trust_mod.broker_command_refused(
