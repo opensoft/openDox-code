@@ -108,9 +108,10 @@ FORBIDDEN_SERVED_SUBCOMMANDS = ("checkout", "switch", "reset", "stash", "restore
 # landing fast-forwards the served checkout, its index and its HEAD to the merge
 # commit the lander made in its own landing worktree. The guard admits that move
 # by an ARGUMENT check, not by name: exactly `git merge --ff-only <commit>`, a
-# full object id, at the served ROOT, while the served checkout holds `main` and
-# `git status --porcelain` is empty, and nothing else (`SERVED_FAST_FORWARD_ARGV`,
-# `served_fast_forward_commit`). So `merge` stays absent here, `merge
+# full object id, with the two settings that could change its meaning pinned
+# (`SERVED_FAST_FORWARD_PINS`), at the served ROOT, while the served checkout
+# holds `main` and `git status --porcelain` is empty, and nothing else
+# (`SERVED_FAST_FORWARD_ARGV`, `served_fast_forward_commit`). So `merge` stays absent here, `merge
 # <branch>` and every other spelling stay refused, and a dirty checkout or one on
 # another branch is never moved.
 SERVED_ALLOWED_SUBCOMMANDS = frozenset({
@@ -119,14 +120,34 @@ SERVED_ALLOWED_SUBCOMMANDS = frozenset({
     "rev-list", "rev-parse", "show", "show-ref", "status", "worktree",
 })
 
-# The ONE argument-checked admission at the served root, above: the argv's
-# first two words, then exactly one full commit id.
-SERVED_FAST_FORWARD_ARGV = ("merge", "--ff-only")
-# The branch the served checkout must hold for it (R2Q7 (a): `main`).
+# The branch the served checkout must hold for the admission below (R2Q7 (a):
+# `main`).
 SERVED_FAST_FORWARD_BRANCH = "main"
+# The configuration that could make `git merge --ff-only` something else, pinned
+# for that one command. MEASURED on git 2.43: with `pull.twohead=ours`, or
+# `branch.main.mergeOptions=-s ours` (or `-s subtree`), `git merge --ff-only
+# <a descendant>` exits 0 having made a NEW merge commit of the strategy's
+# choosing, not a fast-forward; an explicit `--strategy` does not help, because
+# `mergeOptions`' own `-s` still applies beside it. Pinned to git's own strategy
+# and to no branch options, `--ff-only` means what it says (Copilot review of
+# openDox-code#90 led to the measurement).
+SERVED_FAST_FORWARD_PINS = (
+    "-c", "pull.twohead=ort",
+    "-c", f"branch.{SERVED_FAST_FORWARD_BRANCH}.mergeOptions=",
+)
+# The ONE argument-checked admission at the served root, above: exactly these
+# words, then exactly one full commit id. It is `git merge --ff-only <commit>`,
+# with the two settings above pinned.
+SERVED_FAST_FORWARD_ARGV = (*SERVED_FAST_FORWARD_PINS, "merge", "--ff-only")
 # A full object id, SHA-1 or SHA-256: never a branch or a short id, which name
 # whatever they name when git resolves them.
 _OBJECT_ID_SHAPE = re.compile(r"\A(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+
+# Two spellings this module repeats: the prefix of every local branch ref, and
+# the status option that makes every porcelain line name a FILE (an untracked
+# directory's summary line would hide what is in it).
+BRANCH_REF_PREFIX = "refs/heads/"
+UNTRACKED_FILES_ALL = "--untracked-files=all"
 
 # Refused at EVERY cwd. `fetch`/`pull` would touch local refs; the remote is read
 # with `ls-remote` and NEVER fetched.
@@ -298,13 +319,15 @@ def is_served_root(served_root: Path, cwd: Path) -> bool:
 
 
 def served_fast_forward_commit(args: Sequence[str]) -> str | None:
-    """The `<commit>` when `args` is EXACTLY `merge --ff-only <commit>` with a
-    full object id, else None. No option before or after it, no `--`, no branch
+    """The `<commit>` when `args` is EXACTLY `SERVED_FAST_FORWARD_ARGV` and one
+    full object id, else None: `git merge --ff-only <commit>` with its two
+    settings pinned. No other option before or after it, no `--`, no branch
     name and no short id: the one argv the landing's fast-forward issues."""
     argv = tuple(args)
-    if len(argv) != 3 or argv[:2] != SERVED_FAST_FORWARD_ARGV:
+    width = len(SERVED_FAST_FORWARD_ARGV)
+    if len(argv) != width + 1 or argv[:width] != SERVED_FAST_FORWARD_ARGV:
         return None
-    commit = argv[2]
+    commit = argv[width]
     return commit if _OBJECT_ID_SHAPE.match(commit) else None
 
 
@@ -563,10 +586,28 @@ class SessionGit:
         ok, ref = self._try(self.served_root, "rev-parse", "--symbolic-full-name",
                             "HEAD")
         done, listed = self._try(self.served_root, "status", "--porcelain",
-                                 "--untracked-files=all")
+                                 UNTRACKED_FILES_ALL)
         lines = tuple(l for l in listed.splitlines() if l.strip()) if done \
             else ("<git status failed>",)
         return (ref if ok else ""), lines
+
+    def _fast_forward_refusal(self, state: tuple[str, tuple[str, ...]]
+                              ) -> ServedCheckoutImmovable:
+        """Why the landing's fast-forward is refused: the branch the served
+        checkout holds, or what makes it not clean."""
+        ref, lines = state
+        held = (ref.removeprefix(BRANCH_REF_PREFIX)
+                if ref.startswith(BRANCH_REF_PREFIX)
+                else "no branch (a detached HEAD)")
+        why = (f"it holds {held}" if held != SERVED_FAST_FORWARD_BRANCH else
+               f"it is not clean ({'; '.join(l.strip() for l in lines[:5])})")
+        return ServedCheckoutImmovable(
+            f"refusing `git merge --ff-only` against the served checkout "
+            f"{self.served_root}: the landing's fast-forward is admitted only "
+            f"for a CLEAN checkout that holds {SERVED_FAST_FORWARD_BRANCH}, "
+            f"and {why} (R2Q6 (a); feature 007's exceptions). It is never "
+            "switched, reset or stashed to make it so: commit or stash, then "
+            "land again")
 
     def _guard(self, cwd: Path | str, args: Sequence[str]) -> None:
         """Raise `ServedCheckoutImmovable` when the guard refuses, with the reason
@@ -578,28 +619,16 @@ class SessionGit:
         caller's word."""
         fast_forward = (served_fast_forward_commit(args) is not None
                         and is_served_root(self.served_root, Path(cwd)))
-        state: tuple[str, tuple[str, ...]] | None = None
-        if fast_forward:
-            state = self._served_state()
-        clean_main = bool(state) and state[0] == (
-            f"refs/heads/{SERVED_FAST_FORWARD_BRANCH}") and not state[1]
+        state = self._served_state() if fast_forward else None
+        clean_main = state is not None and state[0] == (
+            BRANCH_REF_PREFIX + SERVED_FAST_FORWARD_BRANCH) and not state[1]
         if guard_served_command(self.served_root, Path(cwd), args,
                                 served_on_clean_main=clean_main):
             return
+        if state is not None:
+            raise self._fast_forward_refusal(state)
         routing = command_routing_options(args)
         subcommand = command_subcommand(args)
-        if fast_forward and state is not None:
-            held = state[0][len("refs/heads/"):] if state[0].startswith(
-                "refs/heads/") else "no branch (a detached HEAD)"
-            why = (f"it holds {held}" if held != SERVED_FAST_FORWARD_BRANCH else
-                   f"it is not clean ({'; '.join(l.strip() for l in state[1][:5])})")
-            raise ServedCheckoutImmovable(
-                f"refusing `git merge --ff-only` against the served checkout "
-                f"{self.served_root}: the landing's fast-forward is admitted only "
-                f"for a CLEAN checkout that holds {SERVED_FAST_FORWARD_BRANCH}, "
-                f"and {why} (R2Q6 (a); feature 007's exceptions). It is never "
-                "switched, reset or stashed to make it so: commit or stash, then "
-                "land again")
         if routing:
             raise ServedCheckoutImmovable(
                 f"refusing `git {subcommand or '<no subcommand>'}` carrying "
@@ -704,7 +733,22 @@ class SessionGit:
                 f"the served checkout is fast-forwarded only to a full commit id, "
                 f"and {commit!r} is not one")
         self.git(self.served_root, *SERVED_FAST_FORWARD_ARGV, commit)
-        return self.head(self.served_root)
+        # THEN VERIFY WHERE IT LANDED. The guard's reads and the merge are separate
+        # processes, and git offers no lock against a checkout switched between
+        # them; a switch to another branch at the same commit would have that
+        # branch fast-forwarded instead. That move cannot be prevented from here,
+        # but it is never reported as `main` landing (Copilot review of
+        # openDox-code#90).
+        held, _lines = self._served_state()
+        landed = self.branch_sha(SERVED_FAST_FORWARD_BRANCH)
+        if held != BRANCH_REF_PREFIX + SERVED_FAST_FORWARD_BRANCH or landed != commit:
+            raise SessionGitRefused(
+                f"the fast-forward to {commit} did not land on "
+                f"{SERVED_FAST_FORWARD_BRANCH}: the served checkout changed while "
+                f"it ran (it holds {held or 'nothing readable'}, and "
+                f"{SERVED_FAST_FORWARD_BRANCH} is at {landed or 'no commit'}). "
+                "Look at the served checkout before landing again")
+        return commit
 
     def worktree_remove(self, path: Path | str) -> None:
         """`git worktree remove --force <path>` — teardown, BOTH endings
@@ -738,8 +782,7 @@ class SessionGit:
                 branch, detached, locked, prunable = None, False, False, False
             elif line.startswith("branch "):
                 ref = line[len("branch "):].strip()
-                branch = ref[len("refs/heads/"):] \
-                    if ref.startswith("refs/heads/") else ref
+                branch = ref.removeprefix(BRANCH_REF_PREFIX)
             elif line.strip() == "detached":
                 detached = True
             elif line == "locked" or line.startswith("locked "):
@@ -1102,7 +1145,7 @@ class SessionGit:
         was committed by an earlier commit, so its record could only ride a
         different one (FR-006)."""
         listed = self.git_raw(Path(worktree), "status", "--porcelain",
-                              "--untracked-files=all")
+                              UNTRACKED_FILES_ALL)
         return tuple(porcelain_path(l) for l in listed.splitlines() if l.strip())
 
     # ---- ordinal inputs (FR-026, D17) ----
@@ -1129,7 +1172,7 @@ class SessionGit:
             if "\t" not in line:
                 continue
             ref = line.split("\t", 1)[1].strip()
-            name = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+            name = ref.removeprefix(BRANCH_REF_PREFIX)
             if name.startswith(prefix):
                 names.append(name)
         return tuple(sorted(set(names)))
@@ -1294,7 +1337,7 @@ class SessionGit:
         so every porcelain line names a FILE: an untracked-directory summary
         line would make the prefix filter coarser than the declared prefix."""
         porcelain = self.git_raw(self.served_root, "status", "--porcelain",
-                                 "--untracked-files=all").splitlines()
+                                 UNTRACKED_FILES_ALL).splitlines()
         return ServedFingerprint(
             branch=self.current_branch(self.served_root),
             head=self.head(self.served_root),

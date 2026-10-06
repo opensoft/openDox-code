@@ -567,10 +567,12 @@ def test_the_allowlist_still_admits_every_operation_the_contract_names(git_and_r
     # admits is one ARGUMENT-checked form, `merge --ff-only <commit>`, for a clean
     # checkout on `main`, and only by the guard's argument check below.
     assert "merge" not in sg.SERVED_ALLOWED_SUBCOMMANDS
-    assert sg.SERVED_FAST_FORWARD_ARGV == ("merge", "--ff-only")
+    assert sg.SERVED_FAST_FORWARD_ARGV == (
+        "-c", "pull.twohead=ort", "-c", "branch.main.mergeOptions=",
+        "merge", "--ff-only")
     assert sg.SERVED_FAST_FORWARD_BRANCH == "main"
     commit = "0" * 40
-    admitted = ("merge", "--ff-only", commit)
+    admitted = (*sg.SERVED_FAST_FORWARD_ARGV, commit)
     root = git_and_repo[0].served_root
     assert sg.guard_served_command(root, root, admitted,
                                    served_on_clean_main=True) is True
@@ -600,14 +602,55 @@ def test_the_served_root_admits_the_landings_fast_forward_on_a_clean_main(
         git_and_repo):
     git, repo, runner = git_and_repo
     ahead = _a_commit_ahead_of_main(git, repo)
-    assert repo.branch() == "main" and repo.served_fingerprint().porcelain == ()
+    assert repo.branch() == "main"
+    assert repo.served_fingerprint().porcelain == ()
 
     assert git.fast_forward_served(ahead) == ahead
 
-    assert repo.head("main") == ahead and repo.head() == ahead
+    assert repo.head("main") == ahead
+    assert repo.head() == ahead
     assert repo.branch() == "main"
     assert (repo.root / "ahead.md").read_text(encoding="utf-8") == "ahead\n"
-    assert ("merge", "--ff-only", ahead) in runner.calls
+    assert (*sg.SERVED_FAST_FORWARD_ARGV, ahead) in runner.calls
+
+
+@pytest.mark.parametrize("setting", [("pull.twohead", "ours"),
+                                     ("branch.main.mergeOptions", "-s ours"),
+                                     ("branch.main.mergeOptions", "-s subtree")])
+def test_no_merge_setting_turns_the_fast_forward_into_a_merge(git_and_repo,
+                                                               setting):
+    """MEASURED on git 2.43: under each of these settings a bare `git merge
+    --ff-only <descendant>` exits 0 having made a NEW merge commit. The admitted
+    argv pins them, so the served checkout lands exactly on the commit."""
+    git, repo, _ = git_and_repo
+    ahead = _a_commit_ahead_of_main(git, repo)
+    repo.git("config", *setting)
+
+    assert git.fast_forward_served(ahead) == ahead
+    assert repo.head("main") == ahead
+
+
+def test_a_fast_forward_that_lands_elsewhere_is_never_reported(git_and_repo):
+    """The guard's reads and the merge are separate processes; a checkout
+    switched between them has ANOTHER branch fast-forwarded. That cannot be
+    prevented from here, and it is refused, never returned as `main` landing."""
+    _git, repo, _ = git_and_repo
+
+    class SwitchesFirst(RecordingRunner):
+        def run(self, cwd, *args):
+            if "--ff-only" in args:
+                repo.git("checkout", "-q", "-b", "racer")
+            return super().run(cwd, *args)
+
+    git = sg.SessionGit(repo.root, runner=SwitchesFirst())
+    ahead = _a_commit_ahead_of_main(git, repo)
+    main = repo.head("main")
+
+    with pytest.raises(sg.SessionGitRefused) as refused:
+        git.fast_forward_served(ahead)
+
+    assert "refs/heads/racer" in str(refused.value)
+    assert repo.head("main") == main
 
 
 @pytest.mark.parametrize("dirt", ["tracked", "untracked"])
@@ -649,6 +692,7 @@ def test_the_fast_forward_is_refused_when_the_served_checkout_holds_another_bran
 
 @pytest.mark.parametrize("argv", [
     ("merge", "other-branch"),
+    ("merge", "--ff-only", "{ahead}"),
     ("merge", "--ff-only", "other-branch"),
     ("merge", "--ff-only", "main"),
     ("merge", "--ff-only", "{short}"),
@@ -687,7 +731,7 @@ def test_the_fast_forward_is_refused_from_a_served_subdirectory(git_and_repo):
     n = len(runner.calls)
 
     with pytest.raises(sg.ServedCheckoutImmovable):
-        git.git(repo.root / "ideation", "merge", "--ff-only", ahead)
+        git.git(repo.root / "ideation", *sg.SERVED_FAST_FORWARD_ARGV, ahead)
 
     assert runner.calls[n:] == []
     assert repo.served_fingerprint() == before

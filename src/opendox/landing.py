@@ -62,9 +62,12 @@ Its `land` (R2Q6 (a)):
 * refuses, before merging, when the served checkout holds `main` and is not
   clean, naming the remedy (ADV-08), and when another working tree holds `main`;
 * makes the `--no-ff` merge commit in a landing worktree of its own under
-  `<repo>-worktrees/landing/`, detached at `main`'s tip, with rerere off so no
-  recorded resolution answers a conflict for the human; a conflict raises
-  `MergeConflict` with the paths and the remedy, and nothing moves (OQ-038-1);
+  `<repo>-worktrees/landing/`, detached at `main`'s tip, with git's own
+  strategy and drivers only: `.gitattributes` and the global attributes file
+  are taken out of the merge, a driver this machine's own attributes still
+  select is refused before merging, and rerere is off, so nothing but a human
+  answers a conflict; a conflict raises `MergeConflict` with the paths and the
+  remedy, and nothing moves (OQ-038-1);
 * then moves `main`: where the served checkout holds it (and is still clean),
   by `git merge --ff-only <merge commit>` there, the one move feature 007's
   guard admits at the served root (T013); where it holds another branch, by a
@@ -79,6 +82,7 @@ surface, so feature 007's guard sees every one of them.
 
 from __future__ import annotations
 
+import os
 import re
 import secrets
 import shutil
@@ -156,6 +160,18 @@ SERVED_LEFT = "left"
 LANDING_SUBDIR = "landing"
 
 _OBJECT_ID = re.compile(r"\A(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+#: The empty tree, per object format: the attribute source that carries no
+#: `.gitattributes` at all (`git --attr-source`, git 2.42 and later).
+_EMPTY_TREE = {
+    "sha1": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    "sha256": "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321",
+}
+#: The `merge` attribute's values that select git's OWN drivers. Anything else
+#: (`union`, or a driver configured by name) can resolve a conflict with no human.
+_GITS_OWN_MERGE_VALUES = frozenset({"unspecified", "set", "unset", "text",
+                                    "binary"})
+#: How many paths one `check-attr` call names.
+_PATHS_PER_CHECK = 200
 _GITLINK_OR_LINK = ("120000", "160000")
 _REGULAR_FILE_MODES = ("100644", "100755")
 _URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^/@\s]*@")
@@ -194,7 +210,7 @@ class LandingRefused(Exception):
     `governed-without-an-instrument`, `instrument-failed`,
     `confirmation:<case>`, `remote-unreadable`, `remote-main-not-contained`,
     `dirty-served-checkout`, `main-checked-out-elsewhere`, `merge-failed`,
-    `landing-worktree`, `not-a-merge-commit`,
+    `landing-worktree`, `merge-driver`, `not-a-merge-commit`,
     `fast-forward-no-longer-applies`, `main-moved`,
     `merge-conflict`, `governed` (a governed repository with an instrument
     binds no lander). Nothing was merged and `main` is where it was."""
@@ -319,16 +335,38 @@ _DuplicateKeyLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _strict_mapping)
 
 
-def _parse_declaration(text: str) -> tuple[str | None, str]:
-    """The declared value, or None and why the file is not a declaration."""
-    loader = _DuplicateKeyLoader(text)
+#: Everything PyYAML raises on malformed input that fits the size bound: its own
+#: errors (a NUL is a `ReaderError` raised while the loader is BUILT), a
+#: `ValueError` from a constructor (an impossible date), and a `RecursionError`
+#: from deep nesting. Each is a declaration that is not one, never a traceback
+#: (the same set `doxbench_binding.read_settings_document` catches).
+_PARSER_FAILURES = (yaml.YAMLError, ValueError, TypeError, RecursionError)
+
+
+def _load_declaration(text: str) -> tuple[Any, str]:
+    """The parsed document, or None and why it does not parse."""
     try:
-        data = loader.get_single_data()
-    except yaml.YAMLError as broken:
-        first = (str(broken).splitlines() or ["unparseable"])[0]
-        return None, f"it is not valid YAML ({first})"
+        loader = _DuplicateKeyLoader(text)
+    except _PARSER_FAILURES as broken:
+        return None, _parse_failure(broken)
+    try:
+        return loader.get_single_data(), ""
+    except _PARSER_FAILURES as broken:
+        return None, _parse_failure(broken)
     finally:
         loader.dispose()
+
+
+def _parse_failure(broken: BaseException) -> str:
+    first = (str(broken).splitlines() or [type(broken).__name__])[0]
+    return f"it is not valid YAML ({first})"
+
+
+def _parse_declaration(text: str) -> tuple[str | None, str]:
+    """The declared value, or None and why the file is not a declaration."""
+    data, why = _load_declaration(text)
+    if why:
+        return None, why
     if not isinstance(data, dict):
         return None, "it is not a mapping"
     keys = set(data)
@@ -376,7 +414,7 @@ def _read_declaration(git: SessionGit, main: str) -> tuple[str | None, str, str]
                 f"it is {size} bytes, more than the {_DECLARATION_LIMIT} a "
                 "declaration of three lines can need")
         text = git.git_raw(root, "cat-file", "blob", oid)
-    except (GitError, UnicodeDecodeError, ValueError) as failed:
+    except (GitError, ValueError) as failed:     # UnicodeDecodeError is a ValueError
         return None, "invalid-declaration", f"it cannot be read as text ({failed})"
     value, why = _parse_declaration(text)
     if value is None:
@@ -408,7 +446,13 @@ def _registered_host() -> _HostReading | None:
                             failure=f"{type(failed).__name__}: {failed}")
     from . import default_profile
 
-    if profile is default_profile:
+    # PROVENANCE, NOT IDENTITY. openDox's own default is not a host only where an
+    # ENTRY POINT registered it (`register_default`). A host that registers the
+    # same module itself holds a host's registration (`domain_profile.register`'s
+    # docstring), so it governs like any host. `domain_profile` keeps that fact in
+    # `_is_default` and publishes no accessor for it yet; it is read here rather
+    # than inferred from the object.
+    if profile is default_profile and getattr(domain_profile, "_is_default", False):
         return None
     name = domain_profile.name_of(profile)
     try:
@@ -426,19 +470,8 @@ def _registered_host() -> _HostReading | None:
     return _HostReading(name, instrument=facet)
 
 
-def read_governance(checkout_root: Path | str, *, local: bool = False,
-                    env: Mapping[str, str] | None = None,
-                    runner: GitRunner | None = None) -> GovernanceReading:
-    """Who governs `checkout_root`, and why: see the module docstring.
-
-    `local` is `--local`, which selects the local install exactly as
-    `OPENDOX_INSTALL_MODE=local` does; `env` is the environment the install
-    mode is read from (the process's own when None)."""
-    root = Path(checkout_root)
-    if not root.is_dir():
-        return _unknown("not-a-repository",
-                        f"{root} is not a directory, so it is no repository")
-    git = SessionGit(root, runner=runner)
+def _repository_reading(git: SessionGit, root: Path) -> GovernanceReading | str:
+    """`main`'s tip, or why the checkout cannot be read at all (step 1)."""
     top = _read(git, git.served_root, "rev-parse", "--show-toplevel")
     try:
         is_top = bool(top) and Path(top).resolve() == git.served_root
@@ -456,34 +489,33 @@ def read_governance(checkout_root: Path | str, *, local: bool = False,
             f"nothing lands. Create `{DEFAULT_BRANCH}` with git (for example "
             f"`git branch -m <your default branch> {DEFAULT_BRANCH}`) to land "
             "here"))
+    return main
 
-    from .runtime import config as runtime_config
 
-    try:
-        mode = runtime_config.install_mode(env, local_flag=local)
-    except runtime_config.ConfigurationError as refused:
-        return _unknown("install-mode-refused", str(refused), main=main)
+def _host_governance(host: _HostReading, main: str) -> GovernanceReading:
+    """A registered host decides, whatever any file says (step 3)."""
+    if host.failure is not None:
+        return _unknown("host-failed-to-load", (
+            f"the registered host profile {host.name} failed to load "
+            f"({host.failure}), so who governs this repository is unknown "
+            "and no lander is bound (#1144 12.6a)"), host=host.name, main=main)
+    if host.instrument is not None:
+        return GovernanceReading(GOVERNED, "host-instrument", (
+            f"the registered host profile {host.name} governs this "
+            f"repository and declares an instrument ({INSTRUMENT_FACET}), "
+            "which outranks any declaration (R2Q4 (a))"),
+            host=host.name, instrument=host.instrument, main=main)
+    return GovernanceReading(GOVERNED, "host-without-an-instrument", (
+        f"the registered host profile {host.name} governs this repository, "
+        f"and it declares no instrument ({INSTRUMENT_FACET}): the repository "
+        "is governed-without-an-instrument, so no lander is bound and "
+        "nothing lands here; a governed repository lands through its "
+        "governance (#1144 12.6a)"), host=host.name, main=main)
 
-    host = _registered_host()
-    if host is not None:
-        if host.failure is not None:
-            return _unknown("host-failed-to-load", (
-                f"the registered host profile {host.name} failed to load "
-                f"({host.failure}), so who governs this repository is unknown "
-                "and no lander is bound (#1144 12.6a)"), host=host.name, main=main)
-        if host.instrument is not None:
-            return GovernanceReading(GOVERNED, "host-instrument", (
-                f"the registered host profile {host.name} governs this "
-                f"repository and declares an instrument ({INSTRUMENT_FACET}), "
-                "which outranks any declaration (R2Q4 (a))"),
-                host=host.name, instrument=host.instrument, main=main)
-        return GovernanceReading(GOVERNED, "host-without-an-instrument", (
-            f"the registered host profile {host.name} governs this repository, "
-            f"and it declares no instrument ({INSTRUMENT_FACET}): the repository "
-            "is governed-without-an-instrument, so no lander is bound and "
-            "nothing lands here; a governed repository lands through its "
-            "governance (#1144 12.6a)"), host=host.name, main=main)
 
+def _declared_governance(git: SessionGit, main: str, mode: str,
+                         local_mode: str) -> GovernanceReading:
+    """`main`'s declaration decides, where no host does (step 4)."""
     value, code, why = _read_declaration(git, main)
     if value is None and code == "no-declaration":
         return _unknown(code, _no_declaration_reason(main), main=main)
@@ -500,7 +532,7 @@ def read_governance(checkout_root: Path | str, *, local: bool = False,
             "it is governed-without-an-instrument, so no lander is bound and "
             "nothing lands here; it lands through its governance (#1144 12.6a)"),
             main=main)
-    if mode != runtime_config.INSTALL_MODE_LOCAL:
+    if mode != local_mode:
         return _unknown("install-mode-disagrees", (
             f"{DECLARATION_PATH} at `main` declares this repository standalone, "
             f"and this is the {mode} install: standalone needs the explicit "
@@ -510,6 +542,35 @@ def read_governance(checkout_root: Path | str, *, local: bool = False,
     return GovernanceReading(STANDALONE, "declared-standalone", (
         f"{DECLARATION_PATH} at `main` declares this repository standalone, on "
         "the local install"), main=main)
+
+
+def read_governance(checkout_root: Path | str, *, local: bool = False,
+                    env: Mapping[str, str] | None = None,
+                    runner: GitRunner | None = None) -> GovernanceReading:
+    """Who governs `checkout_root`, and why: see the module docstring.
+
+    `local` is `--local`, which selects the local install exactly as
+    `OPENDOX_INSTALL_MODE=local` does; `env` is the environment the install
+    mode is read from (the process's own when None)."""
+    root = Path(checkout_root)
+    if not root.is_dir():
+        return _unknown("not-a-repository",
+                        f"{root} is not a directory, so it is no repository")
+    git = SessionGit(root, runner=runner)
+    main = _repository_reading(git, root)
+    if isinstance(main, GovernanceReading):
+        return main
+
+    from .runtime import config as runtime_config
+
+    try:
+        mode = runtime_config.install_mode(env, local_flag=local)
+    except runtime_config.ConfigurationError as refused:
+        return _unknown("install-mode-refused", str(refused), main=main)
+    host = _registered_host()
+    if host is not None:
+        return _host_governance(host, main)
+    return _declared_governance(git, main, mode, runtime_config.INSTALL_MODE_LOCAL)
 
 
 def repository_governance(checkout_root: Path | str, *, local: bool = False,
@@ -591,45 +652,46 @@ class NeutralLander:
         return branch
 
     def _check_remotes(self, main: str) -> None:
-        """N-16: local `main` must contain each checked remote's `main`."""
+        """N-16: local `main` must contain each checked remote's `main`: the one
+        named `origin`, else every attached remote."""
         listed = self.git.git(self.checkout_root, "remote")
         names = [name for name in listed.split() if name]
-        if not names:
-            return
         if "origin" in names:
             names = ["origin"]
         for name in names:
-            if name.startswith("-"):
-                raise LandingRefused(
-                    f"a remote is named {name!r}, like an option; rename it before "
-                    "landing", code="remote-unreadable")
-            try:
-                answer = self.git.git(self.checkout_root, "ls-remote", name,
-                                      f"refs/heads/{DEFAULT_BRANCH}")
-            except GitError as failed:
-                raise LandingRefused(
-                    f"`land` reads the remote {name!r}'s `{DEFAULT_BRANCH}` with "
-                    f"`git ls-remote` before it merges, and could not "
-                    f"({_redact(failed.stderr) or 'no reason given'}). It refuses "
-                    "rather than land a `main` that may not contain the remote's; "
-                    "fix or remove the remote, then land again",
-                    code="remote-unreadable") from None
-            tip = None
-            for line in answer.splitlines():
-                sha, _tab, ref = line.partition("\t")
-                if ref.strip() == f"refs/heads/{DEFAULT_BRANCH}":
-                    tip = sha.strip()
-            if not tip:
-                continue                             # N-16: no remote `main`
-            if not (self.git.has_object(tip) and self.git.is_ancestor(tip, main)):
-                raise LandingRefused(
-                    f"the remote {name!r}'s `{DEFAULT_BRANCH}` is at {tip[:12]}, "
-                    f"which your local `{DEFAULT_BRANCH}` does not contain. `land` "
-                    "never fetches or pulls, so it refuses rather than make a "
-                    f"`{DEFAULT_BRANCH}` that diverges from the remote's. Bring "
-                    f"the remote's `{DEFAULT_BRANCH}` into yours yourself (for "
-                    f"example `git pull` with `{DEFAULT_BRANCH}` checked out), then "
-                    "land again", code="remote-main-not-contained")
+            self._check_remote(name, main)
+
+    def _check_remote(self, name: str, main: str) -> None:
+        if name.startswith("-"):
+            raise LandingRefused(
+                f"a remote is named {name!r}, like an option; rename it before "
+                "landing", code="remote-unreadable")
+        try:
+            answer = self.git.git(self.checkout_root, "ls-remote", name,
+                                  f"refs/heads/{DEFAULT_BRANCH}")
+        except GitError as failed:
+            raise LandingRefused(
+                f"`land` reads the remote {name!r}'s `{DEFAULT_BRANCH}` with "
+                f"`git ls-remote` before it merges, and could not "
+                f"({_redact(failed.stderr) or 'no reason given'}). It refuses "
+                "rather than land a `main` that may not contain the remote's; "
+                "fix or remove the remote, then land again",
+                code="remote-unreadable") from None
+        tips = [sha.strip() for sha, _tab, ref in
+                (line.partition("\t") for line in answer.splitlines())
+                if ref.strip() == f"refs/heads/{DEFAULT_BRANCH}"]
+        if not tips:
+            return                                   # N-16: no remote `main`
+        tip = tips[-1]
+        if not (self.git.has_object(tip) and self.git.is_ancestor(tip, main)):
+            raise LandingRefused(
+                f"the remote {name!r}'s `{DEFAULT_BRANCH}` is at {tip[:12]}, "
+                f"which your local `{DEFAULT_BRANCH}` does not contain. `land` "
+                "never fetches or pulls, so it refuses rather than make a "
+                f"`{DEFAULT_BRANCH}` that diverges from the remote's. Bring "
+                f"the remote's `{DEFAULT_BRANCH}` into yours yourself (for "
+                f"example `git pull` with `{DEFAULT_BRANCH}` checked out), then "
+                "land again", code="remote-main-not-contained")
 
     def _check_served(self) -> bool:
         """True when the served checkout holds `main` (and is clean). ADV-08."""
@@ -680,20 +742,76 @@ class NeutralLander:
             except (GitError, SessionGitRefused):    # pragma: no cover
                 pass
 
+    # ---- the merge: git's own drivers, and a conflict always shown ----
+    def _attribute_neutral(self, path: Path) -> tuple[str, ...]:
+        """The options that take `.gitattributes` and the global attributes file
+        out of the merge, so no committed or ambient attribute selects a merge
+        driver (Copilot review of openDox-code#90: `merge=union` resolved an
+        overlapping edit into a clean two-parent merge)."""
+        found = _read(self.git, path, "rev-parse", "--show-object-format")
+        empty = _EMPTY_TREE.get(found or "sha1")
+        if empty is None:
+            raise LandingRefused(
+                f"this repository's object format is {found!r}, which `land` does "
+                "not know an empty tree for; nothing was merged",
+                code="merge-failed")
+        return (f"--attr-source={empty}", "-c", f"core.attributesFile={os.devnull}")
+
+    def _changed_paths(self, path: Path, main: str, head: str) -> list[str]:
+        """Every path either side changed since their merge base(s)."""
+        bases = (_read(self.git, path, "merge-base", "--all", main, head) or "").split()
+        changed: set[str] = set()
+        for base in bases:
+            for tip in (main, head):
+                listed = self.git.git_raw(path, "diff", "--no-ext-diff",
+                                          "--no-textconv", "--no-renames",
+                                          "--name-only", "-z", base, tip)
+                changed.update(name for name in listed.split("\0") if name)
+        return sorted(changed)
+
+    def _refuse_merge_drivers(self, path: Path, neutral: tuple[str, ...],
+                              branch: str, main: str, head: str) -> None:
+        """Refuse BEFORE merging where an attribute this machine still applies
+        (its `$GIT_DIR/info/attributes`, or the system's) selects a merge driver
+        other than git's own for a path either side changed: such a driver can
+        resolve a conflict with no human (#1144 12.6)."""
+        names = self._changed_paths(path, main, head)
+        drivers: list[str] = []
+        for start in range(0, len(names), _PATHS_PER_CHECK):
+            listed = self.git.git_raw(path, *neutral, "check-attr", "-z", "merge",
+                                      "--", *names[start:start + _PATHS_PER_CHECK])
+            fields = listed.split("\0")
+            for name, value in zip(fields[0::3], fields[2::3]):
+                if name and value not in _GITS_OWN_MERGE_VALUES:
+                    drivers.append(f"{name} (merge={value})")
+        if drivers:
+            raise LandingRefused(
+                f"{', '.join(drivers[:5])} carry a `merge` attribute that selects a "
+                "driver other than git's own, set on this machine (in "
+                "`$GIT_DIR/info/attributes` or the system's gitattributes). Such "
+                "a driver can resolve a conflict with no human, and `land` never "
+                "lets one (#1144 12.6), so nothing was merged. Remove the "
+                f"attribute, or merge {branch} with git yourself",
+                code="merge-driver")
+
     def _merge(self, path: Path, branch: str, head: str, main: str) -> str:
+        neutral = self._attribute_neutral(path)
+        self._refuse_merge_drivers(path, neutral, branch, main, head)
         message = (f"Merge branch '{branch}'\n\n"
                    f"Landed with `opendox land`: a human confirmed {branch} at "
                    f"{head}.\n")
         try:
-            self.git.git_raw(path, "-c", "rerere.enabled=false", "merge",
-                             "--no-ff", "--no-edit", "-m", message, head)
+            # `--strategy=ort`: git's own strategy, so no `pull.twohead` setting
+            # chooses another (`ours` would drop the branch with no conflict);
+            # rerere off, so no recorded resolution answers for the human.
+            self.git.git_raw(path, *neutral, "-c", "rerere.enabled=false",
+                             "merge", "--strategy=ort", "--no-ff", "--no-edit",
+                             "-m", message, head)
         except GitError as failed:
-            in_merge = _read(self.git, path, "rev-parse", "-q", "--verify",
-                             "MERGE_HEAD")
             unmerged = self.git.git(path, "diff", "--name-only",
                                     "--diff-filter=U")
             paths = tuple(p for p in unmerged.splitlines() if p.strip())
-            if in_merge or paths:
+            if paths:
                 raise MergeConflict(branch, paths) from None
             raise LandingRefused(
                 f"git could not merge {branch} ({_redact(failed.stderr)}); "
@@ -732,6 +850,16 @@ class NeutralLander:
                     "where it was and nothing landed",
                     code="fast-forward-no-longer-applies") from None
             return SERVED_FAST_FORWARDED
+        holder = self._holder_of_main()
+        if holder is not None:
+            # Re-read: a working tree that took `main` while the merge was made
+            # would be left with its index and files behind a moved ref
+            # (Copilot review of openDox-code#90).
+            raise LandingRefused(
+                f"`{DEFAULT_BRANCH}` was checked out at {holder} while the merge "
+                f"was made, and `land` moves `{DEFAULT_BRANCH}` by its ref alone "
+                f"only where no working tree holds it; `{DEFAULT_BRANCH}` is where "
+                "it was. Land again", code="main-checked-out-elsewhere")
         try:
             self.git.git(path, "update-ref", "-m", "opendox land",
                          f"refs/heads/{DEFAULT_BRANCH}", merged, main)

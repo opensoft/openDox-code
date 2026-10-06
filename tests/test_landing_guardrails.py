@@ -269,32 +269,49 @@ def lander(world: World, **kwargs) -> NeutralLander:
     return NeutralLander(world.root, **kwargs)
 
 
+def refusal(act, *args, **kwargs) -> LandingRefused:
+    """The `LandingRefused` one call raises: ONE invocation inside the check."""
+    with pytest.raises(LandingRefused) as refused:
+        act(*args, **kwargs)
+    return refused.value
+
+
+def confirmation_refusal(act, *args, **kwargs) -> ConfirmationRefused:
+    with pytest.raises(ConfirmationRefused) as refused:
+        act(*args, **kwargs)
+    return refused.value
+
+
+def parents_of(world: World, commit: str) -> list[str]:
+    return world.git("rev-list", "--parents", "-n", "1", commit).split()
+
+
 # ==========================================================================
 # F12.2's thirteen nodes
 # ==========================================================================
 
-def test_land_requires_an_explicit_human_act(world, monkeypatch, tmp_path):
+def test_land_requires_an_explicit_human_act(world, monkeypatch):
     """Every way of building a confirmation that is not a human act is refused:
     a flag, a configuration key, a stdin that is not a terminal. The human act
     itself, the branch name typed at the controlling terminal, lands."""
     before = world.refs()
+    port = lander(world)
+    head = world.head(BRANCH)
     # A FLAG, or any value that stands in for one.
     for flag in (None, True, 1, "yes", "--yes", BRANCH, {"confirmed": True},
-                 (BRANCH, world.head(BRANCH))):
-        with pytest.raises(LandingRefused) as refused:
-            lander(world).land(BRANCH, confirmation=flag)
-        assert refused.value.code == "confirmation:not-a-confirmation", flag
+                 (BRANCH, head)):
+        refused = refusal(port.land, BRANCH, confirmation=flag)
+        assert refused.code == "confirmation:not-a-confirmation", flag
     # A CONFIGURATION KEY: the environment and git's own configuration.
     world.git("config", "opendox.confirm", "true")
     world.git("config", "opendox.autoland", "true")
-    keyed = {**LOCAL, "OPENDOX_LAND_CONFIRM": "yes", "OPENDOX_AUTO_LAND": "1",
-             "OPENDOX_LAND_WITHOUT_CONFIRMATION": "true"}
-    with pytest.raises(LandingRefused) as refused:
-        NeutralLander(world.root, env=keyed).land(BRANCH, confirmation=None)
-    assert refused.value.code == "confirmation:not-a-confirmation"
+    keyed = NeutralLander(world.root, env={
+        **LOCAL, "OPENDOX_LAND_CONFIRM": "yes", "OPENDOX_AUTO_LAND": "1",
+        "OPENDOX_LAND_WITHOUT_CONFIRMATION": "true"})
+    refused = refusal(keyed.land, BRANCH, confirmation=None)
+    assert refused.code == "confirmation:not-a-confirmation"
     assert world.refs() == before
 
-    head = world.head(BRANCH)
     # A STDIN THAT IS NOT A TERMINAL, in a child with no controlling terminal
     # either, the branch name piped in: refused for the stdin, before the
     # terminal is even asked.
@@ -315,30 +332,29 @@ def test_land_requires_an_explicit_human_act(world, monkeypatch, tmp_path):
         done.stdout, done.stderr)
     # the same in process, and the two other ways the prompt refuses
     at_terminal(monkeypatch, f"{BRANCH}\n", stdin_tty=False)
-    with pytest.raises(ConfirmationRefused) as refused:
-        landing_confirm.confirm_at_terminal(BRANCH, head)
-    assert refused.value.code == "stdin-not-a-terminal"
+    refused = confirmation_refusal(landing_confirm.confirm_at_terminal, BRANCH, head)
+    assert refused.code == "stdin-not-a-terminal"
 
     def no_terminal():
         raise OSError(6, "No such device or address")
     monkeypatch.setattr(landing_confirm, "_stdin_is_a_terminal", lambda: True)
     monkeypatch.setattr(landing_confirm, "_open_controlling_terminal", no_terminal)
-    with pytest.raises(ConfirmationRefused) as refused:
-        landing_confirm.confirm_at_terminal(BRANCH, head)
-    assert refused.value.code == "no-terminal"
+    refused = confirmation_refusal(landing_confirm.confirm_at_terminal, BRANCH, head)
+    assert refused.code == "no-terminal"
     for answer in ("y\n", "yes\n", "\n", f"{BRANCH} \n", "main\n"):
         at_terminal(monkeypatch, answer)
-        with pytest.raises(ConfirmationRefused) as refused:
-            landing_confirm.confirm_at_terminal(BRANCH, head)
-        assert refused.value.code == "answer-mismatch", answer
+        refused = confirmation_refusal(landing_confirm.confirm_at_terminal,
+                                       BRANCH, head)
+        assert refused.code == "answer-mismatch", answer
     assert world.refs() == before
 
     # THE HUMAN ACT: the branch's name typed at the controlling terminal.
     terminal = at_terminal(monkeypatch, f"{BRANCH}\n")
     confirmation = landing_confirm.confirm_at_terminal(BRANCH, head)
-    assert BRANCH in terminal.shown and head in terminal.shown
+    assert BRANCH in terminal.shown
+    assert head in terminal.shown
     assert confirmation.issuer == landing_confirm.ISSUER_TTY
-    landed = lander(world).land(BRANCH, confirmation=confirmation)
+    landed = port.land(BRANCH, confirmation=confirmation)
     assert world.head("refs/heads/main") == landed.merge_commit
 
 
@@ -347,19 +363,20 @@ def test_land_shows_a_conflict_and_does_not_resolve_it(tmp_path):
     world.branch_with(BRANCH, "doc.md", "the branch's words\n")
     world.on_main("doc.md", "main's words\n")
     before = (world.refs(), world.fingerprint())
+    port, token = lander(world), mint(world)
 
-    with pytest.raises(MergeConflict) as conflict:
-        lander(world).land(BRANCH, confirmation=mint(world))
+    with pytest.raises(MergeConflict) as caught:
+        port.land(BRANCH, confirmation=token)
 
-    assert conflict.value.paths == ("doc.md",)
-    assert conflict.value.code == "merge-conflict"
-    assert "bring `main` into sess-1" in conflict.value.remedy
-    assert "doc.md" in str(conflict.value) and conflict.value.remedy in str(
-        conflict.value)
+    conflict = caught.value
+    assert conflict.paths == ("doc.md",)
+    assert conflict.code == "merge-conflict"
+    assert "bring `main` into sess-1" in conflict.remedy
+    assert "doc.md" in str(conflict)
+    assert conflict.remedy in str(conflict)
     # nothing merged, nothing resolved, nothing left behind
     assert (world.refs(), world.fingerprint()) == before
-    assert world.git("rev-parse", "-q", "--verify", "MERGE_HEAD",
-                     check=False) == ""
+    assert world.git("rev-parse", "-q", "--verify", "MERGE_HEAD", check=False) == ""
     assert world.worktrees() == [world.root.resolve()]
     assert (world.root / "doc.md").read_text(encoding="utf-8") == "main's words\n"
 
@@ -371,12 +388,12 @@ def test_a_landed_merge_is_a_commit_that_git_revert_undoes(world):
     landed = lander(world).land(BRANCH, confirmation=mint(world))
 
     assert isinstance(landed, Landed)
-    assert landed.previous_main == previous and landed.pushed is False
+    assert landed.previous_main == previous
+    assert landed.pushed is False
     assert landed.served_checkout == landing.SERVED_FAST_FORWARDED
     # a --no-ff MERGE COMMIT: main's old tip first, the branch's head second
-    parents = world.git("rev-list", "--parents", "-n", "1",
-                        landed.merge_commit).split()
-    assert parents == [landed.merge_commit, previous, head]
+    assert parents_of(world, landed.merge_commit) == [landed.merge_commit,
+                                                      previous, head]
     assert world.head("refs/heads/main") == landed.merge_commit
     assert world.head() == landed.merge_commit
     assert (world.root / "notes/session.md").is_file()
@@ -387,6 +404,21 @@ def test_a_landed_merge_is_a_commit_that_git_revert_undoes(world):
     assert not (world.root / "notes/session.md").exists()
 
 
+def _teach_rerere(world: World, tmp_path: Path) -> None:
+    """Record a resolution of the coming conflict, so a merge that consulted
+    rerere would answer the conflict for the human."""
+    teach = tmp_path / "teach"
+    world.git("worktree", "add", "-q", "--detach", str(teach), "main")
+    world.git("merge", "--no-ff", "--no-edit", BRANCH, cwd=teach, check=False)
+    assert world.git("rev-parse", "-q", "--verify", "MERGE_HEAD", cwd=teach,
+                     check=False), "the teaching merge did not conflict"
+    world.write("doc.md", "a recorded resolution\n", cwd=teach)
+    world.git("add", "doc.md", cwd=teach)
+    world.git("commit", "-q", "-m", "the recorded resolution", cwd=teach)
+    world.git("worktree", "remove", "--force", str(teach))
+    assert (world.root / ".git/rr-cache").is_dir()
+
+
 def test_no_configuration_enables_automatic_landing(tmp_path):
     """The configuration surface, walked: no key switches a guardrail off.
 
@@ -394,9 +426,11 @@ def test_no_configuration_enables_automatic_landing(tmp_path):
     configuration (the install mode is read through `runtime.config`, the one
     reading of the selector). Dynamically, every setting openDox declares is set,
     with every plausible landing key beside them, and git's own configuration is
-    set the ways that would skip a merge commit or answer a conflict for the
-    human: still no landing without a confirmation, a conflict is still shown
-    with its paths, and a landing is still a two-parent merge commit."""
+    set every way that would skip a merge commit or answer a conflict for the
+    human (a fast-forward-only merge, a recorded resolution, a strategy that
+    keeps one side, an attribute that picks a merge driver): still no landing
+    without a confirmation, a conflict is still shown with its path, and a
+    landing is still a two-parent merge commit."""
     for module in (landing, landing_confirm):
         tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -413,45 +447,41 @@ def test_no_configuration_enables_automatic_landing(tmp_path):
     everything.update({"OPENDOX_AUTO_LAND": "1", "OPENDOX_LAND_CONFIRM": "yes",
                        "OPENDOX_LAND_WITHOUT_CONFIRMATION": "true",
                        "OPENDOX_LAND_NO_FF": "false", "OPENDOX_GUARDRAILS": "off"})
+    union = tmp_path / "union.gitattributes"
+    union.write_text("* merge=union\n", encoding="utf-8")
+    git_config = (("merge.ff", "only"), ("rerere.enabled", "true"),
+                  ("rerere.autoUpdate", "true"), ("pull.twohead", "ours"),
+                  ("branch.main.mergeOptions", "-X theirs"),
+                  ("core.attributesFile", str(union)),
+                  ("opendox.autoland", "true"), ("opendox.confirm", "true"))
 
-    world = World(tmp_path)
-    for key, value in (("merge.ff", "only"), ("rerere.enabled", "true"),
-                       ("rerere.autoUpdate", "true"),
-                       ("branch.main.mergeOptions", "-X theirs"),
-                       ("opendox.autoland", "true"), ("opendox.confirm", "true")):
-        world.git("config", key, value)
+    world = World(tmp_path / "conflicting")
     world.branch_with(BRANCH, "doc.md", "the branch's words\n")
     world.on_main("doc.md", "main's words\n")
-    # TEACH rerere this exact conflict's resolution, so a merge that consulted it
-    # would answer the conflict for the human
-    teach = tmp_path / "teach"
-    world.git("worktree", "add", "-q", "--detach", str(teach), "main")
-    world.git("merge", "--no-ff", "--no-edit", BRANCH, cwd=teach, check=False)
-    assert world.git("rev-parse", "-q", "--verify", "MERGE_HEAD", cwd=teach,
-                     check=False), "the teaching merge did not conflict"
-    world.write("doc.md", "a recorded resolution\n", cwd=teach)
-    world.git("add", "doc.md", cwd=teach)
-    world.git("commit", "-q", "-m", "the recorded resolution", cwd=teach)
-    world.git("worktree", "remove", "--force", str(teach))
-    assert world.git("rerere", "status") == "" and (world.root / ".git/rr-cache").is_dir()
+    world.git("config", "rerere.enabled", "true")
+    world.git("config", "rerere.autoUpdate", "true")
+    _teach_rerere(world, tmp_path)
+    for key, value in git_config:
+        world.git("config", key, value)
 
     configured = NeutralLander(world.root, env=everything)
-    with pytest.raises(LandingRefused) as refused:
-        configured.land(BRANCH, confirmation=None)
-    assert refused.value.code == "confirmation:not-a-confirmation"
+    refused = refusal(configured.land, BRANCH, confirmation=None)
+    assert refused.code == "confirmation:not-a-confirmation"
+    token = mint(world)
     with pytest.raises(MergeConflict) as conflict:
-        configured.land(BRANCH, confirmation=mint(world))
+        configured.land(BRANCH, confirmation=token)
     assert conflict.value.paths == ("doc.md",), (
-        "a recorded resolution answered the conflict for the human")
+        "configuration answered the conflict for the human")
 
-    # and a clean landing is still a merge COMMIT under `merge.ff=only`
+    # and a clean landing is still a merge COMMIT, under the same configuration
     clean = World(tmp_path / "clean")
-    clean.git("config", "merge.ff", "only")
+    for key, value in git_config:
+        clean.git("config", key, value)
     clean.branch_with(BRANCH, "notes/session.md", "work\n")
     landed = NeutralLander(clean.root, env=everything).land(
         BRANCH, confirmation=mint(clean))
-    assert len(clean.git("rev-list", "--parents", "-n", "1",
-                         landed.merge_commit).split()) == 3
+    assert len(parents_of(clean, landed.merge_commit)) == 3
+    assert (clean.root / "notes/session.md").is_file()
 
 
 def test_a_governed_repository_binds_no_lander(world):
@@ -461,19 +491,19 @@ def test_a_governed_repository_binds_no_lander(world):
     assert landing.repository_governance(world.root, env=LOCAL) == GOVERNED
     assert landing.bound_lander(world.root, env=LOCAL) is None
     # a lander built by hand lands nothing here either
-    with pytest.raises(LandingRefused) as refused:
-        lander(world).land(BRANCH, confirmation=mint(world))
-    assert refused.value.code == "governed"
+    port, token = lander(world), mint(world)
+    assert refusal(port.land, BRANCH, confirmation=token).code == "governed"
     # the landing is SUBMITTED through the host's instrument, and nothing merges
-    report = landing.request_landing(world.root, BRANCH,
-                                     confirmation=mint(world), env=LOCAL)
+    token = mint(world)
+    report = landing.request_landing(world.root, BRANCH, confirmation=token,
+                                     env=LOCAL)
     assert report["ref"] == f"refs/heads/{BRANCH}"
-    assert [port.submitted for port in host.ports][-1] == [BRANCH]
+    assert host.ports[-1].submitted == [BRANCH]
     assert world.refs() == before
     # ...and it is still a confirmed act: no confirmation, nothing submitted
-    with pytest.raises(LandingRefused) as refused:
-        landing.request_landing(world.root, BRANCH, confirmation=None, env=LOCAL)
-    assert refused.value.code == "confirmation:not-a-confirmation"
+    refused = refusal(landing.request_landing, world.root, BRANCH,
+                      confirmation=None, env=LOCAL)
+    assert refused.code == "confirmation:not-a-confirmation"
     assert sum(len(port.submitted) for port in host.ports) == 1
 
 
@@ -485,13 +515,12 @@ def test_an_unknown_governance_binds_no_lander(tmp_path):
     reading = landing.read_governance(world.root, env=LOCAL)
     assert (reading.governance, reading.code) == (UNKNOWN, "no-declaration")
     assert landing.bound_lander(world.root, env=LOCAL) is None
-    for attempt in (lambda: lander(world).land(BRANCH, confirmation=mint(world)),
-                    lambda: landing.request_landing(world.root, BRANCH,
-                                                    confirmation=mint(world),
-                                                    env=LOCAL)):
-        with pytest.raises(LandingRefused) as refused:
-            attempt()
-        assert refused.value.code == "no-declaration"
+    port, token = lander(world), mint(world)
+    assert refusal(port.land, BRANCH, confirmation=token).code == "no-declaration"
+    token = mint(world)
+    refused = refusal(landing.request_landing, world.root, BRANCH,
+                      confirmation=token, env=LOCAL)
+    assert refused.code == "no-declaration"
     assert world.refs() == before
 
 
@@ -502,10 +531,10 @@ def test_a_host_profile_that_fails_to_load_binds_no_lander(world):
     assert (reading.governance, reading.code) == (UNKNOWN, "host-failed-to-load")
     assert "the host's adapter module is not installed" in reading.reason
     assert landing.bound_lander(world.root, env=LOCAL) is None
-    with pytest.raises(LandingRefused) as refused:
-        landing.request_landing(world.root, BRANCH, confirmation=mint(world),
-                                env=LOCAL)
-    assert refused.value.code == "host-failed-to-load"
+    token = mint(world)
+    refused = refusal(landing.request_landing, world.root, BRANCH,
+                      confirmation=token, env=LOCAL)
+    assert refused.code == "host-failed-to-load"
 
 
 def test_a_branch_cannot_declare_its_own_governance(tmp_path):
@@ -518,12 +547,12 @@ def test_a_branch_cannot_declare_its_own_governance(tmp_path):
 
     assert landing.repository_governance(world.root, env=LOCAL) == UNKNOWN
     assert landing.bound_lander(world.root, env=LOCAL) is None
-    with pytest.raises(LandingRefused) as refused:
-        landing.request_landing(world.root, BRANCH, confirmation=mint(world),
-                                env=LOCAL)
-    assert refused.value.code == "no-declaration"
-    with pytest.raises(LandingRefused):
-        lander(world).land(BRANCH, confirmation=mint(world))
+    token = mint(world)
+    refused = refusal(landing.request_landing, world.root, BRANCH,
+                      confirmation=token, env=LOCAL)
+    assert refused.code == "no-declaration"
+    port, token = lander(world), mint(world)
+    assert refusal(port.land, BRANCH, confirmation=token).code == "no-declaration"
     assert world.refs() == before
 
     # nor can a branch turn a governed `main` standalone
@@ -552,30 +581,29 @@ def test_a_registered_host_outranks_any_declaration(world):
     assert (reading.governance, reading.code) == (GOVERNED,
                                                   "host-without-an-instrument")
     assert landing.bound_lander(world.root, env=LOCAL) is None
-    with pytest.raises(LandingRefused) as refused:
-        landing.request_landing(world.root, BRANCH, confirmation=mint(world),
-                                env=LOCAL)
-    assert refused.value.code == "governed-without-an-instrument"
+    token = mint(world)
+    refused = refusal(landing.request_landing, world.root, BRANCH,
+                      confirmation=token, env=LOCAL)
+    assert refused.code == "governed-without-an-instrument"
 
 
 def test_a_directly_constructed_confirmation_is_refused(world):
     before = world.refs()
-    with pytest.raises(ConfirmationRefused) as refused:
-        Confirmation(BRANCH, world.head(BRANCH), "tty")
-    assert refused.value.code == "constructed-directly"
-    with pytest.raises(ConfirmationRefused):
-        Confirmation()
+    head = world.head(BRANCH)
+    refused = confirmation_refusal(Confirmation, BRANCH, head, "tty")
+    assert refused.code == "constructed-directly"
+    assert confirmation_refusal(Confirmation).code == "constructed-directly"
 
     # built around the constructor, with every field a minted one would have
     forged = object.__new__(Confirmation)
-    for name, value in (("_branch", BRANCH), ("_head", world.head(BRANCH)),
+    for name, value in (("_branch", BRANCH), ("_head", head),
                         ("_issuer", "tty"), ("_key", "0" * 64)):
         object.__setattr__(forged, name, value)
     bare = object.__new__(Confirmation)
+    port = lander(world)
     for token in (forged, bare):
-        with pytest.raises(LandingRefused) as refused:
-            lander(world).land(BRANCH, confirmation=token)
-        assert refused.value.code == "confirmation:constructed-directly"
+        refused = refusal(port.land, BRANCH, confirmation=token)
+        assert refused.code == "confirmation:constructed-directly"
     assert world.refs() == before
 
     # a minted one cannot be duplicated or rewritten either
@@ -592,36 +620,36 @@ def test_a_directly_constructed_confirmation_is_refused(world):
 def test_a_confirmation_for_another_branch_or_head_is_refused(world):
     world.branch_with("sess-2", "notes/other.md", "other work\n")
     main = world.head("refs/heads/main")
-    with pytest.raises(LandingRefused) as refused:
-        lander(world).land(BRANCH, confirmation=mint(world, "sess-2"))
-    assert refused.value.code == "confirmation:another-branch"
+    port, token = lander(world), mint(world, "sess-2")
+    assert refusal(port.land, BRANCH,
+                   confirmation=token).code == "confirmation:another-branch"
 
     stale = mint(world)                              # minted at the old head
     world.branch_with(BRANCH, "notes/later.md", "a later commit\n")
-    with pytest.raises(LandingRefused) as refused:
-        lander(world).land(BRANCH, confirmation=stale)
-    assert refused.value.code == "confirmation:another-head"
+    assert refusal(port.land, BRANCH,
+                   confirmation=stale).code == "confirmation:another-head"
     assert world.head("refs/heads/main") == main
 
 
 def test_a_spent_confirmation_is_refused(world):
     confirmation = mint(world)
-    landed = lander(world).land(BRANCH, confirmation=confirmation)
+    port = lander(world)
+    landed = port.land(BRANCH, confirmation=confirmation)
     assert confirmation.spent is True
 
     world.branch_with(BRANCH, "notes/more.md", "more work\n")
-    with pytest.raises(LandingRefused) as refused:
-        lander(world).land(BRANCH, confirmation=confirmation)
-    assert refused.value.code == "confirmation:spent"
+    assert refusal(port.land, BRANCH,
+                   confirmation=confirmation).code == "confirmation:spent"
     assert world.head("refs/heads/main") == landed.merge_commit
 
     # a confirmation refused for its binding is spent by that presentation too
-    wrong = mint(world, "main", head=world.head("refs/heads/main"))
-    with pytest.raises(LandingRefused):
-        lander(world).land(BRANCH, confirmation=wrong)
-    with pytest.raises(ConfirmationRefused) as refused:
-        landing_confirm.redeem(wrong, branch="main", head=world.head("main"))
-    assert refused.value.code == "spent"
+    main = world.head("refs/heads/main")
+    wrong = mint(world, "main", head=main)
+    assert refusal(port.land, BRANCH,
+                   confirmation=wrong).code == "confirmation:another-branch"
+    refused = confirmation_refusal(landing_confirm.redeem, wrong, branch="main",
+                                   head=main)
+    assert refused.code == "spent"
 
 
 # ---- the static check: no module outside the two layers calls an issuer ----
@@ -631,24 +659,48 @@ ALLOWED_CALLERS = frozenset({"opendox/cli_branch_actions.py",
 REACH_NAMES = frozenset(landing_confirm.ISSUER_NAMES) | {"_mint", "_LIVE", "_SPENT"}
 
 
+def _reach_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.alias):
+        return node.asname if node.asname in REACH_NAMES else \
+            node.name.rsplit(".", 1)[-1]
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
 def issuer_reaches(source: str) -> list[tuple[int, str]]:
     """Every place a module's source names an issuer: as a name, an attribute,
     an imported name, or a string literal (a `getattr`)."""
-    hits: list[tuple[int, str]] = []
-    for node in ast.walk(ast.parse(source)):
-        name = None
-        if isinstance(node, ast.Name):
-            name = node.id
-        elif isinstance(node, ast.Attribute):
-            name = node.attr
-        elif isinstance(node, ast.alias):
-            name = node.asname if node.asname in REACH_NAMES else \
-                node.name.rsplit(".", 1)[-1]
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            name = node.value
-        if name in REACH_NAMES:
-            hits.append((getattr(node, "lineno", 0), name))
-    return hits
+    return [(getattr(node, "lineno", 0), name)
+            for node in ast.walk(ast.parse(source))
+            if (name := _reach_name(node)) in REACH_NAMES]
+
+
+def _inside_landing_confirm() -> tuple[set[str], set[str], set[str]]:
+    """Which functions of `landing_confirm` call `_mint`, build a token around
+    the constructor, and record a live key."""
+    tree = ast.parse(Path(landing_confirm.__file__).read_text(encoding="utf-8"))
+    callers, builders, recorders = set(), set(), set()
+    functions = [f for f in ast.walk(tree)
+                 if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    for function in functions:
+        for node in ast.walk(function):
+            if isinstance(node, ast.Name) and node.id == "_mint" \
+                    and function.name != "_mint":
+                callers.add(function.name)
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "__new__"
+                    and getattr(node.func.value, "id", "") == "object"):
+                builders.add(function.name)
+            if (isinstance(node, ast.Subscript)
+                    and getattr(node.value, "id", "") == "_LIVE"
+                    and isinstance(node.ctx, ast.Store)):
+                recorders.add(function.name)
+    return callers, builders, recorders
 
 
 def test_only_the_interactive_layers_call_an_issuer():
@@ -663,7 +715,7 @@ def test_only_the_interactive_layers_call_an_issuer():
             continue
         for line, name in issuer_reaches(path.read_text(encoding="utf-8")):
             offenders.append(f"{rel}:{line} names {name}")
-    assert offenders == [], offenders
+    assert offenders == []
 
     # the check is not vacuous: each spelling of a reach is caught
     for planted in ("from opendox.landing_confirm import confirm_at_terminal\n",
@@ -677,23 +729,7 @@ def test_only_the_interactive_layers_call_an_issuer():
     # INSIDE the module: `_mint` is reached from the two issuers and nowhere
     # else, only `_mint` builds a token around the constructor, and only `_mint`
     # records a live key. So no other issuer exists.
-    source = Path(landing_confirm.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    callers, builders, recorders = set(), set(), set()
-    for function in ast.walk(tree):
-        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for node in ast.walk(function):
-            if isinstance(node, ast.Name) and node.id == "_mint" and function.name != "_mint":
-                callers.add(function.name)
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "__new__"
-                    and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id == "object"):
-                builders.add(function.name)
-            if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
-                    and node.value.id == "_LIVE" and isinstance(node.ctx, ast.Store)):
-                recorders.add(function.name)
+    callers, builders, recorders = _inside_landing_confirm()
     assert callers == {"confirm_at_terminal", "confirm_nonce"}
     assert builders == {"_mint"}
     assert recorders == {"_mint"}
@@ -712,23 +748,23 @@ def test_a_repository_with_no_main_is_unknown_and_refused_naming_it(tmp_path):
     assert (reading.governance, reading.code) == (UNKNOWN, "no-main")
     assert landing.repository_governance(world.root, env=LOCAL) == UNKNOWN
     assert landing.bound_lander(world.root, env=LOCAL) is None
-    with pytest.raises(LandingRefused) as refused:
-        landing.request_landing(world.root, BRANCH, confirmation=mint(world),
-                                env=LOCAL)
-    assert refused.value.code == "no-main"
-    assert "no branch named `main`" in str(refused.value)
+    token = mint(world)
+    refused = refusal(landing.request_landing, world.root, BRANCH,
+                      confirmation=token, env=LOCAL)
+    assert refused.code == "no-main"
+    assert "no branch named `main`" in str(refused)
     assert world.refs() == before
 
 
 def test_no_declaration_refuses_naming_the_file_and_its_content(tmp_path):
     world = World(tmp_path, declaration=None)
     world.branch_with(BRANCH, "notes/session.md", "work\n")
+    token = mint(world)
 
-    with pytest.raises(LandingRefused) as refused:
-        landing.request_landing(world.root, BRANCH, confirmation=mint(world),
-                                env=LOCAL)
-    message = str(refused.value)
-    assert refused.value.code == "no-declaration"
+    refused = refusal(landing.request_landing, world.root, BRANCH,
+                      confirmation=token, env=LOCAL)
+    message = str(refused)
+    assert refused.code == "no-declaration"
     assert DECLARATION_PATH in message
     assert DECLARATION_CONTENT in message
     assert DECLARATION_CONTENT == ("schema_version: 1\nkind: opendox-governance\n"
@@ -744,12 +780,13 @@ def test_no_declaration_refuses_naming_the_file_and_its_content(tmp_path):
 def test_a_dirty_served_checkout_on_main_is_refused_before_merging(world):
     world.write("doc.md", "an uncommitted edit\n")
     before = (world.refs(), world.fingerprint())
+    port, token = lander(world), mint(world)
 
-    with pytest.raises(LandingRefused) as refused:
-        lander(world).land(BRANCH, confirmation=mint(world))
+    refused = refusal(port.land, BRANCH, confirmation=token)
 
-    assert refused.value.code == "dirty-served-checkout"
-    assert "commit or stash" in str(refused.value) and "doc.md" in str(refused.value)
+    assert refused.code == "dirty-served-checkout"
+    assert "commit or stash" in str(refused)
+    assert "doc.md" in str(refused)
     assert (world.refs(), world.fingerprint()) == before
     assert world.worktrees() == [world.root.resolve()]
     assert not (world.tmp / "plain-worktrees" / landing.LANDING_SUBDIR).exists()
@@ -757,9 +794,9 @@ def test_a_dirty_served_checkout_on_main_is_refused_before_merging(world):
     # an untracked file makes it not clean too
     world.git("checkout", "--", "doc.md")
     world.write("scratch.txt", "untracked\n")
-    with pytest.raises(LandingRefused) as refused:
-        lander(world).land(BRANCH, confirmation=mint(world))
-    assert refused.value.code == "dirty-served-checkout"
+    token = mint(world)
+    assert refusal(port.land, BRANCH,
+                   confirmation=token).code == "dirty-served-checkout"
     assert world.refs() == before[0]
 
 
@@ -779,10 +816,28 @@ class RecordingRunner(session_git.SubprocessGitRunner):
         return [session_git.command_subcommand(args) for _cwd, args in self.calls]
 
 
+def _bare_remote(tmp_path: Path, name: str, *, initial: str | None = "main") -> Path:
+    remote = tmp_path / f"{name}.git"
+    argv = ["git", "init", "-q", "--bare", str(remote)]
+    if initial:
+        argv.insert(4, f"--initial-branch={initial}")
+    subprocess.run(argv, check=True, capture_output=True)
+    return remote
+
+
+def _advance_remote_main(tmp_path: Path, remote: Path, label: str) -> None:
+    """Someone else pushes a commit to the remote's `main`."""
+    other = World(tmp_path / label, declaration=None)
+    other.git("remote", "add", "origin", str(remote))
+    other.git("fetch", "-q", "origin")
+    other.git("reset", "-q", "--hard", "origin/main")
+    other.write("theirs.md", "their work\n")
+    other.commit("their work", "theirs.md")
+    other.git("push", "-q", "origin", "main")
+
+
 def test_the_lander_merges_in_its_own_worktree_and_pushes_nothing(world, tmp_path):
-    remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "-q", "--bare", "--initial-branch=main",
-                    str(remote)], check=True, capture_output=True)
+    remote = _bare_remote(tmp_path, "remote")
     world.git("remote", "add", "origin", str(remote))
     world.git("push", "-q", "origin", "main")
     remote_before = subprocess.run(["git", "-C", str(remote), "for-each-ref"],
@@ -796,10 +851,11 @@ def test_the_lander_merges_in_its_own_worktree_and_pushes_nothing(world, tmp_pat
               if session_git.command_subcommand(args) == "merge"]
     no_ff = [cwd for cwd, args in merges if "--no-ff" in args]
     container = (tmp_path / "plain-worktrees" / landing.LANDING_SUBDIR).resolve()
-    assert len(no_ff) == 1 and container in no_ff[0].resolve().parents
+    assert len(no_ff) == 1
+    assert container in no_ff[0].resolve().parents
     # the served checkout moved by the admitted fast-forward and nothing else
     served = [args for cwd, args in merges if cwd.resolve() == world.root.resolve()]
-    assert served == [("merge", "--ff-only", landed.merge_commit)]
+    assert served == [(*session_git.SERVED_FAST_FORWARD_ARGV, landed.merge_commit)]
     # nothing fetched, pulled or pushed, and the remote is as it was
     assert not {"fetch", "pull", "push"} & set(runner.subcommands())
     assert "ls-remote" in runner.subcommands()
@@ -827,70 +883,95 @@ def test_main_held_by_another_working_tree_is_refused(world, tmp_path):
     world.git("checkout", "-q", "-b", "elsewhere")
     world.git("worktree", "add", "-q", str(tmp_path / "holder"), "main")
     before = world.refs()
-    with pytest.raises(LandingRefused) as refused:
-        lander(world).land(BRANCH, confirmation=mint(world))
-    assert refused.value.code == "main-checked-out-elsewhere"
+    port, token = lander(world), mint(world)
+    assert refusal(port.land, BRANCH,
+                   confirmation=token).code == "main-checked-out-elsewhere"
     assert world.refs() == before
+
+
+def test_main_checked_out_during_the_merge_is_refused_before_its_ref_moves(
+        world, tmp_path):
+    """A working tree that takes `main` while the detached merge is made would be
+    left behind a moved ref, so the holder is read again before the ref-only
+    update (Copilot review of openDox-code#90)."""
+    world.git("checkout", "-q", "-b", "elsewhere")
+    holder = tmp_path / "late-holder"
+
+    class TakesMainDuringTheMerge(session_git.SubprocessGitRunner):
+        def run(self, cwd, *args):
+            done = super().run(cwd, *args)
+            if "--no-ff" in args:
+                world.git("worktree", "add", "-q", str(holder), "main")
+            return done
+
+    previous = world.head("refs/heads/main")
+    port, token = lander(world, runner=TakesMainDuringTheMerge()), mint(world)
+    refused = refusal(port.land, BRANCH, confirmation=token)
+    assert refused.code == "main-checked-out-elsewhere"
+    assert str(holder.resolve()) in str(refused)
+    assert world.head("refs/heads/main") == previous
+
+
+def test_a_served_checkout_switched_during_the_fast_forward_is_never_reported(
+        world):
+    """The guard's reads and the fast-forward are separate processes, and git
+    offers no lock against a checkout switched between them. The move that race
+    makes is never reported as `main` landing (Copilot review of #90)."""
+
+    class SwitchesBeforeTheFastForward(session_git.SubprocessGitRunner):
+        def run(self, cwd, *args):
+            if "--ff-only" in args:
+                world.git("checkout", "-q", "-b", "racer")
+            return super().run(cwd, *args)
+
+    previous = world.head("refs/heads/main")
+    port = lander(world, runner=SwitchesBeforeTheFastForward())
+    token = mint(world)
+    refused = refusal(port.land, BRANCH, confirmation=token)
+    assert refused.code == "fast-forward-no-longer-applies"
+    assert "refs/heads/racer" in str(refused)
+    assert world.head("refs/heads/main") == previous
 
 
 def test_a_remote_main_that_local_main_lacks_is_refused_naming_the_remedy(world,
                                                                           tmp_path):
-    remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "-q", "--bare", "--initial-branch=main",
-                    str(remote)], check=True, capture_output=True)
+    remote = _bare_remote(tmp_path, "remote")
     world.git("remote", "add", "origin", str(remote))
     world.git("push", "-q", "origin", "main")
-    # someone else advances the remote's main
-    other = World(tmp_path / "other", declaration=None)
-    other.git("remote", "add", "origin", str(remote))
-    other.git("fetch", "-q", "origin")
-    other.git("reset", "-q", "--hard", "origin/main")
-    other.write("theirs.md", "their work\n")
-    other.commit("their work", "theirs.md")
-    other.git("push", "-q", "origin", "main")
+    _advance_remote_main(tmp_path, remote, "other")
     before = world.refs()
+    port, token = lander(world), mint(world)
 
-    with pytest.raises(LandingRefused) as refused:
-        lander(world).land(BRANCH, confirmation=mint(world))
-    assert refused.value.code == "remote-main-not-contained"
-    assert "git pull" in str(refused.value) and "origin" in str(refused.value)
+    refused = refusal(port.land, BRANCH, confirmation=token)
+    assert refused.code == "remote-main-not-contained"
+    assert "git pull" in str(refused)
+    assert "origin" in str(refused)
     assert world.refs() == before
 
 
-def test_a_remote_with_no_main_and_no_remote_both_pass(tmp_path):
-    for case in ("no-remote", "empty-remote", "other-branches-only"):
-        world = World(tmp_path / case)
-        world.branch_with(BRANCH, "notes/session.md", "work\n")
-        if case != "no-remote":
-            remote = tmp_path / f"{case}.git"
-            subprocess.run(["git", "init", "-q", "--bare", str(remote)],
-                           check=True, capture_output=True)
-            world.git("remote", "add", "upstream", str(remote))
-            if case == "other-branches-only":
-                world.git("push", "-q", "upstream", f"{BRANCH}:refs/heads/side")
-        landed = lander(world).land(BRANCH, confirmation=mint(world))
-        assert world.head("refs/heads/main") == landed.merge_commit, case
+@pytest.mark.parametrize("case", ["no-remote", "empty-remote",
+                                  "other-branches-only"])
+def test_a_remote_with_no_main_and_no_remote_both_pass(tmp_path, case):
+    world = World(tmp_path)
+    world.branch_with(BRANCH, "notes/session.md", "work\n")
+    if case != "no-remote":
+        remote = _bare_remote(tmp_path, case, initial=None)
+        world.git("remote", "add", "upstream", str(remote))
+        if case == "other-branches-only":
+            world.git("push", "-q", "upstream", f"{BRANCH}:refs/heads/side")
+    landed = lander(world).land(BRANCH, confirmation=mint(world))
+    assert world.head("refs/heads/main") == landed.merge_commit
 
 
 def test_several_remotes_and_none_named_origin_are_each_checked(world, tmp_path):
-    for name, ahead in (("first", False), ("second", True)):
-        remote = tmp_path / f"{name}.git"
-        subprocess.run(["git", "init", "-q", "--bare", "--initial-branch=main",
-                        str(remote)], check=True, capture_output=True)
-        world.git("remote", "add", name, str(remote))
+    for name in ("first", "second"):
+        world.git("remote", "add", name, str(_bare_remote(tmp_path, name)))
         world.git("push", "-q", name, "main")
-        if ahead:
-            other = World(tmp_path / f"{name}-clone", declaration=None)
-            other.git("remote", "add", "origin", str(remote))
-            other.git("fetch", "-q", "origin")
-            other.git("reset", "-q", "--hard", "origin/main")
-            other.write("theirs.md", "their work\n")
-            other.commit("their work", "theirs.md")
-            other.git("push", "-q", "origin", "main")
-    with pytest.raises(LandingRefused) as refused:
-        lander(world).land(BRANCH, confirmation=mint(world))
-    assert refused.value.code == "remote-main-not-contained"
-    assert "'second'" in str(refused.value)
+    _advance_remote_main(tmp_path, tmp_path / "second.git", "second-clone")
+    port, token = lander(world), mint(world)
+    refused = refusal(port.land, BRANCH, confirmation=token)
+    assert refused.code == "remote-main-not-contained"
+    assert "'second'" in str(refused)
 
 
 def test_a_fast_forward_that_no_longer_applies_refuses_leaving_main(world):
@@ -904,10 +985,10 @@ def test_a_fast_forward_that_no_longer_applies_refuses_leaving_main(world):
                 type(self).moved = world.commit("a late commit on main", "late.md")
             return done
 
-    with pytest.raises(LandingRefused) as refused:
-        lander(world, runner=MainMovesDuringTheMerge()).land(
-            BRANCH, confirmation=mint(world))
-    assert refused.value.code == "fast-forward-no-longer-applies"
+    port = lander(world, runner=MainMovesDuringTheMerge())
+    token = mint(world)
+    refused = refusal(port.land, BRANCH, confirmation=token)
+    assert refused.code == "fast-forward-no-longer-applies"
     assert world.head("refs/heads/main") == MainMovesDuringTheMerge.moved
     assert world.worktrees() == [world.root.resolve()]
 
@@ -928,29 +1009,24 @@ def test_main_moved_under_a_left_checkout_refuses_leaving_main(world):
                 type(self).moved = late
             return done
 
-    with pytest.raises(LandingRefused) as refused:
-        lander(world, runner=MainMovesDuringTheMerge()).land(
-            BRANCH, confirmation=mint(world))
-    assert refused.value.code == "main-moved"
+    port = lander(world, runner=MainMovesDuringTheMerge())
+    token = mint(world)
+    assert refusal(port.land, BRANCH, confirmation=token).code == "main-moved"
     assert world.head("refs/heads/main") == MainMovesDuringTheMerge.moved
 
 
 def test_land_refuses_main_itself_and_a_branch_already_landed(world):
-    with pytest.raises(LandingRefused) as refused:
-        lander(world).land("main", confirmation=mint(world, "main",
-                                                     world.head("main")))
-    assert refused.value.code == "branch-is-main"
-    with pytest.raises(LandingRefused) as refused:
-        landing.request_landing(world.root, "main", confirmation=None, env=LOCAL)
-    assert refused.value.code == "branch-is-main"
-    with pytest.raises(LandingRefused) as refused:
-        lander(world).land("no-such", confirmation=None)
-    assert refused.value.code == "no-such-branch"
+    port = lander(world)
+    token = mint(world, "main", world.head("main"))
+    assert refusal(port.land, "main", confirmation=token).code == "branch-is-main"
+    refused = refusal(landing.request_landing, world.root, "main",
+                      confirmation=None, env=LOCAL)
+    assert refused.code == "branch-is-main"
+    assert refusal(port.land, "no-such", confirmation=None).code == "no-such-branch"
 
-    lander(world).land(BRANCH, confirmation=mint(world))
-    with pytest.raises(LandingRefused) as refused:
-        lander(world).land(BRANCH, confirmation=mint(world))
-    assert refused.value.code == "already-landed"
+    port.land(BRANCH, confirmation=mint(world))
+    token = mint(world)
+    assert refusal(port.land, BRANCH, confirmation=token).code == "already-landed"
 
 
 def test_the_seam_is_one_operation_declared_in_session_pr(world):
@@ -966,6 +1042,76 @@ def test_the_seam_is_one_operation_declared_in_session_pr(world):
     with pytest.raises(TypeError):
         Landed(branch=BRANCH, merge_commit="a" * 40, previous_main="b" * 40,
                served_checkout=landing.SERVED_LEFT, pushed=True)
+
+
+# ==========================================================================
+# git's own merge drivers, and a failure that is not a conflict
+# ==========================================================================
+
+def _conflicting_world(tmp_path: Path, *, main_attributes: str | None = None) -> World:
+    world = World(tmp_path)
+    world.branch_with(BRANCH, "doc.md", "the branch's words\n")
+    if main_attributes is not None:
+        world.write(".gitattributes", main_attributes)
+        world.commit("attributes on main", ".gitattributes")
+    world.on_main("doc.md", "main's words\n")
+    return world
+
+
+def test_a_merge_attribute_in_the_tree_cannot_resolve_a_conflict(tmp_path):
+    """`merge=union` on `main` would combine both sides' words into a clean merge
+    commit; the landing merge takes `.gitattributes` out, so the conflict is
+    shown (Copilot review of openDox-code#90)."""
+    world = _conflicting_world(tmp_path, main_attributes="doc.md merge=union\n")
+    before = world.refs()
+    port, token = lander(world), mint(world)
+    with pytest.raises(MergeConflict) as conflict:
+        port.land(BRANCH, confirmation=token)
+    assert conflict.value.paths == ("doc.md",)
+    assert world.refs() == before
+
+
+@pytest.mark.parametrize("attributes,config", [
+    ("doc.md merge=union\n", ()),
+    ("* merge=mine\n", (("merge.mine.driver", "cp %B %A"),)),
+])
+def test_a_merge_driver_this_machine_selects_is_refused_before_merging(
+        tmp_path, attributes, config):
+    world = _conflicting_world(tmp_path)
+    info = Path(world.git("rev-parse", "--git-common-dir"))
+    info = (info if info.is_absolute() else world.root / info) / "info"
+    info.mkdir(parents=True, exist_ok=True)
+    (info / "attributes").write_text(attributes, encoding="utf-8")
+    for key, value in config:
+        world.git("config", key, value)
+    before = world.refs()
+    port, token = lander(world), mint(world)
+
+    refused = refusal(port.land, BRANCH, confirmation=token)
+
+    assert refused.code == "merge-driver"
+    assert "doc.md" in str(refused)
+    assert world.refs() == before
+    assert world.worktrees() == [world.root.resolve()]
+
+
+def test_a_merge_that_fails_without_a_conflict_keeps_git_s_reason(world):
+    """A conflict-free merge whose commit git cannot make (a hook refuses it)
+    leaves `MERGE_HEAD` and no unmerged path: it is `merge-failed` with git's
+    words, never a conflict with no paths (Copilot review of #90)."""
+    hook = world.hooks / "pre-merge-commit"
+    hook.write_text("#!/bin/sh\necho 'the hook refuses this merge' >&2\nexit 1\n",
+                    encoding="utf-8")
+    hook.chmod(0o755)
+    before = world.refs()
+    port, token = lander(world), mint(world)
+
+    refused = refusal(port.land, BRANCH, confirmation=token)
+
+    assert not isinstance(refused, MergeConflict)
+    assert refused.code == "merge-failed"
+    assert "the hook refuses this merge" in str(refused)
+    assert world.refs() == before
 
 
 # ==========================================================================
@@ -989,6 +1135,11 @@ def test_the_seam_is_one_operation_declared_in_session_pr(world):
      "governance: standalone\n", "merge key"),
     ("- standalone\n", "not a mapping"),
     ("governance: [unclosed\n", "not valid YAML"),
+    ("schema_version: 1\x00\nkind: opendox-governance\ngovernance: standalone\n",
+     "not valid YAML"),
+    ("schema_version: 1\nkind: 2001-02-30\ngovernance: standalone\n",
+     "not valid YAML"),
+    ("[" * 2000 + "]" * 2000 + "\n", "not valid YAML"),
     ("schema_version: 1\nkind: opendox-governance\ngovernance: standalone\n# "
      + "x" * 5000 + "\n", "bytes"),
 ])
@@ -996,7 +1147,8 @@ def test_a_declaration_that_is_not_one_is_unknown(tmp_path, content, why):
     world = World(tmp_path, declaration=content)
     reading = landing.read_governance(world.root, env=LOCAL)
     assert (reading.governance, reading.code) == (UNKNOWN, "invalid-declaration")
-    assert why in reading.reason and DECLARATION_CONTENT in reading.reason
+    assert why in reading.reason
+    assert DECLARATION_CONTENT in reading.reason
     assert landing.bound_lander(world.root, env=LOCAL) is None
 
 
@@ -1024,18 +1176,19 @@ def test_standalone_needs_the_explicit_local_install(world):
     assert landing.repository_governance(
         world.root, env={"OPENDOX_INSTALL_MODE": "hosted"}) == UNKNOWN
     # `--local` selects local exactly as the setting does (FR-007; ADV-38)
-    assert landing.repository_governance(world.root, local=True, env=HOSTED) == \
-        STANDALONE
+    assert landing.repository_governance(world.root, local=True,
+                                         env=HOSTED) == STANDALONE
     assert landing.repository_governance(world.root, env=LOCAL) == STANDALONE
     # and a flag and a setting that disagree are refused, naming both
     reading = landing.read_governance(world.root, local=True,
                                       env={"OPENDOX_INSTALL_MODE": "hosted"})
     assert (reading.governance, reading.code) == (UNKNOWN, "install-mode-refused")
-    assert "--local" in reading.reason and "OPENDOX_INSTALL_MODE" in reading.reason
+    assert "--local" in reading.reason
+    assert "OPENDOX_INSTALL_MODE" in reading.reason
     assert landing.bound_lander(world.root, env=HOSTED) is None
-    with pytest.raises(LandingRefused) as refused:
-        NeutralLander(world.root, env=HOSTED).land(BRANCH, confirmation=mint(world))
-    assert refused.value.code == "install-mode-disagrees"
+    port, token = NeutralLander(world.root, env=HOSTED), mint(world)
+    assert refusal(port.land, BRANCH,
+                   confirmation=token).code == "install-mode-disagrees"
 
 
 def test_a_governed_declaration_with_no_host_is_governed_without_an_instrument(
@@ -1046,18 +1199,28 @@ def test_a_governed_declaration_with_no_host_is_governed_without_an_instrument(
     reading = landing.read_governance(world.root, env=LOCAL)
     assert (reading.governance, reading.code) == (GOVERNED, "declared-governed")
     assert landing.bound_lander(world.root, env=LOCAL) is None
-    with pytest.raises(LandingRefused) as refused:
-        landing.request_landing(world.root, BRANCH, confirmation=mint(world),
-                                env=LOCAL)
-    assert refused.value.code == "governed-without-an-instrument"
+    token = mint(world)
+    refused = refusal(landing.request_landing, world.root, BRANCH,
+                      confirmation=token, env=LOCAL)
+    assert refused.code == "governed-without-an-instrument"
 
 
-def test_openDox_s_own_default_profile_is_not_a_host(world):
+def test_openDox_s_own_default_is_a_host_only_when_a_host_registered_it(world):
+    """Provenance, not identity (Copilot review of #90): openDox's own default
+    profile, registered by an ENTRY POINT, is no host; the same module registered
+    by a host through `register()` is a host's registration."""
     from opendox import default_profile
 
     domain_profile.register_default(default_profile)
     assert landing.repository_governance(world.root, env=LOCAL) == STANDALONE
     assert isinstance(landing.bound_lander(world.root, env=LOCAL), NeutralLander)
+
+    domain_profile.unregister()
+    domain_profile.register(default_profile)
+    reading = landing.read_governance(world.root, env=LOCAL)
+    assert (reading.governance, reading.code) == (GOVERNED,
+                                                  "host-without-an-instrument")
+    assert landing.bound_lander(world.root, env=LOCAL) is None
 
 
 def test_a_non_callable_instrument_is_a_host_that_failed_to_load(world):
@@ -1070,9 +1233,8 @@ def test_a_non_callable_instrument_is_a_host_that_failed_to_load(world):
 
 
 def test_a_path_that_is_not_the_top_of_a_working_tree_is_unknown(world, tmp_path):
+    (world.root / "notes").mkdir(exist_ok=True)
     for path in (tmp_path / "nowhere", world.root / "notes", tmp_path):
-        if path == world.root / "notes":
-            path.mkdir(exist_ok=True)
         reading = landing.read_governance(path, env=LOCAL)
         assert (reading.governance, reading.code) == (UNKNOWN, "not-a-repository")
 
@@ -1082,21 +1244,18 @@ def test_the_view_issuer_is_single_use_and_bound_to_its_branch(world):
     head = world.head(BRANCH)
     first = nonces.issue_nonce(BRANCH, head)
     second = nonces.issue_nonce(BRANCH, head)        # replaces the first
-    with pytest.raises(ConfirmationRefused) as refused:
-        nonces.confirm_nonce(BRANCH, first)
-    assert refused.value.code == "nonce-mismatch"
-    with pytest.raises(ConfirmationRefused) as refused:
-        nonces.confirm_nonce(BRANCH, second)           # spent by the attempt above
-    assert refused.value.code == "no-nonce"
+    refused = confirmation_refusal(nonces.confirm_nonce, BRANCH, first)
+    assert refused.code == "nonce-mismatch"
+    refused = confirmation_refusal(nonces.confirm_nonce, BRANCH, second)
+    assert refused.code == "no-nonce"                # spent by the attempt above
     third = nonces.issue_nonce(BRANCH, head)
     confirmation = nonces.confirm_nonce(BRANCH, third)
     assert (confirmation.branch, confirmation.head, confirmation.issuer) == (
         BRANCH, head, landing_confirm.ISSUER_VIEW)
-    with pytest.raises(ConfirmationRefused):
-        nonces.confirm_nonce(BRANCH, third)
-    with pytest.raises(ConfirmationRefused) as refused:
-        nonces.issue_nonce(BRANCH, "not-a-commit")
-    assert refused.value.code == "bad-binding"
+    assert confirmation_refusal(nonces.confirm_nonce, BRANCH,
+                                third).code == "no-nonce"
+    refused = confirmation_refusal(nonces.issue_nonce, BRANCH, "not-a-commit")
+    assert refused.code == "bad-binding"
 
 
 # ==========================================================================
@@ -1106,21 +1265,26 @@ def test_the_view_issuer_is_single_use_and_bound_to_its_branch(world):
 GIT_RUNNER_CALLEES = frozenset({"_git", "out", "run", "git", "git_raw"})
 
 
+def _call_words(node: ast.Call) -> list[str]:
+    words: list[str] = []
+    for arg in node.args:
+        items = arg.elts if isinstance(arg, (ast.List, ast.Tuple)) else [arg]
+        for item in items:
+            if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                words.append(item.value)
+            elif isinstance(item, ast.JoinedStr) and item.values and isinstance(
+                    item.values[0], ast.Constant):
+                words.append(str(item.values[0].value) + "{}")
+    return words
+
+
 def _init_calls(source: str) -> list[tuple[int, list[str]]]:
     """Every `git init` an openDox module issues, with its string arguments."""
     found = []
     for node in ast.walk(ast.parse(source)):
         if not isinstance(node, ast.Call):
             continue
-        words: list[str] = []
-        for arg in node.args:
-            items = arg.elts if isinstance(arg, (ast.List, ast.Tuple)) else [arg]
-            for item in items:
-                if isinstance(item, ast.Constant) and isinstance(item.value, str):
-                    words.append(item.value)
-                elif isinstance(item, ast.JoinedStr) and item.values and isinstance(
-                        item.values[0], ast.Constant):
-                    words.append(str(item.values[0].value) + "{}")
+        words = _call_words(node)
         callee = (node.func.attr if isinstance(node.func, ast.Attribute)
                   else getattr(node.func, "id", ""))
         after_git = any(a == "git" and b == "init" for a, b in zip(words, words[1:]))
@@ -1140,7 +1304,7 @@ def test_every_repository_opendox_creates_names_its_initial_branch():
             "runtime/repository_act.py"} <= modules, sites
     unpinned = [site for site, words in sites.items()
                 if not any(w.startswith("--initial-branch=") for w in words)]
-    assert unpinned == [], unpinned
+    assert unpinned == []
 
 
 def test_the_conformance_corpus_is_born_on_main_whatever_git_defaults_to(
@@ -1159,4 +1323,4 @@ def test_the_conformance_corpus_is_born_on_main_whatever_git_defaults_to(
     for state in (POPULATED, EMPTY):
         held = subprocess.run(["git", "symbolic-ref", "HEAD"], cwd=built / state,
                               text=True, capture_output=True).stdout.strip()
-        assert held == "refs/heads/main", (state, held)
+        assert held == "refs/heads/main", state
