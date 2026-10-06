@@ -110,6 +110,24 @@ slice that discharges it". Three things changed:
      scalar would have made ten of them invisible to the check that was
      supposed to be watching them.
 
+PLAN 038 T025 (W-1 (A), RULED by Brett Heap on opensoft/openxFactory#656
+comment `6013547504`, which reverses S7's one sibling import) makes
+`views/staging-workbench-model.js` import-free again. Three things changed here:
+
+  i.   `test_the_staging_model_is_import_free` pins it: no `import`, static or
+       dynamic, and no `from "..."` re-export, in the code of the model or of any
+       file that inlines `views/display.js` tables.
+  ii.  The tables the model now carries itself are DECLARED in the fixture
+       (`inlined_display_tables`, by path and identifier), and the sweep skips
+       the string literals inside each one's own declaration and nowhere else.
+       `test_every_inlined_display_table_is_real` and
+       `test_the_inlined_tables_are_the_registry_the_model_exports` hold the
+       declaration to the file; that the copies EQUAL `views/display.js`'s is
+       the guard plan 038 T050 adds.
+  iii. `test_every_in_scope_file_reads_the_display_facet` reads the model's facet
+       through `setDisplay`, which the shell calls at mount, instead of through an
+       import the model no longer has.
+
 A CREATED file (this module and its fixture): no carve-manifest row (RULED
 OQ-C) -- the front end's package boundary did not exist before this note, so
 there is nothing for either file to have been carved FROM.
@@ -203,6 +221,23 @@ _PROSE_EXEMPTIONS: list[dict] = _CENSUS["prose_exemptions"]
 _PROSE_EXEMPT_BY_PATH: dict[str, set[str]] = {}
 for _row in _PROSE_EXEMPTIONS:
     _PROSE_EXEMPT_BY_PATH.setdefault(_row["path"], set()).add(_row["literal"])
+# PLAN 038 T025's declared class for assertion 4 (W-1 (A), RULED openxFactory#656
+# comment `6013547504`): the `views/display.js` tables an import-free file carries
+# itself. DATA in the fixture beside a reason, for the same cause as the lists
+# above, and keyed by (path, identifier): the exemption is the one declaration,
+# found by `_declaration_span`, never the identifier wherever it is spelled.
+_INLINED_TABLES: list[dict] = _CENSUS["inlined_display_tables"]
+_INLINED_BY_PATH: dict[str, set[str]] = {}
+for _row in _INLINED_TABLES:
+    _INLINED_BY_PATH.setdefault(_row["path"], set()).add(_row["identifier"])
+
+#: The module the inlined tables copy, the model W-1 (A) makes import-free, and
+#: the export a file that inlines them lists them in, keyed by the
+#: `views/display.js` expression each one copies (the reader plan 038 T050's
+#: inline-parity guard compares).
+DISPLAY_JS_PATH = "views/display.js"
+STAGING_MODEL_PATH = "views/staging-workbench-model.js"
+INLINED_REGISTRY = "INLINED_DISPLAY_TABLES"
 
 
 def _real_web_files() -> set[str]:
@@ -928,6 +963,60 @@ def _css_read_positions(text: str) -> list[tuple[int, str]]:
     return out
 
 
+def _declaration_span(text: str, identifier: str) -> tuple[int, int] | None:
+    """The offsets of the statement `const <identifier> = ...;`, or None.
+
+    `export const` counts too. The statement ends at the first `;` that lies
+    outside every comment, string and regex span and outside every bracket the
+    initializer opened, so a `;` inside a string value cannot end it early and a
+    table that is never closed declares nothing.
+    """
+    m = re.search(r"^[ \t]*(?:export\s+)?const\s+" + re.escape(identifier)
+                  + r"\s*=", text, re.M)
+    if not m:
+        return None
+    skipped = [(start, end) for _, start, end in _js_spans(text) if end > m.end()]
+    depth, i, k, n = 0, m.end(), 0, len(text)
+    while i < n:
+        while k < len(skipped) and skipped[k][1] <= i:
+            k += 1
+        if k < len(skipped) and skipped[k][0] <= i:
+            i = skipped[k][1]
+            continue
+        c = text[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == ";" and depth == 0:
+            return m.start(), i + 1
+        i += 1
+    return None
+
+
+def _inlined_table_spans(path: str, text: str) -> list[tuple[int, int]]:
+    """The declarations of the tables the census says `path` inlines."""
+    spans = []
+    for identifier in sorted(_INLINED_BY_PATH.get(path, ())):
+        span = _declaration_span(text, identifier)
+        if span is not None:
+            spans.append(span)
+    return spans
+
+
+def _code_only(text: str) -> str:
+    """`text` with every comment blanked and every string and regex literal
+    emptied to its delimiters. Newlines and offsets are kept, so what is left
+    is the code: a keyword found in it is a keyword, not a word in a sentence."""
+    out = list(text)
+    for kind, start, end in _js_spans(text):
+        low, high = (start, end) if kind == "comment" else (start + 1, end - 1)
+        for i in range(low, high):
+            if out[i] != "\n":
+                out[i] = " "
+    return "".join(out)
+
+
 def _governance_literal_violations() -> list[str]:
     hooks = _style_hook_tokens()
     violations = []
@@ -936,8 +1025,11 @@ def _governance_literal_violations() -> list[str]:
         raw = (WEB_ROOT / path).read_text(encoding="utf-8")
         prose = _PROSE_EXEMPT_BY_PATH.get(path, set())
         if path.endswith(".js"):
+            inlined = _inlined_table_spans(path, raw)
             for kind, start, end in _js_spans(raw):
                 if kind != "string":
+                    continue
+                if any(low <= start < high for low, high in inlined):
                     continue
                 value = raw[start + 1:end - 1]
                 if not _GOVERNANCE_WORD_PATTERN.search(value):
@@ -1109,6 +1201,76 @@ def test_every_prose_exemption_is_present_and_in_scope() -> None:
             f"and a stale exemption is a standing licence for a string nobody wrote.")
 
 
+def test_the_staging_model_is_import_free() -> None:
+    """W-1 (A), RULED by Brett Heap on openxFactory#656 comment `6013547504`:
+    the staging model imports nothing, so a harness that copies it ALONE into a
+    scratch directory can run it. S7's `./display.js` import broke exactly that
+    in openXdox-code's governed `tests/test_staging_workbench.py` (32 nodes
+    failing on `ERR_MODULE_NOT_FOUND`, R2-INV-P4F). Read over the CODE, comments
+    and string contents blanked: no `import` keyword, static or dynamic, and no
+    `from "..."` clause, which is how a re-export would load a module without
+    one. Every file that inlines `views/display.js` tables is held to the same.
+    """
+    for path in sorted({STAGING_MODEL_PATH} | set(_INLINED_BY_PATH)):
+        code = _code_only((WEB_ROOT / path).read_text(encoding="utf-8"))
+        imports = [_line_of(code, m.start())
+                   for m in re.finditer(r"\bimport\b", code)]
+        froms = [_line_of(code, m.start())
+                 for m in re.finditer(r"\bfrom\s*[\"'`]", code)]
+        assert not imports and not froms, (
+            f"{path} loads another module (an `import` at lines {imports}, a "
+            f"`from` clause at lines {froms}). W-1 (A) makes it import-free, so a "
+            f"table it needs from `views/display.js` is inlined and declared in "
+            f"the census's `inlined_display_tables` instead.")
+
+
+def test_every_inlined_display_table_is_real() -> None:
+    """Keyed by (path, identifier) and checked DECLARED, so the sweep's skip
+    covers one real declaration and cannot outlive it. Each names a
+    `views/display.js` table it copies, and that name must be declared there.
+    Whether the VALUES are equal is plan 038 T050's guard, not this one."""
+    in_scope_paths = {row["path"] for row in _assertion_4_scope()}
+    display_text = (WEB_ROOT / DISPLAY_JS_PATH).read_text(encoding="utf-8")
+    seen: set[tuple[str, str]] = set()
+    for table in _INLINED_TABLES:
+        path, identifier = table["path"], table["identifier"]
+        assert (path, identifier) not in seen, f"{path} declares {identifier} twice"
+        seen.add((path, identifier))
+        assert path in in_scope_paths, (
+            f"{path} is not in assertion 4's scope, so declaring its inlined "
+            f"{identifier} licenses nothing and only makes the fixture read as if "
+            f"it did.")
+        assert table.get("reason"), f"{path}'s inlined {identifier} carries no reason"
+        text = (WEB_ROOT / path).read_text(encoding="utf-8")
+        assert _declaration_span(text, identifier) is not None, (
+            f"{path} does not DECLARE `const {identifier} = ...;`, so the census "
+            f"row that exempts its literals is stale.")
+        original = table["copies"].split(".", 1)[0]
+        assert _declares_identifier(display_text, original), (
+            f"{path}'s {identifier} copies {table['copies']!r}, and "
+            f"{DISPLAY_JS_PATH} declares no {original}.")
+
+
+def test_the_inlined_tables_are_the_registry_the_model_exports() -> None:
+    """The census row and the file's own export list the SAME tables under the
+    same names, so every table whose literals the sweep skips is one plan 038
+    T050's inline-parity guard reads: an inlined table missing from the export
+    would be exempt AND unguarded."""
+    for path in sorted(_INLINED_BY_PATH):
+        text = (WEB_ROOT / path).read_text(encoding="utf-8")
+        span = _declaration_span(text, INLINED_REGISTRY)
+        assert span is not None, f"{path} inlines display tables and exports no {INLINED_REGISTRY}"
+        assert re.search(r"^export\s+const\s+" + INLINED_REGISTRY + r"\b",
+                         text, re.M), f"{path} declares {INLINED_REGISTRY} without exporting it"
+        exported = re.findall(r'"([^"]+)"\s*:\s*([A-Za-z_$][\w$]*)',
+                              text[span[0]:span[1]])
+        declared = sorted((table["copies"], table["identifier"])
+                          for table in _INLINED_TABLES if table["path"] == path)
+        assert sorted(exported) == declared, (
+            f"{path}'s {INLINED_REGISTRY} lists {sorted(exported)}, and the census "
+            f"declares {declared}.")
+
+
 def test_the_rule_and_the_instrument_agree() -> None:
     """The rule may be NARROWER than S1's instrument -- that is the whole point
     of S7 rewriting it -- but it may not be blind: a file the instrument still
@@ -1146,17 +1308,33 @@ def test_every_in_scope_file_reads_the_display_facet() -> None:
     VALUES from `app.js`'s `applyTokens`, and `index.html` ships its labels
     empty and takes them from `app.js`'s `applyShellVocabulary`. Both are the
     shell reaching IN, which is § 4.3 step 3's own shape.
+
+    A THIRD SHAPE since plan 038 T025 (W-1 (A)): a file that inlines its
+    `views/display.js` tables is import-free by ruling, so it reads the facet
+    the shell hands it. It must declare `setDisplay`, and an in-scope file that
+    imports `./display.js` must import it from that file and call it.
     """
     through_the_shell = {
         "styles.css": "--st-",
         "index.html": 'id="tab-',
     }
+    texts = {row["path"]: (WEB_ROOT / row["path"]).read_text(encoding="utf-8")
+             for row in _assertion_4_scope()}
     missing = []
     for row in _assertion_4_scope():
         path = row["path"]
-        text = (WEB_ROOT / path).read_text(encoding="utf-8")
+        text = texts[path]
         if path in through_the_shell:
             assert through_the_shell[path] in text, path
+            continue
+        if path in _INLINED_BY_PATH:
+            importer = f'from "./{Path(path).name}"'
+            handed_down = [
+                other for other, body in texts.items()
+                if other != path and 'from "./display.js"' in body
+                and importer in body and "setDisplay(" in _code_only(body)]
+            if not (_declares_identifier(text, "setDisplay") and handed_down):
+                missing.append(path)
             continue
         # THE SIBLING IMPORT, NOT THE WORD (Copilot round 2). An `or "display"
         # in text` fallback treated a comment -- or an identifier like
