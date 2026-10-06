@@ -100,7 +100,7 @@ import yaml
 
 from .landing_confirm import Confirmation, ConfirmationRefused, redeem
 from .session_git import (SERVED_FAST_FORWARD_ARGV, GitError, GitRunner,
-                          SessionGit, SessionGitRefused)
+                          SessionGit, SessionGitRefused, shown)
 
 __all__ = [
     "DECLARATION_CONTENT",
@@ -196,6 +196,16 @@ def _read(git: SessionGit, cwd: Path, *args: str) -> str | None:
         return None
 
 
+#: No hook runs in a command `land` issues: `post-checkout` (the landing
+#: worktree, its `switch`), the merge's own hooks, and `post-merge`. A hook is
+#: code, a hooks path inside the tree (husky's `.husky`) is the branch author's
+#: to write, and one that pushed would publish a landing that reports
+#: `pushed=False`, outside the funnel (Copilot's fourth review of
+#: openDox-code#90). Both fast-forwards get the same pin from the funnel
+#: (`session_git.SERVED_FAST_FORWARD_SETTINGS`).
+_NO_HOOKS = ("-c", f"core.hooksPath={os.devnull}")
+
+
 def _fresh_merge_driver_name() -> str:
     """A merge-driver name no configuration can have defined in advance: the
     landing merge's `merge.default`, so git's own three-way merge decides every
@@ -223,16 +233,6 @@ def _redact(text: str) -> str:
     from opendox.runtime.local_git_adapter import redact_credentials
     return _URL_QUERY_VALUE.sub(r"\1***", _URL_USERINFO.sub(
         r"\1***@", redact_credentials(text or "")))
-
-
-def _shown(path: str) -> str:
-    """A path as a message shows it: as it is, unless it holds a character a
-    terminal would act on (a control, a format character such as a bidi
-    override, a line separator), and then escaped, as `repr` spells it. A file
-    name is the branch author's to choose, and a refusal is printed where the
-    human reads it (Copilot's third review of openDox-code#90). Callers keep
-    the path itself; only the message escapes it."""
-    return path if path.isprintable() else repr(path)
 
 
 class LandingRefused(Exception):
@@ -268,7 +268,7 @@ class MergeConflict(LandingRefused):
             f"bring `main` into {branch} and resolve the conflict there, on the "
             "branch, with git (for example `git merge main` in a checkout of "
             f"{branch}), then land again")
-        listed = (", ".join(_shown(path) for path in self.paths) if self.paths
+        listed = (", ".join(shown(path) for path in self.paths) if self.paths
                   else "(git named no path)")
         super().__init__(
             f"{branch} conflicts with `main` in: {listed}. Nothing was merged and "
@@ -509,8 +509,13 @@ def _registered_host() -> _HostReading | None:
 
 
 def _repository_reading(git: SessionGit, root: Path) -> GovernanceReading | str:
-    """`main`'s tip, or why the checkout cannot be read at all (step 1)."""
-    top = _read(git, git.served_root, "rev-parse", "--show-toplevel")
+    """`main`'s tip, or why the checkout cannot be read at all (step 1). The
+    top is read with only its trailing newline removed: a directory name may
+    end in a space (Copilot's fourth review of openDox-code#90)."""
+    try:
+        top = git.git_raw(git.served_root, "rev-parse", "--show-toplevel")
+    except GitError:
+        top = None
     try:
         is_top = bool(top) and Path(top).resolve() == git.served_root
     except OSError:
@@ -708,14 +713,17 @@ class NeutralLander:
         differs (data-model.md § Landed, "The remote check"). A remote with
         several push URLs is refused by name, as `submit` refuses it."""
         try:
-            listed = self.git.git(self.checkout_root, "remote", "get-url",
-                                  "--push", "--all", name)
+            # `git_raw`: a URL is read as spelled, its trailing spaces included,
+            # since `/srv/remote.git ` and `/srv/remote.git` are two
+            # repositories (Copilot's fourth review of openDox-code#90).
+            listed = self.git.git_raw(self.checkout_root, "remote", "get-url",
+                                      "--push", "--all", name)
         except GitError as failed:
             raise LandingRefused(
                 f"`land` could not read the remote {name!r}'s push URL "
                 f"({_redact(failed.stderr) or 'no reason given'}); fix or remove "
                 "the remote, then land again", code="remote-unreadable") from None
-        urls = [url for url in listed.splitlines() if url.strip()]
+        urls = [url for url in listed.split("\n") if url.strip()]
         if len(urls) != 1:
             raise LandingRefused(
                 f"the remote {name!r} has {len(urls)} push URLs, and `land` "
@@ -776,11 +784,11 @@ class NeutralLander:
                 code="main-checked-out-elsewhere")
         changes = self._served_changes()
         if changes:
-            shown = "; ".join(line.strip() for line in changes[:5])
+            listed = "; ".join(shown(line.strip()) for line in changes[:5])
             more = f" and {len(changes) - 5} more" if len(changes) > 5 else ""
             raise LandingRefused(
                 f"the served checkout {self.checkout_root} holds "
-                f"`{DEFAULT_BRANCH}` and is not clean ({shown}{more}). `land` "
+                f"`{DEFAULT_BRANCH}` and is not clean ({listed}{more}). `land` "
                 "fast-forwards a clean checkout only, and never switches, resets "
                 "or stashes it, so nothing was merged. Remedy: commit or stash "
                 f"those changes (`git stash --include-untracked`), then land "
@@ -851,7 +859,7 @@ class NeutralLander:
             fields = listed.split("\0")
             for name, value in zip(fields[0::3], fields[2::3]):
                 if name and value not in _GITS_OWN_MERGE_VALUES:
-                    drivers.append(_shown(f"{name} (merge={value})"))
+                    drivers.append(shown(f"{name} (merge={value})"))
         if drivers:
             raise LandingRefused(
                 f"{', '.join(drivers[:5])} carry a `merge` attribute that selects a "
@@ -886,7 +894,7 @@ class NeutralLander:
             # - `merge.directoryRenames=true` places a file added under a
             #   directory the other side renamed, with no conflict, where git's
             #   default stops and shows it.
-            self.git.git_raw(path, *neutral, "-c", "rerere.enabled=false",
+            self.git.git_raw(path, *neutral, *_NO_HOOKS, "-c", "rerere.enabled=false",
                              "-c", f"merge.default={_fresh_merge_driver_name()}",
                              "-c", "merge.directoryRenames=conflict",
                              "merge", "--strategy=ort", "--no-ff", "--no-edit",
@@ -949,7 +957,7 @@ class NeutralLander:
         read of the holder followed by a ref update could not promise (Copilot's
         second review of openDox-code#90)."""
         try:
-            self.git.git(path, "switch", "--quiet", DEFAULT_BRANCH)
+            self.git.git(path, *_NO_HOOKS, "switch", "--quiet", DEFAULT_BRANCH)
         except GitError as failed:
             holder = self._holder_of_main()
             if holder is not None:
@@ -1007,8 +1015,8 @@ class NeutralLander:
         path = self._landing_path(branch)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            self.git.git(self.checkout_root, "worktree", "add", "--detach",
-                         str(path), main)
+            self.git.git(self.checkout_root, *_NO_HOOKS, "worktree", "add",
+                         "--detach", str(path), main)
         except (GitError, OSError) as failed:
             raise LandingRefused(
                 f"the landing worktree {path} could not be made "

@@ -139,9 +139,16 @@ SERVED_FAST_FORWARD_BRANCH = "main"
 # so the argument vector stays EXACTLY the three arguments feature 007's
 # FR-004a exception 1 admits. `SessionGit.fast_forward_served` is the one
 # caller that passes them; the runner drops every ambient `GIT_CONFIG_*` first.
+#
+# `core.hooksPath` IS PINNED TOO, to no directory: a `post-merge` hook runs
+# after a fast-forward, and one that pushed would publish the landing that
+# reports `pushed=False`, outside this funnel; a hooks path inside the tree
+# (husky's `.husky`) is the branch author's to write (Copilot's fourth review
+# of openDox-code#90).
 SERVED_FAST_FORWARD_SETTINGS = (
     ("pull.twohead", "ort"),
     (f"branch.{SERVED_FAST_FORWARD_BRANCH}.mergeOptions", ""),
+    ("core.hooksPath", os.devnull),
 )
 # The ONE argument-checked admission at the served root, above: exactly these
 # words, then exactly one full commit id: `git merge --ff-only <commit>`.
@@ -348,6 +355,16 @@ def is_served_root(served_root: Path, cwd: Path) -> bool:
         return Path(cwd).resolve() == Path(served_root).resolve()
     except OSError:                                  # pragma: no cover - defensive
         return False
+
+
+def shown(text: str) -> str:
+    """Text as a message shows it: as it is, or escaped as `repr` spells it when
+    it holds a character a terminal acts on (a control, a format character such
+    as a bidi override, a line separator). A file or branch name is its
+    author's to choose, and a refusal is printed where a human reads it
+    (Copilot's third and fourth reviews of openDox-code#90). Callers keep the
+    text itself; only the message escapes it."""
+    return text if text.isprintable() else repr(text)
 
 
 def served_fast_forward_commit(args: Sequence[str]) -> str | None:
@@ -659,8 +676,8 @@ class SessionGit:
         held = (ref.removeprefix(BRANCH_REF_PREFIX)
                 if ref.startswith(BRANCH_REF_PREFIX)
                 else "no branch (a detached HEAD)")
-        why = (f"it holds {held}" if held != SERVED_FAST_FORWARD_BRANCH else
-               f"it is not clean ({'; '.join(l.strip() for l in lines[:5])})")
+        why = (f"it holds {shown(held)}" if held != SERVED_FAST_FORWARD_BRANCH else
+               f"it is not clean ({'; '.join(shown(l.strip()) for l in lines[:5])})")
         return ServedCheckoutImmovable(
             f"refusing `git merge --ff-only` against the served checkout "
             f"{self.served_root}: the landing's fast-forward is admitted only "
@@ -774,11 +791,14 @@ class SessionGit:
 
         A pure REF READ: no remote contact, no fetch, nothing written — so it is
         legal on the served checkout and costs the resume path nothing."""
-        listed = self.git(self.served_root, "for-each-ref",
-                          "--format=%(worktreepath)", f"refs/heads/{branch}")
-        for line in listed.splitlines():
-            if line.strip():
-                return line.strip()
+        # `git_raw`, and no strip: a working tree's path may end in a space,
+        # and a stripped path names another directory (Copilot's fourth review
+        # of openDox-code#90).
+        listed = self.git_raw(self.served_root, "for-each-ref",
+                              "--format=%(worktreepath)", f"refs/heads/{branch}")
+        for line in listed.split("\n"):
+            if line:
+                return line
         return None
 
     def fast_forward_served(self, commit: str) -> str:
@@ -886,7 +906,10 @@ class SessionGit:
     def branch_sha(self, branch: str) -> str | None:
         """The sha `refs/heads/<branch>` currently points at, or None when the
         branch does not exist. The compare-and-swap input for a delete."""
-        ok, listed = self._try(self.served_root, "show-ref", "--hash",
+        # `--verify`: the EXACT ref. Without it `show-ref` matches every ref
+        # that ENDS in the name, so a tag `backup/refs/heads/main` made a
+        # second line (Copilot's fourth review of openDox-code#90).
+        ok, listed = self._try(self.served_root, "show-ref", "--verify", "--hash",
                                f"refs/heads/{branch}")
         return listed.strip() or None if ok else None
 

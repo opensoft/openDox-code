@@ -58,6 +58,8 @@ import threading
 import weakref
 from dataclasses import dataclass
 
+from .session_git import shown
+
 __all__ = [
     "Confirmation",
     "ConfirmationRefused",
@@ -330,8 +332,11 @@ def confirm_at_terminal(branch: str, head: str) -> Confirmation:
             f"({TERMINAL}: {missing.strerror or missing}): it refuses rather than "
             "land unconfirmed (#1144 12.6a)", code="no-terminal") from None
     with terminal:
+        # The name is SHOWN escaped where it holds a character a terminal acts
+        # on (a bidi override reorders what the human reads); the answer must
+        # still be the exact name (Copilot's fourth review of openDox-code#90).
         terminal.write(
-            f"Land branch {branch} at {head} onto main with a merge commit?\n"
+            f"Land branch {shown(branch)} at {head} onto main with a merge commit?\n"
             f"Type the branch name to confirm: ")
         terminal.flush()
         answer = terminal.readline(_ANSWER_LIMIT)

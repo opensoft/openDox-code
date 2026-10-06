@@ -19,6 +19,7 @@ Two assertions here carry more weight than the rest:
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -587,7 +588,8 @@ def test_the_allowlist_still_admits_every_operation_the_contract_names(git_and_r
     assert "merge" not in sg.SERVED_ALLOWED_SUBCOMMANDS
     assert sg.SERVED_FAST_FORWARD_ARGV == ("merge", "--ff-only")
     assert sg.SERVED_FAST_FORWARD_SETTINGS == (("pull.twohead", "ort"),
-                                               ("branch.main.mergeOptions", ""))
+                                               ("branch.main.mergeOptions", ""),
+                                               ("core.hooksPath", os.devnull))
     assert sg.SERVED_FAST_FORWARD_BRANCH == "main"
     commit = "0" * 40
     admitted = (*sg.SERVED_FAST_FORWARD_ARGV, commit)
@@ -767,6 +769,37 @@ def test_the_fast_forward_is_refused_from_a_served_subdirectory(git_and_repo):
 
     assert runner.calls[n:] == []
     assert repo.served_fingerprint() == before
+
+
+def test_the_fast_forward_refusal_cannot_be_reordered_by_a_file_name(
+        git_and_repo):
+    """With `core.quotePath=false` a bidi override in a file name reaches the
+    porcelain status as it is; the refusal shows it escaped (Copilot's fourth
+    review of openDox-code#90)."""
+    git, repo, _ = git_and_repo
+    ahead = _a_commit_ahead_of_main(git, repo)
+    repo.git("config", "core.quotePath", "false")
+    (repo.root / "a\u202ebc.md").write_text("untracked\n", encoding="utf-8")
+
+    with pytest.raises(sg.ServedCheckoutImmovable) as refused:
+        git.fast_forward_served(ahead)
+
+    assert "\u202e" not in str(refused.value)
+    assert "\\u202e" in str(refused.value)
+
+
+def test_branch_sha_reads_the_exact_ref(git_and_repo):
+    """`show-ref` without `--verify` matches every ref that ENDS in the name, so
+    a tag `backup/refs/heads/main` made a second line and a fast-forward that
+    landed was refused (Copilot's fourth review of openDox-code#90)."""
+    git, repo, _ = git_and_repo
+    main = repo.head("main")
+    ahead = _a_commit_ahead_of_main(git, repo)
+    repo.git("tag", "backup/refs/heads/main", ahead)
+
+    assert git.branch_sha("main") == main
+    assert git.fast_forward_served(ahead) == ahead
+    assert git.branch_sha("main") == ahead
 
 
 def test_the_fast_forward_takes_only_a_full_commit_id(git_and_repo):

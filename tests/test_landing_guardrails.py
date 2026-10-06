@@ -38,6 +38,7 @@ from __future__ import annotations
 import ast
 import copy
 import gc
+import os
 import pickle
 import subprocess
 import sys
@@ -804,6 +805,21 @@ def test_no_declaration_refuses_naming_the_file_and_its_content(tmp_path):
     assert isinstance(landed, Landed)
 
 
+def test_a_dirty_checkout_s_file_names_cannot_reorder_the_refusal(world):
+    """With `core.quotePath=false`, `git status --porcelain` prints a bidi
+    override in a file name as it is: the refusal shows it escaped (Copilot's
+    fourth review of openDox-code#90)."""
+    world.git("config", "core.quotePath", "false")
+    world.write("a\u202ebc.md", "untracked\n")
+    port, token = lander(world), mint(world)
+
+    refused = refusal(port.land, BRANCH, confirmation=token)
+
+    assert refused.code == "dirty-served-checkout"
+    assert "\u202e" not in str(refused)
+    assert "\\u202e" in str(refused)
+
+
 def test_a_dirty_served_checkout_on_main_is_refused_before_merging(world):
     world.write("doc.md", "an uncommitted edit\n")
     before = (world.refs(), world.fingerprint())
@@ -915,7 +931,7 @@ def test_a_served_checkout_on_another_branch_is_left_and_main_moves(world):
              if session_git.command_subcommand(args) in {"switch", "update-ref"}
              or args == (*session_git.SERVED_FAST_FORWARD_ARGV, landed.merge_commit)]
     assert [args for _cwd, args in moves] == [
-        ("switch", "--quiet", "main"),
+        ("-c", f"core.hooksPath={os.devnull}", "switch", "--quiet", "main"),
         (*session_git.SERVED_FAST_FORWARD_ARGV, landed.merge_commit)]
     assert all(container in cwd.resolve().parents for cwd, _args in moves)
 
@@ -1128,6 +1144,63 @@ def test_a_credential_in_the_push_url_never_reaches_a_refusal(world, url):
     assert world.refs() == before
 
 
+@pytest.mark.parametrize("served", ["holds main", "holds another branch"])
+def test_no_hook_runs_while_land_moves_anything(world, tmp_path, served):
+    """A hook is code, a hooks path inside the tree (husky's `.husky`) is the
+    branch author's to write, and a `post-merge` hook that pushed would publish
+    a landing that reports `pushed=False` (Copilot's fourth review of
+    openDox-code#90). No hook runs in the landing worktree's checkout, the
+    merge, the `switch`, or either fast-forward, and the remote is untouched."""
+    if served == "holds another branch":
+        world.git("checkout", "-q", "-b", "elsewhere")
+    remote = _bare_remote(tmp_path, "remote")
+    world.git("remote", "add", "origin", str(remote))
+    world.git("push", "-q", "origin", "main")
+    remote_before = subprocess.run(["git", "-C", str(remote), "for-each-ref"],
+                                   text=True, capture_output=True).stdout
+    ran = tmp_path / "hooks-ran"
+    for name in ("post-checkout", "pre-merge-commit", "prepare-commit-msg",
+                 "commit-msg", "post-merge"):
+        hook = world.hooks / name
+        hook.write_text(
+            "#!/bin/sh\n"
+            f"echo {name} >> '{ran}'\n"
+            f"git push -q '{remote}' HEAD:refs/heads/pushed-by-{name} "
+            ">/dev/null 2>&1\n"
+            "exit 0\n", encoding="utf-8")
+        hook.chmod(0o755)
+
+    landed = lander(world).land(BRANCH, confirmation=mint(world))
+
+    assert world.head("refs/heads/main") == landed.merge_commit
+    assert landed.pushed is False
+    assert not ran.exists(), ran.read_text(encoding="utf-8")
+    assert subprocess.run(["git", "-C", str(remote), "for-each-ref"], text=True,
+                          capture_output=True).stdout == remote_before
+
+
+def test_a_push_url_is_read_as_spelled(world, tmp_path):
+    """`/srv/remote.git ` and `/srv/remote.git` are two repositories, so the
+    push URL keeps its trailing space (Copilot's fourth review of
+    openDox-code#90)."""
+    in_step = _bare_remote(tmp_path, "remote")
+    world.git("push", "-q", str(in_step), "main")
+    ahead = tmp_path / "remote.git "
+    subprocess.run(["git", "init", "-q", "--bare", "--initial-branch=main",
+                    str(ahead)], check=True, capture_output=True)
+    world.git("push", "-q", str(ahead), "main")
+    _advance_remote_main(tmp_path, ahead, "ahead-clone")
+    world.git("remote", "add", "origin", str(in_step))
+    world.git("remote", "set-url", "--push", "origin", str(ahead))
+    before = world.refs()
+    port, token = lander(world), mint(world)
+
+    refused = refusal(port.land, BRANCH, confirmation=token)
+
+    assert refused.code == "remote-main-not-contained"
+    assert world.refs() == before
+
+
 def test_a_fast_forward_that_no_longer_applies_refuses_leaving_main(world):
     class MainMovesDuringTheMerge(session_git.SubprocessGitRunner):
         moved: str | None = None
@@ -1177,18 +1250,21 @@ def test_main_moved_under_a_left_checkout_refuses_leaving_main(world, to):
 
 
 def test_a_main_that_does_not_land_on_the_merge_commit_is_never_reported(world):
-    """A hook that moves `main` again after the landing worktree fast-forwards
-    it: `main` is read after the move, and a landing is reported only where it
-    holds the merge commit."""
+    """Something moves `main` again right after the landing worktree
+    fast-forwards it: `main` is read after the move, and a landing is reported
+    only where it holds the merge commit."""
     world.git("checkout", "-q", "-b", "elsewhere")
-    hook = world.hooks / "post-merge"
-    hook.write_text(
-        "#!/bin/sh\n"
-        "[ \"$(git symbolic-ref -q HEAD)\" = refs/heads/main ] || exit 0\n"
-        "git update-ref refs/heads/main HEAD^1\n", encoding="utf-8")
-    hook.chmod(0o755)
+
+    class MovesMainAfterTheFastForward(session_git.SubprocessGitRunner):
+        def run(self, cwd, *args, **settings):
+            done = super().run(cwd, *args, **settings)
+            if args[:2] == session_git.SERVED_FAST_FORWARD_ARGV:
+                world.git("update-ref", "refs/heads/main", "refs/heads/main^1")
+            return done
+
     previous = world.head("refs/heads/main")
-    port, token = lander(world), mint(world)
+    port = lander(world, runner=MovesMainAfterTheFastForward())
+    token = mint(world)
 
     refused = refusal(port.land, BRANCH, confirmation=token)
 
@@ -1413,13 +1489,11 @@ def test_an_ambient_git_dir_cannot_redirect_the_landing(world, tmp_path):
 
 
 def test_a_merge_that_fails_without_a_conflict_keeps_git_s_reason(world):
-    """A conflict-free merge whose commit git cannot make (a hook refuses it)
-    leaves `MERGE_HEAD` and no unmerged path: it is `merge-failed` with git's
-    words, never a conflict with no paths (Copilot review of #90)."""
-    hook = world.hooks / "pre-merge-commit"
-    hook.write_text("#!/bin/sh\necho 'the hook refuses this merge' >&2\nexit 1\n",
-                    encoding="utf-8")
-    hook.chmod(0o755)
+    """A conflict-free merge that git refuses (here, an unsigned branch under
+    `merge.verifySignatures`; no hook runs in a landing) leaves no unmerged
+    path: it is `merge-failed` with git's words, never a conflict with no paths
+    (Copilot review of #90)."""
+    world.git("config", "merge.verifySignatures", "true")
     before = world.refs()
     port, token = lander(world), mint(world)
 
@@ -1427,7 +1501,7 @@ def test_a_merge_that_fails_without_a_conflict_keeps_git_s_reason(world):
 
     assert not isinstance(refused, MergeConflict)
     assert refused.code == "merge-failed"
-    assert "the hook refuses this merge" in str(refused)
+    assert "does not have a GPG signature" in str(refused)
     assert world.refs() == before
 
 
@@ -1549,6 +1623,21 @@ def test_a_non_callable_instrument_is_a_host_that_failed_to_load(world):
     assert (reading.governance, reading.code) == (UNKNOWN, "host-failed-to-load")
 
 
+def test_a_checkout_whose_path_ends_in_a_space_is_read(tmp_path):
+    """The working tree's top is compared as git spells it, a trailing space
+    included (Copilot's fourth review of openDox-code#90)."""
+    world = World(tmp_path)
+    world.branch_with(BRANCH, "notes/session.md", "work\n")
+    spaced = tmp_path / "plain "
+    world.root.rename(spaced)
+    world.root = spaced
+
+    assert landing.repository_governance(spaced, env=LOCAL) == STANDALONE
+    landed = NeutralLander(spaced, env=LOCAL).land(BRANCH,
+                                                   confirmation=mint(world))
+    assert world.head("refs/heads/main") == landed.merge_commit
+
+
 def test_a_path_that_is_not_the_top_of_a_working_tree_is_unknown(world, tmp_path):
     (world.root / "notes").mkdir(exist_ok=True)
     for path in (tmp_path / "nowhere", world.root / "notes", tmp_path):
@@ -1573,6 +1662,26 @@ def test_the_view_issuer_is_single_use_and_bound_to_its_branch(world):
                                 third).code == "no-nonce"
     refused = confirmation_refusal(nonces.issue_nonce, BRANCH, "not-a-commit")
     assert refused.code == "bad-binding"
+
+
+def test_the_prompt_shows_a_branch_name_escaped(world, monkeypatch):
+    """git accepts a bidi override in a branch name, which would reorder the
+    name the human reads at the prompt: it is shown escaped, and the answer
+    must still be the exact name (Copilot's fourth review of
+    openDox-code#90)."""
+    name = "sess\u202e1"
+    world.branch_with(name, "notes/bidi.md", "work\n")
+    head = world.head(f"refs/heads/{name}")
+    terminal = at_terminal(monkeypatch, name + "\n")
+
+    token = landing_confirm.confirm_at_terminal(name, head)
+
+    assert "\u202e" not in terminal.shown
+    assert repr(name) in terminal.shown
+    assert (token.branch, token.head) == (name, head)
+    at_terminal(monkeypatch, repr(name) + "\n")
+    refused = confirmation_refusal(landing_confirm.confirm_at_terminal, name, head)
+    assert refused.code == "answer-mismatch"
 
 
 def test_a_discarded_confirmation_leaves_no_record(world):
