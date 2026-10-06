@@ -43,8 +43,38 @@ jobs:
   # every collected case is skipped, so without that rule a job whose service
   # failed to start would report green having made no database-backed
   # assertion at all (Copilot review of openDox-code#25, round 5).
+  #
+  # THE SANDBOX IS LIVE HERE, AND ITS CASES FAIL RATHER THAN SKIP — plan 038
+  # T010, RULED R2Q17 (a) (openxFactory#656 comment 6003486656: "This
+  # required-check change is made by this word"). Release 2's packs run only
+  # inside bubblewrap, so the required check must be a host where bubblewrap
+  # works, proved before the suite runs:
+  #
+  # * `runs-on` IS PINNED to `ubuntu-24.04`, not `ubuntu-latest`. The latest
+  #   label moves to 26.04 in a window that opens 2026-10-19, and nobody has
+  #   measured bubblewrap on that image. The move waits for plan 038 T068's
+  #   measurement and is a separate required-check change (decision N-18).
+  # * `provision the sandbox` installs bubblewrap and lifts the AppArmor
+  #   restriction on unprivileged user namespaces that the 24.04 image ships
+  #   (actions/runner-images#10443). Without it, bubblewrap cannot create
+  #   its namespaces.
+  # * `prove the sandbox live` runs bubblewrap twice, at its FIXED path and
+  #   never through PATH, because PATH can be steered (decision OQ-H15-21).
+  #   One run must succeed, and one must be refused a write outside its tmpfs.
+  #   It also records `bwrap --version`.
+  # * `OPENDOX_TEST_SANDBOX_REQUIRED` is exported to every step of this job.
+  #   Under it, with `CI` set, a sandbox case that finds no live sandbox FAILS
+  #   rather than skips, as the database-backed cases already do. The helper
+  #   that reads it is plan 038 T048's `tests/sandbox_required.py`, never a
+  #   shared conftest. The name follows `OPENDOX_TEST_DATABASE_URL`: a switch
+  #   for the test harness, not one of the runtime's settings. So
+  #   `EXPECT_SKIPPED` stays 11.
+  #
+  # The `acceptance` job below is unchanged. The plan's later tasks own it.
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      OPENDOX_TEST_SANDBOX_REQUIRED: "1"
     services:
       postgres:
         image: postgres:16
@@ -74,6 +104,94 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      # THE SANDBOX, PROVISIONED FIRST (plan 038 T010, R2Q17 (a)). It runs
+      # before the package install, so a runner that cannot host bubblewrap
+      # fails in the first minute rather than after the suite. The step name
+      # does not start with "install", because
+      # `test_the_required_job_supplies_a_postgres_service_and_the_extras`
+      # finds the package install as the first step whose name does.
+      #
+      # The value is printed before the sysctl changes it, so the log records
+      # that the image ships the restriction (actions/runner-images#10443).
+      - name: provision the sandbox
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "image default: kernel.apparmor_restrict_unprivileged_userns=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)"
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # THE SANDBOX, PROVED LIVE before the suite runs (R2Q17 (a)).
+      #
+      # `BWRAP` IS A FIXED PATH (OQ-H15-21). The script checks that the file
+      # is there and is not setuid. A setuid bubblewrap would pass this proof
+      # without the unprivileged user namespaces that the product relies on.
+      #
+      # THE VERSION FLOOR IS USED, NOT PARSED. The first run passes all three
+      # flags that set the floor: `--json-status-fd`, `--disable-userns` and
+      # `--size`. A bubblewrap below the floor stops at "Unknown option", and
+      # this step goes red.
+      #
+      # THE REFUSAL IS PROVED ON THE HOST, NOT TAKEN FROM AN EXIT CODE. The
+      # second run sees a directory that the runner can write, bound
+      # read-only. It must find the directory there, write to its own tmpfs,
+      # and fail the write into the directory, with exit 42. The step then
+      # checks that nothing reached the host directory. Any other exit code
+      # is a sandbox that broke for another reason, and fails the step.
+      - name: prove the sandbox live
+        timeout-minutes: 2
+        shell: bash
+        env:
+          BWRAP: /usr/bin/bwrap
+        run: |
+          set -euo pipefail
+          [ -x "$BWRAP" ] || { echo "::error::$BWRAP is not an executable file, so this runner has no sandbox"; exit 1; }
+          [ ! -u "$BWRAP" ] || { echo "::error::$BWRAP is setuid, so this proof would not exercise unprivileged user namespaces"; exit 1; }
+          echo "bwrap: $BWRAP, $("$BWRAP" --version), package $(dpkg-query -W -f='${Version}' bubblewrap), kernel $(uname -r)"
+          echo "kernel.apparmor_restrict_unprivileged_userns=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)"
+          sandbox=(--unshare-all --unshare-user --disable-userns
+                   --die-with-parent --new-session
+                   --clearenv --setenv PATH /usr/bin
+                   --ro-bind /usr /usr
+                   --symlink usr/bin /bin --symlink usr/lib /lib
+                   --symlink usr/lib64 /lib64
+                   --proc /proc --dev /dev
+                   --size 8388608 --tmpfs /tmp)
+
+          # 1. MUST SUCCEED: write to its tmpfs and read it back.
+          status="$RUNNER_TEMP/bwrap-status.json"
+          out=$("$BWRAP" "${sandbox[@]}" --json-status-fd 3 \
+                -- /bin/sh -c 'echo live > /tmp/probe && cat /tmp/probe' \
+                3>"$status") || {
+            rc=$?
+            echo "json-status: $(tr '\n' ' ' < "$status")"
+            echo "::error::the sandbox did not run (bwrap exited $rc), so this runner has no live sandbox"
+            exit 1
+          }
+          echo "json-status: $(tr '\n' ' ' < "$status")"
+          [ "$out" = "live" ] || { echo "::error::the sandbox ran but printed '$out', not 'live'"; exit 1; }
+          grep -q '"child-pid"' "$status" || { echo "::error::--json-status-fd wrote no child-pid"; exit 1; }
+          echo "live: the sandbox ran and its tmpfs took a write"
+
+          # 2. MUST BE REFUSED: a write outside its tmpfs.
+          probe="$RUNNER_TEMP/sandbox-escape-probe"
+          rm -rf "$probe"
+          mkdir -p "$probe"
+          touch "$probe/host-can-write" && rm "$probe/host-can-write"
+          rc=0
+          # shellcheck disable=SC2016 # $1 is the inner shell's, from "sh $probe"
+          "$BWRAP" "${sandbox[@]}" --ro-bind "$probe" "$probe" \
+            -- /bin/sh -c '
+              test -d "$1" || exit 3
+              echo inside > /tmp/inside || exit 4
+              echo escaped > "$1/escaped" && exit 0
+              exit 42' sh "$probe" || rc=$?
+          [ "$rc" = "42" ] || { echo "::error::the escape run exited $rc, not 42: 0 means the write landed, 3 the directory was absent, 4 its tmpfs refused a write, anything else a sandbox that broke"; exit 1; }
+          [ ! -e "$probe/escaped" ] || { echo "::error::a write inside the sandbox reached $probe on the host"; exit 1; }
+          echo "refused: the write outside its tmpfs failed, and the host directory is unchanged"
 
       # INSTALL THE PACKAGE, not just the runner — RULED Q-L2 (openxFactory#656,
       # 2026-09-10). This step was once `pip install "pytest>=8,<9"` and nothing
