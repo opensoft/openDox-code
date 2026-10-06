@@ -311,8 +311,9 @@ def test_a_worktree_whose_metadata_cannot_be_held_is_refused_by_name(
         return real(directory, **options)
 
     monkeypatch.setattr(local_git_adapter, "open_no_follow_chain", _a_link)
+    port = LocalGitSubmissions(linked)
     with pytest.raises(SubmissionError) as caught:
-        LocalGitSubmissions(linked).submit("sess-1")
+        port.submit("sess-1")
     assert type(caught.value) is SubmissionRefused
     assert "git metadata" in str(caught.value), caught.value
     assert "(OSError)" in str(caught.value), caught.value
@@ -398,8 +399,9 @@ def test_a_failed_push_keeps_only_git_s_fatal_and_error_lines(
         _git(checkout, "remote", "add", "origin",
              f"http://127.0.0.1:{server.server_port}/remote.git")
         monkeypatch.setenv("GIT_TRACE_CURL", "1")
+        port = LocalGitSubmissions(checkout)
         with pytest.raises(SubmissionError) as caught:
-            LocalGitSubmissions(checkout).submit("sess-1")
+            port.submit("sess-1")
     finally:
         server.shutdown()
         server.server_close()

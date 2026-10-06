@@ -101,7 +101,7 @@ _GIT_TRANSPORTS = frozenset({"file", "ftp", "ftps", "git", "git+ssh", "http",
 #: the user's environment asked git to print, and under `GIT_TRACE_CURL=1` or
 #: `GIT_CURL_VERBOSE=1` that is curl's trace of every request header, an
 #: `http.extraheader` secret among them (lane 3's review R1 of #92, MEASURED
-#: against a loopback 403; git redacts `Authorization:` alone).
+#: against a loopback 403; git's trace redacts only its own auth header).
 _KEPT_PUSH_STDERR = re.compile(r"(?:fatal|error): |timed out after ")
 
 #: Below this length a held value is not scrubbed out of foreign text: a
