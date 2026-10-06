@@ -2,12 +2,19 @@
 
 F12.2 names two nodes in this file, and each lands with the box it proves:
 
-  * `test_a_credential_in_the_remote_url_never_reaches_the_report`, here, with
+  * `test_a_credential_in_the_remote_url_never_reaches_the_report`, with
     plan 038 T011 (12.1a: the `Submission` names where the work went, and
     never what the remote URL holds);
   * `test_server_unset_submission_factory_binds_the_neutral_default`, with
     T014, which adds the binding it asserts (`serve.submission_factory`,
-    12.4). It goes beside the node below and uses the same checkout fixture.
+    12.4; R2Q2 (a)). It uses the same checkout fixture.
+
+T014 adds two more nodes beside its own, so each new branch of the binding
+has a case that fails without it: an injected factory is the binding, and one
+that cannot build a port is absence (`submission_factory`'s compose entry and
+its accessor); and the CLI's unset `_submission_port` is the same neutral
+class. F12.2's block asserts that last one inline as well, but only once the
+`submit` verb exists (T015), so the suite carries its own case.
 
 `tests/test_submission_port.py` imports this file's fixtures (`_isolated_git`,
 `checkout`) and git helpers, so the two build their repositories one way.
@@ -40,7 +47,10 @@ from pathlib import Path
 
 import pytest
 
-from opendox import session_pr
+from opendox import cli, serve, session_pr
+
+#: The served web root, which `build_server` needs and these nodes never read.
+WEB = Path(__file__).resolve().parent.parent / "src" / "opendox" / "web"
 
 #: The secrets the remote URL carries, distinct and greppable: a userinfo
 #: secret, a query token under a credential-shaped name, and one under a
@@ -251,3 +261,115 @@ def test_a_credential_in_the_remote_url_never_reaches_the_report(
     message = str(failed.value)
     _assert_refusal_clean(failed.value, "a failed push")
     assert host in message, message
+
+
+# --------------------------------------------------------------------------
+# The two bindings (plan 038 T014; #1144 12.4; R2Q2 (a)).
+# --------------------------------------------------------------------------
+
+def _served_handler(checkout: Path, tmp_path: Path, **injected: object) -> type:
+    """The handler class a loopback server over `checkout` is bound with, built
+    with nothing injected but what is named. `tester` is one of the suite's
+    declared principals (`session_fixtures.GATE_TEST_PRINCIPALS`), so the
+    plane is a local human's. The server is closed before the class is read;
+    the class keeps its binding."""
+    httpd = serve.build_server(WEB, tmp_path / "snapshot.json", checkout,
+                               actor="tester", **injected)
+    try:
+        bound = httpd.RequestHandlerClass
+    finally:
+        httpd.server_close()
+    return getattr(bound, "func", bound)
+
+
+def _bare_origin(checkout: Path, tmp_path: Path) -> Path:
+    """A local bare repository attached to `checkout` as `origin`."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    _git(checkout, "remote", "add", "origin", str(remote))
+    return remote
+
+
+def _assert_the_neutral_port(port: object, checkout: Path, remote: Path) -> None:
+    """`port` is `LocalGitSubmissions` for `checkout`, and pushes there."""
+    assert isinstance(port, session_pr.LocalGitSubmissions), (
+        f"the default names a platform: {type(port)}")
+    assert isinstance(port, session_pr.SubmissionPort)
+    assert not isinstance(port, session_pr.PullRequestPort), (
+        "a push-only class claims the platform protocol")
+    assert port.checkout_root.resolve() == checkout.resolve(), port.checkout_root
+    report = port.submit("sess-1")
+    assert _tip(remote, "sess-1") == _tip(checkout, "sess-1"), (
+        "the branch did not arrive")
+    assert report.ref == "refs/heads/sess-1", report
+    assert str(remote) in report.url, report
+
+
+def test_server_unset_submission_factory_binds_the_neutral_default(
+        checkout: Path, tmp_path: Path) -> None:
+    """12.4, F12.2: a server built with NOTHING injected binds the neutral
+    `LocalGitSubmissions` for its own checkout, and it pushes there. A class
+    built by hand proves nothing about what the product binds, which is why
+    F12.2 names this node.
+
+    Beside it, the platform pair is unchanged (R2Q2 (a)): the unset
+    `pull_request_factory` still builds `GhPullRequests`, which only
+    openXdox's `gate open-pr` reaches (openXdox-code's
+    `tests/test_session_snapshot.py:893-916` pins the same). And a hosted
+    handler declares no submission port, for the reason it declares no
+    pull-request port: each pushes with the invoking user's own credentials,
+    which a hosted plane never holds."""
+    remote = _bare_origin(checkout, tmp_path)
+    handler = _served_handler(checkout, tmp_path)
+    assert handler.capabilities["actions"]["session"], (
+        "the fixture's server is not a local human's plane")
+
+    _assert_the_neutral_port(handler._session_submissions(handler),
+                             checkout, remote)
+    assert isinstance(handler._session_pull_requests(handler),
+                      session_pr.GhPullRequests)
+
+    class _Hosted(handler):
+        capabilities = {"actions": {"session": False, "gate": False}}
+    assert _Hosted._session_submissions(_Hosted) is None
+
+
+class _HostSubmissions:
+    """A host's own `SubmissionPort`, which 12.4 lets a governed host
+    contribute (no host does in release 2, R2Q3 (a)). Never asked to submit
+    here: the binding is what is asserted."""
+
+    def submit(self, branch: str) -> session_pr.Submission:  # pragma: no cover
+        raise NotImplementedError(branch)
+
+
+def test_an_injected_submission_factory_is_the_servers_binding(
+        checkout: Path, tmp_path: Path) -> None:
+    """12.4: `submission_factory` is the seam a host contributes its own
+    `SubmissionPort` through, so what an injected factory builds is the
+    binding. A factory that cannot build a port leaves none: absence, not an
+    error, as it is for the pull-request port."""
+    contributed = _HostSubmissions()
+    assert isinstance(contributed, session_pr.SubmissionPort)
+    handler = _served_handler(checkout, tmp_path,
+                              submission_factory=lambda: contributed)
+    assert handler._session_submissions(handler) is contributed
+
+    def unbuildable() -> session_pr.SubmissionPort:
+        raise RuntimeError("the host's port cannot be built")
+
+    handler = _served_handler(checkout, tmp_path,
+                              submission_factory=unbuildable)
+    assert handler._session_submissions(handler) is None
+
+
+def test_cli_unset_submission_port_binds_the_neutral_default(
+        checkout: Path, tmp_path: Path) -> None:
+    """12.4, the CLI's half, as F12.2's block asserts it: `_submission_port`
+    with nothing injected is `LocalGitSubmissions` for the checkout it is
+    given, and it pushes there. `_pull_request_port` keeps `GhPullRequests`
+    (R2Q2 (a))."""
+    remote = _bare_origin(checkout, tmp_path)
+    _assert_the_neutral_port(cli._submission_port(checkout), checkout, remote)
+    assert isinstance(cli._pull_request_port(checkout),
+                      session_pr.GhPullRequests)

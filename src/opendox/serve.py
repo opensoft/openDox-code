@@ -1060,6 +1060,11 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
     # The session's remote-write port supplier (T082). None means "build the real
     # `GhPullRequests` for this checkout"; a test injects its fake here.
     pull_request_factory = None
+    # The product's OWN submission port supplier (plan 038 T014; #1144 12.4,
+    # R2Q2 (a)), beside the one above and never it. None means "build the
+    # neutral `LocalGitSubmissions` for this checkout"; a host contributes its
+    # own `SubmissionPort` here, and a test injects one.
+    submission_factory = None
     # The doxBench `WorkbenchModelPort` supplier (T024, research R6). None means
     # NO model port at all — the honest empty-catalog/editor-only posture
     # (FR-025), not an error. The injection boundary stays DUCK-TYPED; see
@@ -1228,6 +1233,33 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
                 return self.pull_request_factory()
             from opendox.session_pr import GhPullRequests
             return GhPullRequests(Path(self.checkout_root))
+        except Exception:  # noqa: BLE001 - absence is a capability verdict
+            return None
+
+    def _session_submissions(self):
+        """The `SubmissionPort` the product's own submit act pushes through
+        (plan 038 T014; #1144 12.4, R2Q2 (a)), or None.
+
+        THE PRODUCT'S OWN BINDING NAMES NO PLATFORM: with nothing injected it
+        is `LocalGitSubmissions` for this checkout, a plain `git push` with no
+        `gh`. It is a NEW binding beside `_session_pull_requests`, which keeps
+        `GhPullRequests` and serves `gate open-pr` unchanged; a push-only class
+        bound there could perform neither of that protocol's other two
+        operations (12.4's parenthesis).
+
+        Declared ONLY when the `session` capability is TRUE, for the reason the
+        pull-request port is: the push writes with the INVOKING USER'S OWN git
+        credentials, which a hosted plane never holds. Built through
+        `submission_factory`, the seam a governed host contributes its own
+        `SubmissionPort` through and a test injects one through. A port that
+        cannot be constructed is absence, not an error, as it is there."""
+        if not self.capabilities.get("actions", {}).get("session"):
+            return None
+        try:
+            if self.submission_factory is not None:
+                return self.submission_factory()
+            from opendox.session_pr import LocalGitSubmissions
+            return LocalGitSubmissions(Path(self.checkout_root))
         except Exception:  # noqa: BLE001 - absence is a capability verdict
             return None
 
@@ -2121,6 +2153,7 @@ def build_server(
     quiet: bool = True,
     adapter_factory=None,
     pull_request_factory=None,
+    submission_factory=None,
     model_port_factory=None,
     schema_validator_factory=_UNSET_VALIDATOR_FACTORY,
     actor: str | None = None,
@@ -2153,7 +2186,13 @@ def build_server(
     `PullRequestPort` (T082): unset builds the real `GhPullRequests` for this
     checkout, which writes with the invoking engineer's own `gh` auth (FR-034,
     D22), and every test injects `FakePullRequests` through it so no test can
-    reach a network. `model_port_factory` is the SAME kind of seam for the
+    reach a network. `submission_factory` is the product's OWN submission
+    seam, beside that one and never it (plan 038 T014; #1144 12.4, R2Q2 (a)):
+    unset builds the neutral `LocalGitSubmissions` for this checkout, a plain
+    `git push` that names no platform, and a governed host may contribute its
+    own `SubmissionPort` through it (see `_session_submissions`).
+    `pull_request_factory` keeps `GhPullRequests` for `gate open-pr`.
+    `model_port_factory` is the SAME kind of seam for the
     doxBench `WorkbenchModelPort` (T024, research R6): unset means NO model
     port at all — the honest empty-catalog/editor-only posture (FR-025), not
     an error — and it is gated on the reused `session` local-human verdict
@@ -2557,6 +2596,8 @@ def build_server(
         "adapter_factory": staticmethod(adapter_factory) if adapter_factory is not None else None,
         "pull_request_factory": (staticmethod(pull_request_factory)
                                 if pull_request_factory is not None else None),
+        "submission_factory": (staticmethod(submission_factory)
+                              if submission_factory is not None else None),
         "model_port_factory": (staticmethod(model_port_factory)
                               if model_port_factory is not None else None),
         # UNSET defaults to the pinned loader; an EXPLICIT None is a caller
