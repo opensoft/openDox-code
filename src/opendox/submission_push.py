@@ -77,10 +77,15 @@ REDACTED = "<redacted>"
 #: `scheme://`, as git recognises a URL.
 _SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
 
-#: Schemes whose userinfo, when it holds no `:`, is a LOGIN NAME and not a
-#: credential. Any other scheme's bare user name is redacted, because a token
-#: can ride there (`https://<token>@host/...`).
+#: Schemes whose userinfo may be a LOGIN NAME rather than a credential. Any
+#: other scheme's bare user name is redacted, because a token can ride there
+#: (`https://<token>@host/...`).
 _SSH_SCHEMES = ("ssh://", "git+ssh://", "ssh+git://")
+
+#: What an ssh login name that is kept looks like: nothing but these. A `:`
+#: announces a password, and a `%` may encode one (`git%3As3cret`), so either
+#: makes the userinfo a credential, as everything else in it does.
+_LOGIN_NAME = re.compile(r"[A-Za-z0-9._-]+")
 
 #: Below this length a held value is not scrubbed out of foreign text: a
 #: two-letter value replaced everywhere garbles the message and protects
@@ -147,7 +152,14 @@ def submit_branch(checkout_root: Path | str, branch: str, *,
 
 
 def _submit_with(git: GitRunner, root: Path, branch: str) -> Submission:
-    """`submit_branch` on a runner bound to the open checkout."""
+    """`submit_branch` on a runner bound to the open checkout.
+
+    NO REFUSAL HERE CHAINS ITS CAUSE (`from None`). The cause's own message is
+    git's stderr or a runtime refusal, redacted only by pattern, so a query
+    value under a name no pattern knows survives in it, and a logged
+    traceback prints the cause in full. The scrubbed text is in the message,
+    and the cause is left out of the traceback.
+    """
     remote = url = None
     try:
         repository_act._refuse_repository_local_command_config(git, root)
@@ -162,16 +174,16 @@ def _submit_with(git: GitRunner, root: Path, branch: str) -> Submission:
     except GitCommandFailed as failed:
         raise SubmissionRefused(
             f"{root} could not be read before the push of `{branch}` "
-            f"({_scrubbed(str(failed), url)}); nothing is pushed") from failed
+            f"({_scrubbed(str(failed), url)}); nothing is pushed") from None
     except (OSError, RuntimeError, ValueError) as exc:
         raise SubmissionRefused(
             f"{root} could not be read before the push of `{branch}` "
             f"({type(exc).__name__}; the value is not echoed); nothing is "
-            "pushed") from exc
+            "pushed") from None
     except repository_act.RepositoryActRefused as refused:
         raise SubmissionRefused(
             f"the push of `{branch}` is refused before it runs: "
-            f"{_scrubbed(str(refused), url)}") from refused
+            f"{_scrubbed(str(refused), url)}") from None
     shown = redact_destination(url)
     try:
         repository_act._push_to_remote_with(git, repository_act.PushPlan(
@@ -181,11 +193,11 @@ def _submit_with(git: GitRunner, root: Path, branch: str) -> Submission:
         raise SubmissionRefused(
             f"the push of `{branch}` to `{remote}` ({shown}) failed "
             f"({_scrubbed(str(failed), url)}); nothing is reported as "
-            "submitted") from failed
+            "submitted") from None
     except repository_act.RepositoryActRefused as refused:
         raise SubmissionRefused(
             f"the push of `{branch}` to `{remote}` ({shown}) is refused "
-            f"before it runs: {_scrubbed(str(refused), url)}") from refused
+            f"before it runs: {_scrubbed(str(refused), url)}") from None
     return Submission(remote=remote, ref=f"refs/heads/{branch}", url=shown,
                       branch=branch, commit=commit)
 
@@ -295,8 +307,8 @@ def _the_one_push_url(git: GitRunner, remote: str, branch: str) -> str:
 def redact_destination(url: str) -> str:
     """`url` as a report may show it: every credential gone, the place kept.
 
-    For a `scheme://` URL, the userinfo is replaced (an `ssh` login name with
-    no password excepted) and so is every query and fragment VALUE; the
+    For a `scheme://` URL, the userinfo is replaced (a plain `ssh` login name
+    excepted) and so is every query and fragment VALUE; the
     scheme, host, port and path stay (12.1a). The credential redactor every
     other report in this package uses runs last over the result, so a shape
     this pass does not parse still meets its patterns (`user:pw@host:path`).
@@ -311,11 +323,16 @@ def redact_destination(url: str) -> str:
         cut = _authority_end(rest)
         authority, tail = rest[:cut], rest[cut:]
         userinfo, at, host = authority.rpartition("@")
-        if at and not (url.lower().startswith(_SSH_SCHEMES)
-                       and ":" not in userinfo):
+        if at and not _is_a_login_name(url, userinfo):
             authority = f"{REDACTED}@{host}"
         url = url[:scheme.end()] + authority + _redacted_query(tail)
     return redact_credentials(url, a_bare_username_is_not_a_secret=True)
+
+
+def _is_a_login_name(url: str, userinfo: str) -> bool:
+    """Whether `userinfo` is an ssh LOGIN NAME, which a report may show."""
+    return (url.lower().startswith(_SSH_SCHEMES)
+            and _LOGIN_NAME.fullmatch(userinfo) is not None)
 
 
 def _authority_end(rest: str) -> int:
@@ -355,13 +372,8 @@ def _held_secrets(url: str | None) -> list[str]:
         return []
     rest = url[scheme.end():]
     userinfo = rest[:_authority_end(rest)].rpartition("@")[0]
-    password = userinfo.partition(":")[2]
-    if password:
-        found = [userinfo, password]
-    elif url.lower().startswith(_SSH_SCHEMES):
-        found = []                     # an ssh login name is not a secret
-    else:
-        found = [userinfo]             # an https user name may be a token
+    found = ([] if _is_a_login_name(url, userinfo)
+             else [userinfo, userinfo.partition(":")[2]])
     head, _, fragment = rest.partition("#")
     for part in re.split(r"[&;]", head.partition("?")[2]):
         name, equals, value = part.partition("=")

@@ -33,6 +33,7 @@ import http.server
 import os
 import subprocess
 import threading
+import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -174,6 +175,15 @@ def _smart_http(root: Path) -> Iterator[_Server]:
         thread.join(5)
 
 
+def _assert_refusal_clean(refusal: BaseException, where: str) -> None:
+    """The message, AND the traceback a logger would print: a chained cause
+    carries git's own text, which no pattern cleans of a neutral-named
+    query value."""
+    _assert_clean(str(refusal), f"{where}'s message")
+    _assert_clean("".join(traceback.format_exception(refusal)),
+                  f"{where}'s traceback")
+
+
 def _assert_clean(text: str, where: str) -> None:
     for secret in (USERINFO_SECRET, TOKEN, TICKET):
         assert secret not in text, f"{where} carries a secret: {text!r}"
@@ -223,7 +233,7 @@ def test_a_credential_in_the_remote_url_never_reaches_the_report(
         with pytest.raises(session_pr.SubmissionRefused) as rejected:
             port.submit("sess-2")
         assert _tip(remote, "sess-2") == moved
-        _assert_clean(str(rejected.value), "a rejected push's message")
+        _assert_refusal_clean(rejected.value, "a rejected push")
         assert "sess-2" in str(rejected.value)
 
         # REFUSED: two push URLs, both carrying the credential.
@@ -232,12 +242,12 @@ def test_a_credential_in_the_remote_url_never_reaches_the_report(
              url.replace("remote.git", "other.git"))
         with pytest.raises(session_pr.SubmissionRefused) as refused:
             port.submit("sess-1")
-        _assert_clean(str(refused.value), "a refused push's message")
+        _assert_refusal_clean(refused.value, "a refused push")
         _git(checkout, "config", "--unset-all", "remote.origin.pushurl")
 
     # FAILED: the same URL, with nothing listening on it any more.
     with pytest.raises(session_pr.SubmissionRefused) as failed:
         port.submit("sess-1")
     message = str(failed.value)
-    _assert_clean(message, "a failed push's message")
+    _assert_refusal_clean(failed.value, "a failed push")
     assert host in message, message

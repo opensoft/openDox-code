@@ -482,6 +482,14 @@ def test_a_checkout_root_that_is_not_a_repository_root_is_refused(
         "ssh://git@example.invalid/o/r.git",
         "ssh://git@example.invalid/o/r.git", id="ssh-login-name-kept"),
     pytest.param(
+        with_userinfo("ssh", "git%3AS3CRET", "example.invalid/o/r.git"),
+        "ssh://<redacted>@example.invalid/o/r.git",
+        id="ssh-encoded-password"),
+    pytest.param(
+        with_userinfo("ssh", "git%253AS3CRET", "example.invalid/o/r.git"),
+        "ssh://<redacted>@example.invalid/o/r.git",
+        id="ssh-twice-encoded-password"),
+    pytest.param(
         "git@example.invalid:o/r.git", "git@example.invalid:o/r.git",
         id="scp-login-name-kept"),
     pytest.param(
