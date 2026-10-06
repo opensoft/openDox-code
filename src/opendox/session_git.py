@@ -107,13 +107,15 @@ FORBIDDEN_SERVED_SUBCOMMANDS = ("checkout", "switch", "reset", "stash", "restore
 # codexFactory `specs/007-workbench-branch-sessions/spec.md`): a CONFIRMED
 # landing fast-forwards the served checkout, its index and its HEAD to the merge
 # commit the lander made in its own landing worktree. The guard admits that move
-# by an ARGUMENT check, not by name: exactly `git merge --ff-only <commit>`, a
-# full object id, with the two settings that could change its meaning pinned
-# (`SERVED_FAST_FORWARD_PINS`), at the served ROOT, while the served checkout
+# by an ARGUMENT check, not by name: exactly the three arguments `merge
+# --ff-only <commit>`, `<commit>` a full object id and never a ref name (feature
+# 007's FR-004a exception 1), at the served ROOT, while the served checkout
 # holds `main` and `git status --porcelain` is empty, and nothing else
-# (`SERVED_FAST_FORWARD_ARGV`, `served_fast_forward_commit`). So `merge` stays absent here, `merge
-# <branch>` and every other spelling stay refused, and a dirty checkout or one on
-# another branch is never moved.
+# (`SERVED_FAST_FORWARD_ARGV`, `served_fast_forward_commit`). So `merge` stays
+# absent here, `merge <branch>` and every other spelling stay refused, and a
+# dirty checkout or one on another branch is never moved. The two settings that
+# could change what that command does are pinned in its ENVIRONMENT, never in
+# its arguments (`SERVED_FAST_FORWARD_SETTINGS`).
 SERVED_ALLOWED_SUBCOMMANDS = frozenset({
     "branch", "cat-file", "check-ref-format", "diff", "for-each-ref", "log",
     "ls-files", "ls-remote", "ls-tree", "merge-base", "push", "remote",
@@ -123,22 +125,27 @@ SERVED_ALLOWED_SUBCOMMANDS = frozenset({
 # The branch the served checkout must hold for the admission below (R2Q7 (a):
 # `main`).
 SERVED_FAST_FORWARD_BRANCH = "main"
-# The configuration that could make `git merge --ff-only` something else, pinned
-# for that one command. MEASURED on git 2.43: with `pull.twohead=ours`, or
-# `branch.main.mergeOptions=-s ours` (or `-s subtree`), `git merge --ff-only
-# <a descendant>` exits 0 having made a NEW merge commit of the strategy's
-# choosing, not a fast-forward; an explicit `--strategy` does not help, because
-# `mergeOptions`' own `-s` still applies beside it. Pinned to git's own strategy
-# and to no branch options, `--ff-only` means what it says (Copilot review of
-# openDox-code#90 led to the measurement).
-SERVED_FAST_FORWARD_PINS = (
-    "-c", "pull.twohead=ort",
-    "-c", f"branch.{SERVED_FAST_FORWARD_BRANCH}.mergeOptions=",
+# The configuration that could make `git merge --ff-only` something else,
+# pinned for that one command. MEASURED on git 2.43: with `pull.twohead=ours`,
+# or `branch.main.mergeOptions` carrying `-s ours` (or `-s subtree`), `git merge
+# --ff-only <a descendant>` exits 0 having made a NEW merge commit of the
+# strategy's choosing, not a fast-forward; with `--squash` there, it exits 0
+# having changed the index and working tree and moved nothing. Pinned to git's
+# own strategy and to no branch options, `--ff-only` means what it says
+# (Copilot review of openDox-code#90 led to the measurement).
+#
+# THEY TRAVEL IN THE COMMAND'S ENVIRONMENT (`GIT_CONFIG_COUNT`, `_KEY_<n>`,
+# `_VALUE_<n>`, git's command-scope configuration, which outranks every file),
+# so the argument vector stays EXACTLY the three arguments feature 007's
+# FR-004a exception 1 admits. `SessionGit.fast_forward_served` is the one
+# caller that passes them; the runner drops every ambient `GIT_CONFIG_*` first.
+SERVED_FAST_FORWARD_SETTINGS = (
+    ("pull.twohead", "ort"),
+    (f"branch.{SERVED_FAST_FORWARD_BRANCH}.mergeOptions", ""),
 )
 # The ONE argument-checked admission at the served root, above: exactly these
-# words, then exactly one full commit id. It is `git merge --ff-only <commit>`,
-# with the two settings above pinned.
-SERVED_FAST_FORWARD_ARGV = (*SERVED_FAST_FORWARD_PINS, "merge", "--ff-only")
+# words, then exactly one full commit id: `git merge --ff-only <commit>`.
+SERVED_FAST_FORWARD_ARGV = ("merge", "--ff-only")
 # A full object id, SHA-1 or SHA-256: never a branch or a short id, which name
 # whatever they name when git resolves them.
 _OBJECT_ID_SHAPE = re.compile(r"\A(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -242,16 +249,41 @@ class SessionActionInProgress(SessionGitRefused):
 # --------------------------------------------------------------------------
 
 class GitRunner(Protocol):
-    def run(self, cwd: Path, *args: str) -> subprocess.CompletedProcess: ...
+    def run(self, cwd: Path, *args: str,
+            config: Sequence[tuple[str, str]] = ()) -> subprocess.CompletedProcess:
+        """Run `git *args` in `cwd`. `config`, when given, is command-scope
+        configuration for this one command, delivered in its environment
+        (only the landing's fast-forward passes any)."""
+        ...
 
 
 class SubprocessGitRunner:
     """The real runner: `git` as a subprocess, output captured, never checked
-    here (the funnel raises `GitError` so every failure carries git's stderr)."""
+    here (the funnel raises `GitError` so every failure carries git's stderr).
 
-    def run(self, cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    THE ENVIRONMENT IS THE RUNTIME'S SANITIZED ONE, not `os.environ`. The
+    guard's premise is that `cwd` is the truth about which repository a command
+    touches, which is why it refuses every routing OPTION (PR #49 finding 18);
+    `GIT_DIR`, `GIT_WORK_TREE` and their relatives are the same routing in the
+    environment, and they OUTRANK `cwd`, so a process started with one set (a
+    git hook, an alias) would have had the guard approve one repository while
+    git merged into another (Copilot review of openDox-code#90).
+    `local_git_adapter.sanitized_git_environment()` strips exactly that set
+    for every other `git` this product runs; it is imported rather than
+    restated, so the lists cannot drift, and imported HERE rather than at the
+    top so this module keeps its light import (`authoring.py`'s precedent)."""
+
+    def run(self, cwd: Path, *args: str,
+            config: Sequence[tuple[str, str]] = ()) -> subprocess.CompletedProcess:
+        from opendox.runtime.local_git_adapter import sanitized_git_environment
+        env = sanitized_git_environment()
+        if config:
+            env["GIT_CONFIG_COUNT"] = str(len(config))
+            for index, (key, value) in enumerate(config):
+                env[f"GIT_CONFIG_KEY_{index}"] = key
+                env[f"GIT_CONFIG_VALUE_{index}"] = value
         return subprocess.run(["git", *args], cwd=str(cwd), text=True,
-                              capture_output=True, check=False)
+                              capture_output=True, check=False, env=env)
 
 
 # --------------------------------------------------------------------------
@@ -320,9 +352,10 @@ def is_served_root(served_root: Path, cwd: Path) -> bool:
 
 def served_fast_forward_commit(args: Sequence[str]) -> str | None:
     """The `<commit>` when `args` is EXACTLY `SERVED_FAST_FORWARD_ARGV` and one
-    full object id, else None: `git merge --ff-only <commit>` with its two
-    settings pinned. No other option before or after it, no `--`, no branch
-    name and no short id: the one argv the landing's fast-forward issues."""
+    full object id, else None: `git merge --ff-only <commit>`, exactly three
+    arguments (FR-004a exception 1). No other option before or after it, no
+    `-c`, no `--`, no branch name and no short id: the one argv the landing's
+    fast-forward issues."""
     argv = tuple(args)
     width = len(SERVED_FAST_FORWARD_ARGV)
     if len(argv) != width + 1 or argv[:width] != SERVED_FAST_FORWARD_ARGV:
@@ -573,11 +606,22 @@ class SessionGit:
         first line begins with a space for a worktree-only modification
         (` M path`) — stripping it would shift every path by one character and
         make the fingerprint's prefix filter read the wrong path."""
-        self._guard(cwd, args)
-        done = self.runner.run(Path(cwd), *args)
+        done = self._run(cwd, args)
         if done.returncode != 0:
             raise GitError(args, done.returncode, done.stderr or "")
         return (done.stdout or "").rstrip("\n")
+
+    def _run(self, cwd: Path | str, args: Sequence[str]
+             ) -> subprocess.CompletedProcess:
+        """Guard, then run. The landing's fast-forward, the one argv the guard
+        admits by its arguments, runs with `SERVED_FAST_FORWARD_SETTINGS` pinned
+        in its environment, by whichever method issues it: its argument vector
+        stays exactly the three arguments the guard admitted."""
+        self._guard(cwd, args)
+        if served_fast_forward_commit(args) is not None:
+            return self.runner.run(Path(cwd), *args,
+                                   config=SERVED_FAST_FORWARD_SETTINGS)
+        return self.runner.run(Path(cwd), *args)
 
     def _served_state(self) -> tuple[str, tuple[str, ...]]:
         """The served checkout's `HEAD` ref (`refs/heads/<name>`, or `HEAD` when
@@ -660,8 +704,7 @@ class SessionGit:
     def _try(self, cwd: Path | str, *args: str) -> tuple[bool, str]:
         """A read whose FAILURE is an answer (`check-ref-format`, an absent
         branch) rather than an error."""
-        self._guard(cwd, args)
-        done = self.runner.run(Path(cwd), *args)
+        done = self._run(cwd, args)
         return done.returncode == 0, (done.stdout or "").strip()
 
     # ---- ref legality: every derived name is validated before any git call ----

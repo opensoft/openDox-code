@@ -375,7 +375,8 @@ def test_land_shows_a_conflict_and_does_not_resolve_it(tmp_path):
     assert "doc.md" in str(conflict)
     assert conflict.remedy in str(conflict)
     # nothing merged, nothing resolved, nothing left behind
-    assert (world.refs(), world.fingerprint()) == before
+    after = (world.refs(), world.fingerprint())
+    assert after == before
     assert world.git("rev-parse", "-q", "--verify", "MERGE_HEAD", check=False) == ""
     assert world.worktrees() == [world.root.resolve()]
     assert (world.root / "doc.md").read_text(encoding="utf-8") == "main's words\n"
@@ -428,7 +429,7 @@ def test_no_configuration_enables_automatic_landing(tmp_path):
     with every plausible landing key beside them, and git's own configuration is
     set every way that would skip a merge commit or answer a conflict for the
     human (a fast-forward-only merge, a recorded resolution, a strategy that
-    keeps one side, an attribute that picks a merge driver): still no landing
+    keeps one side, an attribute or a fallback that picks a merge driver): still no landing
     without a confirmation, a conflict is still shown with its path, and a
     landing is still a two-parent merge commit."""
     for module in (landing, landing_confirm):
@@ -452,7 +453,8 @@ def test_no_configuration_enables_automatic_landing(tmp_path):
     git_config = (("merge.ff", "only"), ("rerere.enabled", "true"),
                   ("rerere.autoUpdate", "true"), ("pull.twohead", "ours"),
                   ("branch.main.mergeOptions", "-X theirs"),
-                  ("core.attributesFile", str(union)),
+                  ("core.attributesFile", str(union)), ("merge.default", "union"),
+                  ("merge.directoryRenames", "true"),
                   ("opendox.autoland", "true"), ("opendox.confirm", "true"))
 
     world = World(tmp_path / "conflicting")
@@ -585,6 +587,30 @@ def test_a_registered_host_outranks_any_declaration(world):
     refused = refusal(landing.request_landing, world.root, BRANCH,
                       confirmation=token, env=LOCAL)
     assert refused.code == "governed-without-an-instrument"
+
+
+def test_a_branch_that_moves_before_the_submission_submits_nothing(world):
+    """The confirmation binds a HEAD, and `submit(branch)` takes a name, so the
+    head is read again immediately before the submission: a branch that moved
+    while the instrument was built is refused, and nothing is submitted (Copilot
+    review of openDox-code#90)."""
+
+    class HostThatMovesTheBranch(InstrumentedHost):
+        def SUBMISSION_INSTRUMENT(self, root: Path) -> RecordingSubmissions:  # noqa: N802
+            world.branch_with(BRANCH, "notes/late.md", "a later commit\n")
+            return super().SUBMISSION_INSTRUMENT(root)
+
+    host = domain_profile.register(HostThatMovesTheBranch())
+    confirmed = world.head(BRANCH)
+    token = mint(world)
+
+    refused = refusal(landing.request_landing, world.root, BRANCH,
+                      confirmation=token, env=LOCAL)
+
+    assert refused.code == "confirmation:another-head"
+    assert confirmed[:12] in str(refused)
+    assert world.head(BRANCH) != confirmed
+    assert [port.submitted for port in host.ports] == [[]]
 
 
 def test_a_directly_constructed_confirmation_is_refused(world):
@@ -787,7 +813,8 @@ def test_a_dirty_served_checkout_on_main_is_refused_before_merging(world):
     assert refused.code == "dirty-served-checkout"
     assert "commit or stash" in str(refused)
     assert "doc.md" in str(refused)
-    assert (world.refs(), world.fingerprint()) == before
+    after = (world.refs(), world.fingerprint())
+    assert after == before
     assert world.worktrees() == [world.root.resolve()]
     assert not (world.tmp / "plain-worktrees" / landing.LANDING_SUBDIR).exists()
 
@@ -808,9 +835,9 @@ class RecordingRunner(session_git.SubprocessGitRunner):
     def __init__(self) -> None:
         self.calls: list[tuple[Path, tuple[str, ...]]] = []
 
-    def run(self, cwd, *args):
+    def run(self, cwd, *args, **settings):
         self.calls.append((Path(cwd), tuple(args)))
-        return super().run(cwd, *args)
+        return super().run(cwd, *args, **settings)
 
     def subcommands(self) -> list[str]:
         return [session_git.command_subcommand(args) for _cwd, args in self.calls]
@@ -871,12 +898,52 @@ def test_a_served_checkout_on_another_branch_is_left_and_main_moves(world):
     world.git("checkout", "-q", "-b", "elsewhere")
     world.write("doc.md", "an edit on another branch, uncommitted\n")
     before = world.fingerprint()
+    runner = RecordingRunner()
 
-    landed = lander(world).land(BRANCH, confirmation=mint(world))
+    landed = lander(world, runner=runner).land(BRANCH, confirmation=mint(world))
 
     assert landed.served_checkout == landing.SERVED_LEFT
     assert world.head("refs/heads/main") == landed.merge_commit
     assert world.fingerprint() == before
+    # `main` moved WITH a working tree, the landing worktree's, never by its
+    # ref alone: it took `main`, then fast-forwarded it
+    container = (world.tmp / "plain-worktrees" / landing.LANDING_SUBDIR).resolve()
+    moves = [(cwd, args) for cwd, args in runner.calls
+             if session_git.command_subcommand(args) in {"switch", "update-ref"}
+             or args == (*session_git.SERVED_FAST_FORWARD_ARGV, landed.merge_commit)]
+    assert [args for _cwd, args in moves] == [
+        ("switch", "--quiet", "main"),
+        (*session_git.SERVED_FAST_FORWARD_ARGV, landed.merge_commit)]
+    assert all(container in cwd.resolve().parents for cwd, _args in moves)
+
+
+def test_no_working_tree_can_take_main_while_the_landing_moves_it(world, tmp_path):
+    """The landing worktree HOLDS `main` while it moves it, and git refuses
+    `main` to every other working tree meanwhile: the exclusive access a read
+    of the holder followed by a ref update could not give (Copilot's second
+    review of openDox-code#90)."""
+    world.git("checkout", "-q", "-b", "elsewhere")
+    late = tmp_path / "late-holder"
+
+    class TriesToTakeMainBeforeTheMove(session_git.SubprocessGitRunner):
+        attempt: subprocess.CompletedProcess | None = None
+
+        def run(self, cwd, *args, **settings):
+            if args[:2] == session_git.SERVED_FAST_FORWARD_ARGV:
+                type(self).attempt = subprocess.run(
+                    ["git", "worktree", "add", "-q", str(late), "main"],
+                    cwd=str(world.root), text=True, capture_output=True)
+            return super().run(cwd, *args, **settings)
+
+    landed = lander(world, runner=TriesToTakeMainBeforeTheMove()).land(
+        BRANCH, confirmation=mint(world))
+
+    attempt = TriesToTakeMainBeforeTheMove.attempt
+    assert attempt is not None, "the move was not made in a working tree"
+    assert attempt.returncode != 0
+    assert not late.exists()
+    assert world.head("refs/heads/main") == landed.merge_commit
+    assert world.worktrees() == [world.root.resolve()]
 
 
 def test_main_held_by_another_working_tree_is_refused(world, tmp_path):
@@ -892,14 +959,15 @@ def test_main_held_by_another_working_tree_is_refused(world, tmp_path):
 def test_main_checked_out_during_the_merge_is_refused_before_its_ref_moves(
         world, tmp_path):
     """A working tree that takes `main` while the detached merge is made would be
-    left behind a moved ref, so the holder is read again before the ref-only
-    update (Copilot review of openDox-code#90)."""
+    left behind a moved ref, so `main` is moved only by a working tree that
+    holds it: the landing worktree, which git refuses `main` while another
+    holds it (Copilot reviews of openDox-code#90)."""
     world.git("checkout", "-q", "-b", "elsewhere")
     holder = tmp_path / "late-holder"
 
     class TakesMainDuringTheMerge(session_git.SubprocessGitRunner):
-        def run(self, cwd, *args):
-            done = super().run(cwd, *args)
+        def run(self, cwd, *args, **settings):
+            done = super().run(cwd, *args, **settings)
             if "--no-ff" in args:
                 world.git("worktree", "add", "-q", str(holder), "main")
             return done
@@ -919,10 +987,10 @@ def test_a_served_checkout_switched_during_the_fast_forward_is_never_reported(
     makes is never reported as `main` landing (Copilot review of #90)."""
 
     class SwitchesBeforeTheFastForward(session_git.SubprocessGitRunner):
-        def run(self, cwd, *args):
+        def run(self, cwd, *args, **settings):
             if "--ff-only" in args:
                 world.git("checkout", "-q", "-b", "racer")
-            return super().run(cwd, *args)
+            return super().run(cwd, *args, **settings)
 
     previous = world.head("refs/heads/main")
     port = lander(world, runner=SwitchesBeforeTheFastForward())
@@ -978,8 +1046,8 @@ def test_a_fast_forward_that_no_longer_applies_refuses_leaving_main(world):
     class MainMovesDuringTheMerge(session_git.SubprocessGitRunner):
         moved: str | None = None
 
-        def run(self, cwd, *args):
-            done = super().run(cwd, *args)
+        def run(self, cwd, *args, **settings):
+            done = super().run(cwd, *args, **settings)
             if "--no-ff" in args and self.moved is None:
                 world.write("late.md", "late\n")
                 type(self).moved = world.commit("a late commit on main", "late.md")
@@ -993,18 +1061,25 @@ def test_a_fast_forward_that_no_longer_applies_refuses_leaving_main(world):
     assert world.worktrees() == [world.root.resolve()]
 
 
-def test_main_moved_under_a_left_checkout_refuses_leaving_main(world):
+@pytest.mark.parametrize("to", ["a late commit", "the branch's head"])
+def test_main_moved_under_a_left_checkout_refuses_leaving_main(world, to):
+    """`main` is moved only from the tip the merge was made on: a `main` that
+    moved meanwhile is refused, even to a commit the merge commit contains
+    (where a bare fast-forward would still apply)."""
     world.git("checkout", "-q", "-b", "elsewhere")
 
     class MainMovesDuringTheMerge(session_git.SubprocessGitRunner):
         moved: str | None = None
 
-        def run(self, cwd, *args):
-            done = super().run(cwd, *args)
+        def run(self, cwd, *args, **settings):
+            done = super().run(cwd, *args, **settings)
             if "--no-ff" in args and self.moved is None:
-                tree = world.tree("refs/heads/main")
-                late = world.git("commit-tree", tree, "-p", "refs/heads/main",
-                                 "-m", "late")
+                if to == "a late commit":
+                    tree = world.tree("refs/heads/main")
+                    late = world.git("commit-tree", tree, "-p", "refs/heads/main",
+                                     "-m", "late")
+                else:
+                    late = world.head(BRANCH)
                 world.git("update-ref", "refs/heads/main", late)
                 type(self).moved = late
             return done
@@ -1013,6 +1088,27 @@ def test_main_moved_under_a_left_checkout_refuses_leaving_main(world):
     token = mint(world)
     assert refusal(port.land, BRANCH, confirmation=token).code == "main-moved"
     assert world.head("refs/heads/main") == MainMovesDuringTheMerge.moved
+
+
+def test_a_main_that_does_not_land_on_the_merge_commit_is_never_reported(world):
+    """A hook that moves `main` again after the landing worktree fast-forwards
+    it: `main` is read after the move, and a landing is reported only where it
+    holds the merge commit."""
+    world.git("checkout", "-q", "-b", "elsewhere")
+    hook = world.hooks / "post-merge"
+    hook.write_text(
+        "#!/bin/sh\n"
+        "[ \"$(git symbolic-ref -q HEAD)\" = refs/heads/main ] || exit 0\n"
+        "git update-ref refs/heads/main HEAD^1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    previous = world.head("refs/heads/main")
+    port, token = lander(world), mint(world)
+
+    refused = refusal(port.land, BRANCH, confirmation=token)
+
+    assert refused.code == "main-moved"
+    assert "did not land on the merge commit" in str(refused)
+    assert world.head("refs/heads/main") == previous
 
 
 def test_land_refuses_main_itself_and_a_branch_already_landed(world):
@@ -1074,6 +1170,8 @@ def test_a_merge_attribute_in_the_tree_cannot_resolve_a_conflict(tmp_path):
 @pytest.mark.parametrize("attributes,config", [
     ("doc.md merge=union\n", ()),
     ("* merge=mine\n", (("merge.mine.driver", "cp %B %A"),)),
+    # `text` NAMED is looked up among the configured drivers first
+    ("doc.md merge=text\n", (("merge.text.driver", "cp %B %A"),)),
 ])
 def test_a_merge_driver_this_machine_selects_is_refused_before_merging(
         tmp_path, attributes, config):
@@ -1093,6 +1191,99 @@ def test_a_merge_driver_this_machine_selects_is_refused_before_merging(
     assert "doc.md" in str(refused)
     assert world.refs() == before
     assert world.worktrees() == [world.root.resolve()]
+
+
+@pytest.mark.parametrize("config", [
+    (("merge.default", "union"),),
+    (("merge.default", "text"), ("merge.text.driver", "cp %B %A")),
+    (("merge.default", ""), ("merge..driver", "cp %B %A")),
+    (("merge.default", "mine"), ("merge.mine.driver", "cp %B %A")),
+], ids=["union", "text-hijacked", "empty-name-hijacked", "a-named-driver"])
+def test_a_configured_fallback_driver_cannot_resolve_a_conflict(tmp_path, config):
+    """`merge.default` picks the driver for every file with NO `merge`
+    attribute, so a configured `union` (or any driver configured by name) would
+    answer an overlapping edit with a clean two-parent merge (Copilot's second
+    review of openDox-code#90). The landing merge names a fallback no
+    configuration can know, so git's own three-way merge shows the conflict."""
+    world = _conflicting_world(tmp_path)
+    for key, value in config:
+        world.git("config", key, value)
+    before = world.refs()
+    port, token = lander(world), mint(world)
+
+    with pytest.raises(MergeConflict) as conflict:
+        port.land(BRANCH, confirmation=token)
+
+    assert conflict.value.paths == ("doc.md",)
+    assert world.refs() == before
+    assert (world.root / "doc.md").read_text(encoding="utf-8") == "main's words\n"
+
+
+def test_a_directory_rename_stays_a_conflict_whatever_git_is_configured_to_do(
+        tmp_path):
+    """`main` renames a directory and the branch adds a file under its old name.
+    git's default stops and shows where the file should go; with
+    `merge.directoryRenames=true` it places the file itself and the merge is
+    clean (measured, git 2.43). The landing merge pins git's default."""
+    world = World(tmp_path)
+    world.write("old/one.md", "one\n")
+    world.commit("a directory", "old/one.md")
+    world.branch_with(BRANCH, "old/two.md", "the branch's new file\n")
+    world.git("mv", "old", "new")
+    world.git("commit", "-q", "-m", "main renames the directory")
+    world.git("config", "merge.directoryRenames", "true")
+    before = world.refs()
+    port, token = lander(world), mint(world)
+
+    with pytest.raises(MergeConflict) as conflict:
+        port.land(BRANCH, confirmation=token)
+
+    assert conflict.value.paths == ("new/two.md",)
+    assert world.refs() == before
+
+
+def test_a_conflict_names_its_paths_as_they_are_spelled(tmp_path):
+    """git QUOTES a path with a non-ASCII byte or a quote unless it is asked for
+    NUL-delimited names (`"d\\303\\266k.md"`), so the conflict's paths are read
+    with `-z` (Copilot review of openDox-code#90)."""
+    world = World(tmp_path)
+    names = ("dök.md", 'say "hi".md')
+    for name in names:
+        world.branch_with(BRANCH, name, "the branch's words\n")
+        world.on_main(name, "main's words\n")
+    port, token = lander(world), mint(world)
+
+    with pytest.raises(MergeConflict) as conflict:
+        port.land(BRANCH, confirmation=token)
+
+    assert conflict.value.paths == names
+    assert all(name in str(conflict.value) for name in names)
+
+
+def test_an_ambient_git_dir_cannot_redirect_the_landing(world, tmp_path):
+    """`GIT_DIR` and `GIT_WORK_TREE` outrank the directory a command runs in,
+    so a process started with them set (a git hook, an alias) would have had
+    the guard approve the served checkout while git merged into another
+    repository (Copilot review of openDox-code#90). Every git this product runs
+    drops them, so the landing lands where it was asked to."""
+    decoy = tmp_path / "decoy"
+    world.git("clone", "-q", "--no-local", str(world.root), str(decoy))
+    decoy_refs = world.git("for-each-ref", "--format=%(refname) %(objectname)",
+                           cwd=decoy)
+    port, token = lander(world), mint(world)
+
+    with pytest.MonkeyPatch.context() as ambient:
+        ambient.setenv("GIT_DIR", str(decoy / ".git"))
+        ambient.setenv("GIT_WORK_TREE", str(decoy))
+        landed = port.land(BRANCH, confirmation=token)
+
+    assert world.head("refs/heads/main") == landed.merge_commit
+    assert world.head() == landed.merge_commit
+    after = world.git("for-each-ref", "--format=%(refname) %(objectname)",
+                      cwd=decoy)
+    assert after == decoy_refs
+    assert world.git("worktree", "list", "--porcelain", cwd=decoy).count(
+        "worktree ") == 1
 
 
 def test_a_merge_that_fails_without_a_conflict_keeps_git_s_reason(world):
@@ -1256,6 +1447,21 @@ def test_the_view_issuer_is_single_use_and_bound_to_its_branch(world):
                                 third).code == "no-nonce"
     refused = confirmation_refusal(nonces.issue_nonce, BRANCH, "not-a-commit")
     assert refused.code == "bad-binding"
+
+
+@pytest.mark.parametrize("presented", ["\ud800", "dök", b"bytes", None],
+                         ids=["lone-surrogate", "non-ascii", "bytes", "none"])
+def test_a_nonce_that_is_not_an_ascii_string_is_refused_not_raised(world,
+                                                                   presented):
+    """A JSON body can carry a lone surrogate (`"\\ud800"`), which `encode()`
+    cannot encode: it is a mismatch, and the live nonce is spent by it (Copilot
+    review of openDox-code#90)."""
+    nonces = landing_confirm.LandingNonces()
+    issued = nonces.issue_nonce(BRANCH, world.head(BRANCH))
+    refused = confirmation_refusal(nonces.confirm_nonce, BRANCH, presented)
+    assert refused.code == "nonce-mismatch"
+    assert confirmation_refusal(nonces.confirm_nonce, BRANCH,
+                                issued).code == "no-nonce"
 
 
 # ==========================================================================

@@ -65,14 +65,16 @@ Its `land` (R2Q6 (a)):
   `<repo>-worktrees/landing/`, detached at `main`'s tip, with git's own
   strategy and drivers only: `.gitattributes` and the global attributes file
   are taken out of the merge, a driver this machine's own attributes still
-  select is refused before merging, and rerere is off, so nothing but a human
-  answers a conflict; a conflict raises `MergeConflict` with the paths and the
-  remedy, and nothing moves (OQ-038-1);
+  select is refused before merging, the fallback driver and directory-rename
+  placement are pinned to git's defaults, and rerere is off, so nothing but a
+  human answers a conflict; a conflict raises `MergeConflict` with the paths
+  and the remedy, and nothing moves (OQ-038-1);
 * then moves `main`: where the served checkout holds it (and is still clean),
   by `git merge --ff-only <merge commit>` there, the one move feature 007's
-  guard admits at the served root (T013); where it holds another branch, by a
-  compare-and-swap of the `main` ref alone, leaving the served checkout as it
-  was (`left`);
+  guard admits at the served root (T013); where it holds another branch, the
+  landing worktree takes `main` (git refuses that while any other working tree
+  holds it, and refuses `main` to every other one meanwhile) and fast-forwards
+  it there, leaving the served checkout as it was (`left`);
 * pushes NOTHING (R2Q6 (a)). A landed `main` leaves the machine only by the
   user's own `git push`.
 
@@ -93,7 +95,8 @@ from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 import yaml
 
 from .landing_confirm import Confirmation, ConfirmationRefused, redeem
-from .session_git import GitError, GitRunner, SessionGit, SessionGitRefused
+from .session_git import (SERVED_FAST_FORWARD_ARGV, GitError, GitRunner,
+                          SessionGit, SessionGitRefused)
 
 __all__ = [
     "DECLARATION_CONTENT",
@@ -166,10 +169,12 @@ _EMPTY_TREE = {
     "sha1": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
     "sha256": "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321",
 }
-#: The `merge` attribute's values that select git's OWN drivers. Anything else
-#: (`union`, or a driver configured by name) can resolve a conflict with no human.
-_GITS_OWN_MERGE_VALUES = frozenset({"unspecified", "set", "unset", "text",
-                                    "binary"})
+#: The `merge` attribute's states that select git's OWN drivers WITHOUT a lookup
+#: by name. Any named value is looked up among the drivers configured by name
+#: FIRST, so even `text` or `binary` can name a configured driver (measured,
+#: git 2.43: `merge.text.driver` answered `merge.default=text`); a driver can
+#: resolve a conflict with no human.
+_GITS_OWN_MERGE_VALUES = frozenset({"unspecified", "set", "unset"})
 #: How many paths one `check-attr` call names.
 _PATHS_PER_CHECK = 200
 _GITLINK_OR_LINK = ("120000", "160000")
@@ -185,6 +190,13 @@ def _read(git: SessionGit, cwd: Path, *args: str) -> str | None:
         return git.git(cwd, *args)
     except GitError:
         return None
+
+
+def _fresh_merge_driver_name() -> str:
+    """A merge-driver name no configuration can have defined in advance: the
+    landing merge's `merge.default`, so git's own three-way merge decides every
+    file with no `merge` attribute."""
+    return f"opendox-land-{secrets.token_hex(16)}"
 
 
 def _commit_at(git: SessionGit, ref: str) -> str | None:
@@ -803,14 +815,30 @@ class NeutralLander:
         try:
             # `--strategy=ort`: git's own strategy, so no `pull.twohead` setting
             # chooses another (`ours` would drop the branch with no conflict);
-            # rerere off, so no recorded resolution answers for the human.
+            # rerere off, so no recorded resolution answers for the human. And
+            # the two settings that would answer a conflict, pinned for this
+            # merge (Copilot's second review of openDox-code#90; MEASURED, git
+            # 2.43):
+            # - `merge.default` names the driver for every file with NO `merge`
+            #   attribute, so `merge.default=union` resolved an overlapping edit
+            #   into a clean merge. git looks the name up among the drivers
+            #   configured by name FIRST and falls back to its own three-way
+            #   merge for a name it does not find, so a FRESH name no
+            #   configuration can know is the one value no driver answers (an
+            #   empty value was answered by a driver configured as
+            #   `merge..driver`, and `text` by `merge.text.driver`);
+            # - `merge.directoryRenames=true` places a file added under a
+            #   directory the other side renamed, with no conflict, where git's
+            #   default stops and shows it.
             self.git.git_raw(path, *neutral, "-c", "rerere.enabled=false",
+                             "-c", f"merge.default={_fresh_merge_driver_name()}",
+                             "-c", "merge.directoryRenames=conflict",
                              "merge", "--strategy=ort", "--no-ff", "--no-edit",
                              "-m", message, head)
         except GitError as failed:
-            unmerged = self.git.git(path, "diff", "--name-only",
-                                    "--diff-filter=U")
-            paths = tuple(p for p in unmerged.splitlines() if p.strip())
+            unmerged = self.git.git_raw(path, "diff", "--name-only", "-z",
+                                        "--diff-filter=U")
+            paths = tuple(dict.fromkeys(p for p in unmerged.split("\0") if p))
             if paths:
                 raise MergeConflict(branch, paths) from None
             raise LandingRefused(
@@ -850,24 +878,50 @@ class NeutralLander:
                     "where it was and nothing landed",
                     code="fast-forward-no-longer-applies") from None
             return SERVED_FAST_FORWARDED
-        holder = self._holder_of_main()
-        if holder is not None:
-            # Re-read: a working tree that took `main` while the merge was made
-            # would be left with its index and files behind a moved ref
-            # (Copilot review of openDox-code#90).
-            raise LandingRefused(
-                f"`{DEFAULT_BRANCH}` was checked out at {holder} while the merge "
-                f"was made, and `land` moves `{DEFAULT_BRANCH}` by its ref alone "
-                f"only where no working tree holds it; `{DEFAULT_BRANCH}` is where "
-                "it was. Land again", code="main-checked-out-elsewhere")
+        return self._advance_main_here(path, merged, main)
+
+    def _advance_main_here(self, path: Path, merged: str, main: str) -> str:
+        """Advance `main` IN THE LANDING WORKTREE, where the served checkout
+        holds another branch: the landing worktree TAKES `main`, then
+        fast-forwards it to the merge commit, so `main` moves with a working
+        tree's index and files and never by its ref alone.
+
+        Taking it is the exclusive access. git refuses to check out a branch
+        another working tree holds, and, while this one holds `main`, refuses
+        every other working tree `main`; so no working tree can take `main`
+        between a check and the move and be left behind a moved ref, which a
+        read of the holder followed by a ref update could not promise (Copilot's
+        second review of openDox-code#90)."""
         try:
-            self.git.git(path, "update-ref", "-m", "opendox land",
-                         f"refs/heads/{DEFAULT_BRANCH}", merged, main)
+            self.git.git(path, "switch", "--quiet", DEFAULT_BRANCH)
+        except GitError as failed:
+            holder = self._holder_of_main()
+            if holder is not None:
+                raise LandingRefused(
+                    f"`{DEFAULT_BRANCH}` was checked out at {holder} while the "
+                    f"merge was made, so the landing could not take it; "
+                    f"`{DEFAULT_BRANCH}` is where it was. Land again",
+                    code="main-checked-out-elsewhere") from None
+            raise LandingRefused(
+                f"the landing worktree could not take `{DEFAULT_BRANCH}` "
+                f"({_redact(failed.stderr)}); `{DEFAULT_BRANCH}` is where it was",
+                code="landing-worktree") from None
+        try:
+            if self.git.git(path, "rev-parse", "HEAD") != main:
+                raise GitError(("rev-parse", "HEAD"), 1, "main moved")
+            # The funnel pins the settings that could make this a merge
+            # (`session_git.SERVED_FAST_FORWARD_SETTINGS`).
+            self.git.git(path, *SERVED_FAST_FORWARD_ARGV, merged)
         except GitError:
             raise LandingRefused(
                 f"`{DEFAULT_BRANCH}` moved while the merge was made, so it was "
                 "left where it moved to and nothing landed. Land again",
                 code="main-moved") from None
+        if self._ref(f"refs/heads/{DEFAULT_BRANCH}") != merged:
+            raise LandingRefused(
+                f"`{DEFAULT_BRANCH}` did not land on the merge commit "
+                f"{merged[:12]}, so nothing is reported as landed. Look at "
+                f"`{DEFAULT_BRANCH}` before landing again", code="main-moved")
         return SERVED_LEFT
 
     # ---- the one operation ----
@@ -969,4 +1023,13 @@ def request_landing(checkout_root: Path | str, branch: str, *,
             f"the host's instrument ({INSTRUMENT_FACET} of {reading.host}) could "
             f"not be built ({type(failed).__name__}: {failed}); nothing was "
             "submitted", code="instrument-failed") from None
+    # READ AGAIN, immediately before the submission: a branch that moved after
+    # the human confirmed it (even while the instrument was built) is not the
+    # head the human confirmed. `submit(branch)` takes a branch name (12.1), so
+    # a move after this read stays the instrument's to see; it is a stated
+    # limit (Copilot review of openDox-code#90).
+    if _commit_at(git, f"refs/heads/{branch}") != head:
+        raise LandingRefused(
+            f"{branch} moved after the human confirmed it at {head[:12]}, so "
+            "nothing was submitted: confirm the new head", code="confirmation:another-head")
     return submit(branch)

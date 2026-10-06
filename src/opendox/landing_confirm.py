@@ -358,8 +358,11 @@ class LandingNonces:
                 "fetches one for the branch it shows, and each is single-use",
                 code="no-nonce")
         live, head = entry
-        if not isinstance(nonce, str) or not secrets.compare_digest(
-                live.encode(), nonce.encode()):
+        # An issued nonce is ASCII, so anything else is refused before it is
+        # encoded: a lone surrogate (`"\\ud800"` in a JSON body) would otherwise
+        # raise `UnicodeEncodeError` here (Copilot review of openDox-code#90).
+        if not isinstance(nonce, str) or not nonce.isascii() or \
+                not secrets.compare_digest(live.encode(), nonce.encode()):
             raise ConfirmationRefused(
                 f"the nonce does not match the one issued for {branch!r}; it is "
                 "spent now, so fetch a new one and confirm again",

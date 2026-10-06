@@ -20,6 +20,7 @@ Two assertions here carry more weight than the rest:
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -37,9 +38,9 @@ class RecordingRunner:
         self.real = sg.SubprocessGitRunner()
         self.calls: list[tuple[str, ...]] = []
 
-    def run(self, cwd, *args):
+    def run(self, cwd, *args, **settings):
         self.calls.append(tuple(args))
-        return self.real.run(cwd, *args)
+        return self.real.run(cwd, *args, **settings)
 
     def subcommands(self) -> list[str]:
         return [next((a for a in call if not a.startswith("-")), "")
@@ -504,6 +505,23 @@ def test_git_routing_options_are_refused_from_any_cwd(git_and_repo, routing):
     assert repo.branch() == before.branch
 
 
+def test_routing_in_the_environment_never_reaches_git(git_and_repo, tmp_path,
+                                                       monkeypatch):
+    """`GIT_DIR` and `GIT_WORK_TREE` are the routing options' twins in the
+    ENVIRONMENT, and they outrank `cwd`: a guard that inspected the served
+    checkout would have approved a command git then ran in another repository.
+    The runner drops them (Copilot review of openDox-code#90)."""
+    git, repo, _runner = git_and_repo
+    decoy = tmp_path / "decoy"
+    repo.git("clone", "-q", "--no-local", str(repo.root), str(decoy))
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+
+    top = git.git(repo.root, "rev-parse", "--show-toplevel")
+
+    assert Path(top).resolve() == Path(repo.root).resolve()
+
+
 def test_a_served_subdirectory_cannot_move_the_served_checkout(git_and_repo):
     """`<served>/ideation` IS the served checkout's working tree, and a `git
     checkout` run there moves it identically — measured. The guard now resolves the
@@ -567,9 +585,9 @@ def test_the_allowlist_still_admits_every_operation_the_contract_names(git_and_r
     # admits is one ARGUMENT-checked form, `merge --ff-only <commit>`, for a clean
     # checkout on `main`, and only by the guard's argument check below.
     assert "merge" not in sg.SERVED_ALLOWED_SUBCOMMANDS
-    assert sg.SERVED_FAST_FORWARD_ARGV == (
-        "-c", "pull.twohead=ort", "-c", "branch.main.mergeOptions=",
-        "merge", "--ff-only")
+    assert sg.SERVED_FAST_FORWARD_ARGV == ("merge", "--ff-only")
+    assert sg.SERVED_FAST_FORWARD_SETTINGS == (("pull.twohead", "ort"),
+                                               ("branch.main.mergeOptions", ""))
     assert sg.SERVED_FAST_FORWARD_BRANCH == "main"
     commit = "0" * 40
     admitted = (*sg.SERVED_FAST_FORWARD_ARGV, commit)
@@ -614,20 +632,32 @@ def test_the_served_root_admits_the_landings_fast_forward_on_a_clean_main(
     assert (*sg.SERVED_FAST_FORWARD_ARGV, ahead) in runner.calls
 
 
+@pytest.mark.parametrize("via", ["fast_forward_served", "the funnel"])
 @pytest.mark.parametrize("setting", [("pull.twohead", "ours"),
                                      ("branch.main.mergeOptions", "-s ours"),
-                                     ("branch.main.mergeOptions", "-s subtree")])
+                                     ("branch.main.mergeOptions", "-s subtree"),
+                                     ("branch.main.mergeOptions", "--squash")])
 def test_no_merge_setting_turns_the_fast_forward_into_a_merge(git_and_repo,
-                                                               setting):
+                                                               setting, via):
     """MEASURED on git 2.43: under each of these settings a bare `git merge
-    --ff-only <descendant>` exits 0 having made a NEW merge commit. The admitted
-    argv pins them, so the served checkout lands exactly on the commit."""
-    git, repo, _ = git_and_repo
+    --ff-only <descendant>` exits 0 having made a NEW merge commit (or, with
+    `--squash`, having changed the index and moved nothing). The funnel pins
+    them in the command's ENVIRONMENT, whichever method issues the admitted
+    argv, so the served checkout lands exactly on the commit while the argv
+    stays the three arguments FR-004a exception 1 admits."""
+    git, repo, runner = git_and_repo
     ahead = _a_commit_ahead_of_main(git, repo)
     repo.git("config", *setting)
 
-    assert git.fast_forward_served(ahead) == ahead
+    if via == "fast_forward_served":
+        assert git.fast_forward_served(ahead) == ahead
+    else:
+        git.git(repo.root, "merge", "--ff-only", ahead)
+
     assert repo.head("main") == ahead
+    assert repo.head() == ahead
+    assert repo.served_fingerprint().porcelain == ()
+    assert ("merge", "--ff-only", ahead) in runner.calls
 
 
 def test_a_fast_forward_that_lands_elsewhere_is_never_reported(git_and_repo):
@@ -637,10 +667,10 @@ def test_a_fast_forward_that_lands_elsewhere_is_never_reported(git_and_repo):
     _git, repo, _ = git_and_repo
 
     class SwitchesFirst(RecordingRunner):
-        def run(self, cwd, *args):
+        def run(self, cwd, *args, **settings):
             if "--ff-only" in args:
                 repo.git("checkout", "-q", "-b", "racer")
-            return super().run(cwd, *args)
+            return super().run(cwd, *args, **settings)
 
     git = sg.SessionGit(repo.root, runner=SwitchesFirst())
     ahead = _a_commit_ahead_of_main(git, repo)
@@ -692,7 +722,8 @@ def test_the_fast_forward_is_refused_when_the_served_checkout_holds_another_bran
 
 @pytest.mark.parametrize("argv", [
     ("merge", "other-branch"),
-    ("merge", "--ff-only", "{ahead}"),
+    ("-c", "pull.twohead=ort", "-c", "branch.main.mergeOptions=", "merge",
+     "--ff-only", "{ahead}"),
     ("merge", "--ff-only", "other-branch"),
     ("merge", "--ff-only", "main"),
     ("merge", "--ff-only", "{short}"),
@@ -705,10 +736,11 @@ def test_the_fast_forward_is_refused_when_the_served_checkout_holds_another_bran
 ])
 def test_no_other_merge_spelling_is_admitted_even_on_a_clean_main(git_and_repo,
                                                                    argv):
-    """The argument check admits EXACTLY `merge --ff-only <full commit id>`. A
-    branch name, a short id, a second argument, an option before or after it, and
-    every other merge are refused before git is invoked, on a checkout that is
-    clean and on `main`, so only the argv decides."""
+    """The argument check admits EXACTLY `merge --ff-only <full commit id>`,
+    three arguments (FR-004a exception 1). A branch name, a short id, a second
+    argument, an option before or after it (a `-c` included), and every other
+    merge are refused before git is invoked, on a checkout that is clean and on
+    `main`, so only the argv decides."""
     git, repo, runner = git_and_repo
     ahead = _a_commit_ahead_of_main(git, repo)
     args = tuple(a.format(ahead=ahead, short=ahead[:12]) for a in argv)
