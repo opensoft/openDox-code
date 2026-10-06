@@ -87,6 +87,14 @@ _SSH_SCHEMES = ("ssh://", "git+ssh://", "ssh+git://")
 #: makes the userinfo a credential, as everything else in it does.
 _LOGIN_NAME = re.compile(r"[A-Za-z0-9._-]+")
 
+#: The transports git carries itself. Any other `<scheme>://` makes git
+#: resolve and run `git-remote-<scheme>` from `PATH`, exactly as `<name>::`
+#: does, which `repository_act.refuse_command_executing_remote` refuses, and
+#: `-c protocol.ext.allow=never` governs neither. Matched as git matches
+#: them, case and all.
+_GIT_TRANSPORTS = frozenset({"file", "ftp", "ftps", "git", "git+ssh", "http",
+                             "https", "ssh", "ssh+git"})
+
 #: Below this length a held value is not scrubbed out of foreign text: a
 #: two-letter value replaced everywhere garbles the message and protects
 #: nothing.
@@ -164,9 +172,18 @@ def _submit_with(git: GitRunner, root: Path, branch: str) -> Submission:
     try:
         repository_act._refuse_repository_local_command_config(git, root)
         remote = _chosen_remote(git, root, branch)
+        if remote.startswith("-"):
+            # MEASURED on git 2.43.0: `[remote "--force"]` is listed by `git
+            # remote`, and a network push names the remote on the command
+            # line, where git would read it as an option.
+            raise SubmissionRefused(
+                f"the remote `{remote}` is named like a git option, and a "
+                "push names it on the command line; nothing is pushed. Rename "
+                "it (`git remote rename`).")
         commit = _branch_tip(git, root, branch)
         url = _the_one_push_url(git, remote, branch)
         repository_act.refuse_command_executing_remote(url)
+        _refuse_a_helper_transport(url, branch)
         # A URL `urlsplit` refuses (`file://[bad`) is refused HERE, by name:
         # the push core reads the destination before it binds it, and a
         # `ValueError` from there would escape as no refusal at all.
@@ -256,6 +273,23 @@ def _branch_tip(git: GitRunner, root: Path, branch: str) -> str:
         raise SubmissionRefused(
             f"{root} has no local branch `{branch}`; nothing is pushed")
     return tip.stdout.decode().strip()
+
+
+def _refuse_a_helper_transport(url: str, branch: str) -> None:
+    """Refuse a `<scheme>://` URL whose scheme git does not carry itself.
+
+    MEASURED on git 2.43.0: `git push evil://example/repo …` runs
+    `git-remote-evil` from `PATH`. That is the `<name>::` hazard under a
+    second spelling, so it is refused before any push, by its scheme alone.
+    """
+    scheme = _SCHEME.match(url)
+    if scheme and url[:scheme.end() - 3] not in _GIT_TRANSPORTS:
+        name = url[:scheme.end() - 3]
+        raise SubmissionRefused(
+            f"the push URL names the transport `{name}://`, which git does "
+            f"not carry: it would resolve and run `git-remote-{name}` from "
+            f"PATH, so the push of `{branch}` is refused before it runs. Use "
+            "an ssh, https, git or file URL, or a path.")
 
 
 def _the_one_push_url(git: GitRunner, remote: str, branch: str) -> str:

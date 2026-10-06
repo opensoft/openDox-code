@@ -372,6 +372,44 @@ def test_a_remote_that_names_a_command_is_refused(
     assert not marker.exists()
 
 
+def test_a_remote_named_like_an_option_is_refused(
+        checkout: Path, tmp_path: Path) -> None:
+    """`[remote "--force"]` is listed by `git remote` (measured, git
+    2.43.0), and a network push names the remote on the command line, where
+    git would read `--force` as the option it spells."""
+    target = _bare(tmp_path / "remote.git")
+    _git(checkout, "config", "remote.--force.url", str(target))
+    port = LocalGitSubmissions(checkout)
+    with pytest.raises(SubmissionError) as caught:
+        port.submit("sess-1")
+    assert type(caught.value) is SubmissionRefused
+    assert "named like a git option" in str(caught.value)
+    assert _heads(target) == ""
+
+
+def test_a_scheme_git_does_not_carry_is_refused_before_its_helper_runs(
+        checkout: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """MEASURED on git 2.43.0: `evil://…` makes git run `git-remote-evil`
+    from PATH, the `<name>::` hazard under another spelling. A helper that
+    would leave a marker is planted on PATH; the submission is refused by the
+    scheme and the helper never runs."""
+    helpers = tmp_path / "bin"
+    helpers.mkdir()
+    marker = tmp_path / "ran"
+    helper = helpers / "git-remote-evil"
+    helper.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n", encoding="utf-8")
+    helper.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{helpers}:{os.environ['PATH']}")
+    _git(checkout, "remote", "add", "origin", "evil://example.invalid/repo")
+    port = LocalGitSubmissions(checkout)
+    with pytest.raises(SubmissionError) as caught:
+        port.submit("sess-1")
+    assert type(caught.value) is SubmissionRefused
+    assert "`evil://`" in str(caught.value)
+    assert not marker.exists(), "the helper ran"
+
+
 def test_no_hook_runs_on_either_side(checkout: Path, origin: Path,
                                      tmp_path: Path) -> None:
     """The core's two hook guards hold for a submission: the checkout's own
