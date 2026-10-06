@@ -29,25 +29,162 @@
 // into evidence.
 //
 // § 3.4 SLICE S7 — THE VOCABULARY IS THE REGISTERED DOMAIN'S. This file is a
-// declared class-A TAIL (census row `tail: STATUS_BRAINSTORM`, § 3.2: "plus
+// declared class-A TAIL (census row `tail: capturedStatus`, § 3.2: "plus
 // STATUS_BRAINSTORM / BRAINSTORM_AREA / STAGING_AREA (class-C)"): its substance
 // is class A and its vocabulary is class C, so the words and the two corpus
 // paths come off the display facet and the SEAM KEYS it dispatches on come off
 // `views/display.js`'s declared tables.
 //
-// THE ONE SIBLING IMPORT it now carries is `./display.js`, which is itself
-// import-free by design — the same amendment `views/helpers.js`'s scope note
-// took at this slice. The vocabulary rides in MODULE SCOPE rather than on every
-// exported signature (`views/lineage.js`'s pattern), because `workbenchScope`
-// is called from five places in `views/staging-workbench.js` and from the node
-// parity harness, and a fourth positional argument on a derivation this widely
-// called is a worse seam than one assignment at the mount: the shell hands the
-// facet down ONCE, at `setDisplay`, and every derivation below reads the same
-// vocabulary for the life of that render. A caller that sets none gets
-// openDox's own neutral words, which is the student install.
-import { SCOPE_KINDS, STAGE_ROLES, STATUS_ROLE, SESSION_SCOPE_KINDS,
-         SESSION_BRANCH_NAMESPACES, TAB_IDS,
-         neutralDisplay } from "./display.js";
+// IMPORT-FREE AGAIN (plan 038 T025, W-1 (A), RULED by Brett Heap on
+// openxFactory#656 comment `6013547504`, which reverses S7's one sibling
+// import by his word). S7 had this module import `./display.js`, and every
+// harness that copies the model ALONE into a scratch directory then failed on
+// `ERR_MODULE_NOT_FOUND`, which is the standalone rule the header above states.
+// So the tables it reads are INLINED below, each a copy of the `views/display.js`
+// table it names, and the census declares every one of them
+// (`inlined_display_tables` in `tests/fixtures/web_boundary_census.yaml`). The
+// copies are held equal to `views/display.js`'s by a guard plan 038 T050 adds;
+// `INLINED_DISPLAY_TABLES` below exports them, keyed by the expression that
+// names each original there, so that guard can read both ends. They are seam
+// keys, role names and openDox's own neutral words, never a registered
+// domain's: what a HOST says still arrives only through `setDisplay`.
+//
+// The vocabulary rides in MODULE SCOPE rather than on every exported signature
+// (`views/lineage.js`'s pattern), because `workbenchScope` is called from five
+// places in `views/staging-workbench.js` and from the node parity harness, and
+// a fourth positional argument on a derivation this widely called is a worse
+// seam than one assignment at the mount: the shell hands the facet down ONCE,
+// at `setDisplay`, and every derivation below reads the same vocabulary for the
+// life of that render. A caller that sets none gets openDox's own neutral
+// words, which is the student install.
+
+// `views/display.js` `STAGE_ROLES`: the six stage roles, in spine order.
+const STAGE_ROLES = ["source", "grouping", "candidate",
+                     "selection", "submission", "completion"];
+
+// `views/display.js` `STATUS_ROLE`: the eight status roles as named constants.
+const STATUS_ROLE = {
+  CAPTURED: "captured",
+  ORGANIZED: "organized",
+  PROPOSED: "proposed",
+  RATIFIED: "ratified",
+  PROMOTED: "promoted",
+  SUPERSEDED: "superseded",
+  RETIRED: "retired",
+  OUT_OF_BAND: "out-of-band",
+};
+
+// `views/display.js` `SCOPE_KINDS`: the workbench's scope-kind seam keys.
+const SCOPE_KINDS = {
+  grouping: "cluster",
+  candidate: "possible",
+  selection: "staged",
+};
+
+// `views/display.js` `TAB_IDS`: the workbench's three tab seam keys.
+const TAB_IDS = { source: "docs", lens: "lens", outline: "outline" };
+
+// `views/display.js` `SESSION_SCOPE_KINDS`: the branch-session transport's
+// scope vocabulary, read off the wire by `src/opendox/branch_session.py`.
+const SESSION_SCOPE_KINDS = {
+  [SCOPE_KINDS.selection]: "staged-topic",
+  [SCOPE_KINDS.grouping]: "cluster",
+  [SCOPE_KINDS.candidate]: "possible",
+};
+
+// `views/display.js` `SESSION_BRANCH_NAMESPACES`: the git ref namespace each
+// scope kind's session branch is cut under (`branch_session.session_branch`).
+const SESSION_BRANCH_NAMESPACES = {
+  [SCOPE_KINDS.selection]: "draft",
+  [SCOPE_KINDS.grouping]: "cluster",
+  [SCOPE_KINDS.candidate]: "possible",
+};
+
+// `views/display.js` `SNAPSHOT_VALUES`: the snapshot's two closed enums, by role.
+const SNAPSHOT_VALUES = {
+  document_stage: { captured: "source", organized: "grouping" },
+  register_state: { captured: "unselected", proposed: "selected",
+                    retired: "declined", superseded: "replaced" },
+};
+
+// `views/display.js` `NEUTRAL_DISPLAY.stages`: openDox's own word for each stage.
+const NEUTRAL_STAGES = {
+  source: { one: "source item", many: "source items",
+            short: "sources", label: "source items",
+            gate: "declared topics" },
+  grouping: { one: "group", many: "groups",
+              short: "groups", label: "groups", gate: null },
+  candidate: { one: "candidate", many: "candidates",
+               short: "candidates", label: "candidates",
+               gate: "→ select gate" },
+  selection: { one: "selection", many: "selections",
+               short: "selections", label: "selections",
+               gate: "→ submit gate" },
+  submission: { one: "submission", many: "submissions",
+                short: "submissions", label: "open submissions",
+                gate: "→ complete gate" },
+  completion: { one: "completed item", many: "completed items",
+                short: "completed", label: "completed", gate: null },
+};
+
+// `views/display.js` `NEUTRAL_DISPLAY.areas`: openDox's own corpus areas, which
+// declare NO prefix, so a neutral install is told no corpus layout.
+const NEUTRAL_AREAS = {
+  captured: { prefix: null, label: "captured material" },
+  organized: { prefix: null, label: "organized material" },
+  proposed: { prefix: null, label: "submissions" },
+  reference: { prefix: null, label: "other (read-only reference)" },
+};
+
+/** Every inlined table, keyed by the `views/display.js` expression it copies.
+ *  The census's `inlined_display_tables` names the same nine. */
+export const INLINED_DISPLAY_TABLES = Object.freeze({
+  "STAGE_ROLES": STAGE_ROLES,
+  "STATUS_ROLE": STATUS_ROLE,
+  "SCOPE_KINDS": SCOPE_KINDS,
+  "TAB_IDS": TAB_IDS,
+  "SESSION_SCOPE_KINDS": SESSION_SCOPE_KINDS,
+  "SESSION_BRANCH_NAMESPACES": SESSION_BRANCH_NAMESPACES,
+  "SNAPSHOT_VALUES": SNAPSHOT_VALUES,
+  "NEUTRAL_DISPLAY.stages": NEUTRAL_STAGES,
+  "NEUTRAL_DISPLAY.areas": NEUTRAL_AREAS,
+});
+
+// AN UNKNOWN ROLE IS A REFUSAL, NOT `undefined` — `views/display.js`'s own
+// stance, held here for the same reason: a typo that answered `undefined` would
+// render a blank label in one corner of one view and be found much later. The
+// error is named `DisplayRoleError`, as the real reader's refusal is.
+function refuseNeutralRole(kind, role, table) {
+  const error = new Error(
+    "no " + kind + " role " + JSON.stringify(role) + " is declared; the "
+    + "declared roles are " + JSON.stringify(Object.keys(table)) + ".");
+  error.name = "DisplayRoleError";
+  throw error;
+}
+
+function neutralEntry(kind, table, role) {
+  const entry = table[role];
+  if (entry === undefined) refuseNeutralRole(kind, role, table);
+  return entry;
+}
+
+// THE NEUTRAL VOCABULARY, without `views/display.js`. It answers exactly the
+// reads this module makes of a `Display` (`one`, `many`, `short`, `area` and
+// `documentStage`) and answers them as `neutralDisplay()` there does, from the
+// tables above. The shell replaces it at mount with the real facet
+// (`views/staging-workbench.js` calls `setDisplay`), so it is what a caller that
+// sets none reads: the node harness, and a page with no host facet.
+function neutralDisplay() {
+  const stage = (role) => neutralEntry("stage", NEUTRAL_STAGES, role);
+  return Object.freeze({
+    one: (role) => stage(role).one,
+    many: (role) => stage(role).many,
+    short: (role) => stage(role).short,
+    area: (role) => ({ role: role, ...neutralEntry("area", NEUTRAL_AREAS, role) }),
+    documentStage: (role) => neutralEntry(
+      "document_stage value", SNAPSHOT_VALUES.document_stage, role),
+  });
+}
 
 const [SOURCE, GROUPING, CANDIDATE, SELECTION] = STAGE_ROLES;
 
@@ -59,8 +196,8 @@ export function setDisplay(display) {
   return vocab;
 }
 
-/** What this module is currently spelling things in — the node harness reads
- *  it, and `views/staging-workbench.js` renders the section labels through it. */
+/** What this module is currently spelling things in: the facet the shell set
+ *  at mount, or the neutral vocabulary above where none was set. */
 export function displayVocabulary() { return vocab; }
 
 export const WORKBENCH_KINDS = [SCOPE_KINDS.grouping, SCOPE_KINDS.candidate,
@@ -726,9 +863,9 @@ export function createOffered(scope, tab) {
 // two are mapped here rather than at the transport — one definition, in the pure
 // module, pinned from both sides like every other payload rule above.
 // DECLARED IN `views/display.js` at slice S7 (`SESSION_SCOPE_KINDS`), where its
-// five sibling seam tables already live and where a class-C file may read it
-// without carrying the literal itself. Re-exported here so every caller that
-// already names it keeps naming it.
+// sibling seam tables live, and INLINED at the head of this module by plan 038
+// T025 (W-1 (A)), a declared copy. Exported here so every caller that already
+// names it keeps naming it.
 export { SESSION_SCOPE_KINDS };
 
 export function sessionScopeKind(kind) {
@@ -1125,7 +1262,8 @@ export function sessionSurfaceHidden(caps) {
 // so this MUST agree with `branch_session.session_branch` — a drift would name a
 // branch nobody is on. Pinned against the real Python derivation in
 // `test_the_session_branch_derivation_agrees_with_the_python_side`.
-// DECLARED IN `views/display.js` at slice S7, beside `SESSION_SCOPE_KINDS`.
+// DECLARED IN `views/display.js` at slice S7, beside `SESSION_SCOPE_KINDS`, and
+// inlined at the head of this module beside it (plan 038 T025, W-1 (A)).
 export { SESSION_BRANCH_NAMESPACES };
 
 // A colon-qualified corpus staging id reduces to its final segment (research R2:
