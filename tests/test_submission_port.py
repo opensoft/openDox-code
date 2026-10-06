@@ -236,8 +236,29 @@ def test_a_push_url_with_surrounding_whitespace_is_refused_not_trimmed(
     with pytest.raises(SubmissionError) as caught:
         port.submit("sess-1")
     assert type(caught.value) is SubmissionRefused
-    assert "leading or trailing whitespace" in str(caught.value)
+    assert "or trailing whitespace" in str(caught.value)
     assert _heads(trimmed) == ""
+
+
+@pytest.mark.parametrize("shape", ["trailing", "leading"])
+def test_a_push_url_with_a_newline_is_refused_not_normalized(
+        checkout: Path, tmp_path: Path, shape: str) -> None:
+    """MEASURED on git 2.43.0: git keeps a newline in a configured URL and
+    `get-url --push --all` prints it, so `<dir>/remote` plus a newline reads
+    as two lines, one of them empty. Dropping the empty one would push to
+    `<dir>/remote`, which git does not mean; it counts as two and is
+    refused."""
+    plain = _bare(tmp_path / "remote")
+    url = f"{plain}\n" if shape == "trailing" else f"\n{plain}"
+    subprocess.run(["git", "-C", str(checkout), "remote", "add", "origin",
+                    url], check=True)
+    port = LocalGitSubmissions(checkout)
+    with pytest.raises(SubmissionError) as caught:
+        port.submit("sess-1")
+    assert type(caught.value) is SubmissionRefused
+    assert "would push to 2 destinations" in str(caught.value)
+    assert str(plain) not in str(caught.value), "the URL was echoed"
+    assert _heads(plain) == ""
 
 
 def test_a_linked_worktree_is_submitted_with_its_metadata_held_open(

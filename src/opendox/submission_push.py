@@ -261,7 +261,9 @@ def _the_one_push_url(git: GitRunner, remote: str, branch: str) -> str:
     place it is meaningful: `/srv/remote ` and `/srv/remote` are two
     directories, so a trimmed reading would push somewhere git does not mean.
     Such a URL is REFUSED rather than trimmed, as `repository_act` refuses
-    one where it attaches a remote.
+    one where it attaches a remote. So is one holding a control character.
+    And no line is dropped: a URL ending in a newline prints as two lines,
+    one of them empty, and counts as two destinations.
     """
     if not any(git.run("config", "--get-all", f"remote.{remote}.{key}")
                .stdout.strip() for key in ("url", "pushurl")):
@@ -270,20 +272,24 @@ def _the_one_push_url(git: GitRunner, remote: str, branch: str) -> str:
             f"`{branch}`; nothing is pushed. Set one (`git remote set-url "
             f"{remote} <url>`).")
     listed = git.out("remote", "get-url", "--push", "--all", remote)
-    urls = [line for line in decoded_path(listed).split("\n") if line]
+    urls = decoded_path(listed).split("\n")
     if len(urls) != 1:
         raise SubmissionRefused(
-            f"the remote `{remote}` would push to {len(urls)} destinations, "
-            "and a submission goes to exactly one; nothing is pushed. Leave "
-            f"one (`git remote set-url --push {remote} <url>`); the URLs are "
-            "not echoed.")
-    if urls[0] != urls[0].strip():
+            f"the remote `{remote}` would push to {len(urls)} destinations "
+            "(a URL holding a newline reads as more than one), and a "
+            "submission goes to exactly one; nothing is pushed. Leave one "
+            f"(`git remote set-url --push {remote} <url>`); the URLs are not "
+            "echoed.")
+    url = urls[0]
+    if (not url or url != url.strip()
+            or carries_a_control_character(url)):
         raise SubmissionRefused(
-            f"the push URL of the remote `{remote}` has leading or trailing "
-            "whitespace, which git keeps and a push would use; it is refused "
-            "rather than trimmed, and not echoed. Set it again without the "
-            f"whitespace (`git remote set-url --push {remote} <url>`).")
-    return urls[0]
+            f"the push URL of the remote `{remote}` is empty, or has leading "
+            "or trailing whitespace or a control character, which git keeps "
+            "and a push would use; it is refused rather than normalized, and "
+            "not echoed. Set it again (`git remote set-url --push "
+            f"{remote} <url>`).")
+    return url
 
 
 def redact_destination(url: str) -> str:
@@ -350,8 +356,12 @@ def _held_secrets(url: str | None) -> list[str]:
     rest = url[scheme.end():]
     userinfo = rest[:_authority_end(rest)].rpartition("@")[0]
     password = userinfo.partition(":")[2]
-    found = [userinfo, password] if password else (
-        [] if url.lower().startswith(_SSH_SCHEMES) else [userinfo])
+    if password:
+        found = [userinfo, password]
+    elif url.lower().startswith(_SSH_SCHEMES):
+        found = []                     # an ssh login name is not a secret
+    else:
+        found = [userinfo]             # an https user name may be a token
     head, _, fragment = rest.partition("#")
     for part in re.split(r"[&;]", head.partition("?")[2]):
         name, equals, value = part.partition("=")
