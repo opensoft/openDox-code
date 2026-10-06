@@ -1004,10 +1004,34 @@ def _inlined_table_spans(path: str, text: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _substitution_end(text: str, first: int, limit: int) -> int:
+    """The offset of the `}` that closes a `${` whose inside starts at `first`.
+
+    Only a brace in CODE counts. The strings, comments and regex literals inside
+    the substitution are skipped as `_js_spans` reads them, so a `"}}"` there
+    cannot close it early (Copilot on openDox-code#91, r4194349872). `limit`
+    when nothing closes it."""
+    inner = _js_spans(text[first:limit])
+    depth, i, k = 1, first, 0
+    while i < limit:
+        while k < len(inner) and first + inner[k][2] <= i:
+            k += 1
+        if k < len(inner) and first + inner[k][1] <= i:
+            i = first + inner[k][2]
+            continue
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return limit
+
+
 def _template_substitutions(text: str, start: int, end: int) -> list[tuple[int, int]]:
     """The insides of the `${...}` substitutions of the template literal
-    `text[start:end]`, as offsets. Braces are counted the way `_js_spans`
-    counts them, so the two agree on where a substitution ends."""
+    `text[start:end]`, as offsets, each ended by `_substitution_end`."""
     out = []
     j = start + 1
     while j < end - 1:
@@ -1015,15 +1039,9 @@ def _template_substitutions(text: str, start: int, end: int) -> list[tuple[int, 
             j += 2
             continue
         if text[j] == "$" and text[j + 1] == "{":
-            depth, k = 1, j + 2
-            while k < end and depth:
-                if text[k] == "{":
-                    depth += 1
-                elif text[k] == "}":
-                    depth -= 1
-                k += 1
-            out.append((j + 2, k - 1))
-            j = k
+            close = _substitution_end(text, j + 2, end - 1)
+            out.append((j + 2, close))
+            j = close + 1
             continue
         j += 1
     return out
