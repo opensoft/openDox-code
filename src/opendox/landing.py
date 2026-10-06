@@ -56,9 +56,13 @@ Its `land` (R2Q6 (a)):
 * refuses `main` itself (R2Q5 (a)), re-reads the governance at the moment of
   landing, and SPENDS the confirmation, which must be bound to the branch and
   its current head (`landing_confirm.redeem`);
-* reads the remote's `main` with `ls-remote refs/heads/main`, never a fetch,
-  and refuses if local `main` does not contain it; a remote with no `main`, or
-  no remote, passes (N-16);
+* reads `main` at the remote's PUSH URL (`git remote get-url --push`, the
+  fetch URL where no `pushurl` is set), where the owner's later `git push`
+  goes, never a fetch: a remote with several push URLs is refused, and the URL
+  is probed with `ls-remote refs/heads/main` through a TRANSIENT remote passed
+  in the command's environment, so it never reaches git's argv. It refuses if
+  local `main` does not contain that `main`; a remote with no `main`, or no
+  remote, passes (N-16);
 * refuses, before merging, when the served checkout holds `main` and is not
   clean, naming the remedy (ADV-08), and when another working tree holds `main`;
 * makes the `--no-ff` merge commit in a landing worktree of its own under
@@ -239,7 +243,8 @@ class LandingRefused(Exception):
     `not-a-repository`, `no-main`, `no-declaration`, `invalid-declaration`,
     `install-mode-refused`, `install-mode-disagrees`, `host-failed-to-load`,
     `governed-without-an-instrument`, `instrument-failed`,
-    `confirmation:<case>`, `remote-unreadable`, `remote-main-not-contained`,
+    `confirmation:<case>`, `remote-unreadable`, `several-push-urls`,
+    `remote-main-not-contained`,
     `dirty-served-checkout`, `main-checked-out-elsewhere`, `merge-failed`,
     `landing-worktree`, `merge-driver`, `not-a-merge-commit`,
     `fast-forward-no-longer-applies`, `main-moved`,
