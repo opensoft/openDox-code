@@ -10,15 +10,20 @@ and nothing else"), and that nothing reached any remote.
 from __future__ import annotations
 
 import dataclasses
+import errno
+import http.server
 import os
 import subprocess
+import threading
+import traceback
 from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
 
 from opendox import session_pr, submission_push
-from opendox.runtime import repository_act
+from opendox.runtime import local_git_adapter, repository_act
+from opendox.runtime.config import MAX_REMOTE_URL_CHARS
 from opendox.runtime.local_git_adapter import GitRunner
 from opendox.session_pr import (
     LocalGitSubmissions,
@@ -287,6 +292,33 @@ def test_a_linked_worktree_is_submitted_with_its_metadata_held_open(
         assert value.startswith(("/proc/self/fd/", "/dev/fd/")), (name, value)
 
 
+def test_a_worktree_whose_metadata_cannot_be_held_is_refused_by_name(
+        checkout: Path, origin: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The `except CorpusRefused` around `metadata_held_open` (lane 3's
+    review R1 of #92, X5). MEASURED on git 2.43.0: git answers a worktree's
+    CANONICAL git and common directories even when its `.git` file or its
+    `commondir` names them through a symlink, so no link reaches the no-follow
+    open; the refusal that open gives a link (`ELOOP`) is put in its place,
+    for the worktree's metadata alone."""
+    linked = tmp_path / "linked"
+    _git(checkout, "worktree", "add", "-q", str(linked), "sess-1")
+    real = local_git_adapter.open_no_follow_chain
+
+    def _a_link(directory: Path, **options: bool) -> int:
+        if "worktrees" in Path(directory).parts:
+            raise OSError(errno.ELOOP, os.strerror(errno.ELOOP))
+        return real(directory, **options)
+
+    monkeypatch.setattr(local_git_adapter, "open_no_follow_chain", _a_link)
+    with pytest.raises(SubmissionError) as caught:
+        LocalGitSubmissions(linked).submit("sess-1")
+    assert type(caught.value) is SubmissionRefused
+    assert "git metadata" in str(caught.value), caught.value
+    assert "(OSError)" in str(caught.value), caught.value
+    assert _heads(origin) == ""
+
+
 def test_a_remote_with_no_url_is_refused_not_pushed_to_as_a_path(
         checkout: Path) -> None:
     """MEASURED on git 2.43.0: `git remote get-url --push --all origin` for a
@@ -334,6 +366,50 @@ def test_a_transport_failure_is_refused(checkout: Path, tmp_path: Path,
         port.submit("sess-1")
     assert type(caught.value) is SubmissionRefused
     assert "Traceback" not in str(caught.value)
+
+
+class _Forbidden(http.server.BaseHTTPRequestHandler):
+    """Every request answered `403`, as R1's loopback remote answered."""
+
+    def do_GET(self) -> None:   # noqa: N802 - the stdlib's name
+        self.send_response(403)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    do_POST = do_GET
+
+    def log_message(self, *_: object) -> None:
+        pass
+
+
+def test_a_failed_push_keeps_only_git_s_fatal_and_error_lines(
+        checkout: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lane 3's review R1 of #92 (opensoft/openxFactory#656 comment
+    6022010349), MEASURED: under the user's own `GIT_TRACE_CURL=1` curl's
+    trace of every request header is git's stderr, and a checkout's
+    `http.extraheader` secret rode the refusal (git redacts `Authorization:`
+    alone). The refusal keeps git's `fatal:` line and none of the trace."""
+    secret = "xak-S3CRET-header-4d2e"
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Forbidden)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _git(checkout, "config", "http.extraheader", f"X-Api-Key: {secret}")
+        _git(checkout, "remote", "add", "origin",
+             f"http://127.0.0.1:{server.server_port}/remote.git")
+        monkeypatch.setenv("GIT_TRACE_CURL", "1")
+        with pytest.raises(SubmissionError) as caught:
+            LocalGitSubmissions(checkout).submit("sess-1")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+    refusal = caught.value
+    assert type(refusal) is SubmissionRefused
+    assert "error: 403" in str(refusal), refusal
+    for text in (str(refusal), "".join(traceback.format_exception(refusal))):
+        assert secret not in text
+        assert "X-Api-Key" not in text
 
 
 # -- the runtime's hardening, kept (OQ-12-12) ----------------------------------
@@ -387,26 +463,30 @@ def test_a_remote_named_like_an_option_is_refused(
     assert _heads(target) == ""
 
 
+@pytest.mark.parametrize("scheme", ["evil", "HTTPS"])
 def test_a_scheme_git_does_not_carry_is_refused_before_its_helper_runs(
         checkout: Path, tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch: pytest.MonkeyPatch, scheme: str) -> None:
     """MEASURED on git 2.43.0: `evil://…` makes git run `git-remote-evil`
     from PATH, the `<name>::` hazard under another spelling. A helper that
     would leave a marker is planted on PATH; the submission is refused by the
-    scheme and the helper never runs."""
+    scheme and the helper never runs. `HTTPS` is the case-exact half (lane
+    3's review R1 of #92, X6): git names the helper as the scheme is spelled,
+    so `HTTPS://` would run a planted `git-remote-HTTPS`."""
     helpers = tmp_path / "bin"
     helpers.mkdir()
     marker = tmp_path / "ran"
-    helper = helpers / "git-remote-evil"
+    helper = helpers / f"git-remote-{scheme}"
     helper.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n", encoding="utf-8")
     helper.chmod(0o755)
     monkeypatch.setenv("PATH", f"{helpers}:{os.environ['PATH']}")
-    _git(checkout, "remote", "add", "origin", "evil://example.invalid/repo")
+    _git(checkout, "remote", "add", "origin",
+         f"{scheme}://example.invalid/repo")
     port = LocalGitSubmissions(checkout)
     with pytest.raises(SubmissionError) as caught:
         port.submit("sess-1")
     assert type(caught.value) is SubmissionRefused
-    assert "`evil://`" in str(caught.value)
+    assert f"`{scheme}://`" in str(caught.value)
     assert not marker.exists(), "the helper ran"
 
 
@@ -589,3 +669,15 @@ def test_a_report_names_the_place_and_never_the_credential(
     assert submission_push.redact_destination(url) == shown
     assert "S3C" not in shown
     assert "T0KEN" not in shown
+
+
+def test_a_url_too_long_to_judge_is_shown_redacted_whole() -> None:
+    """`redact_destination`'s length cap (lane 3's review R1 of #92, X4): a
+    value past `MAX_REMOTE_URL_CHARS` is replaced, not parsed; one at the cap
+    is shown as it is."""
+    at_the_cap = "https://example.invalid/" + "a" * (
+        MAX_REMOTE_URL_CHARS - len("https://example.invalid/"))
+    assert len(at_the_cap) == MAX_REMOTE_URL_CHARS
+    assert submission_push.redact_destination(at_the_cap) == at_the_cap
+    assert submission_push.redact_destination(at_the_cap + "a") == (
+        "<redacted-url>")

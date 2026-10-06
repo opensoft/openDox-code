@@ -65,6 +65,7 @@ from opendox.runtime.local_git_adapter import (
     open_no_follow_chain,
     redact_credentials,
     runner_bound_to,
+    subcommand_of,
 )
 from opendox.session_pr import NoSubmissionTarget, Submission, SubmissionRefused
 
@@ -94,6 +95,14 @@ _LOGIN_NAME = re.compile(r"[A-Za-z0-9._-]+")
 #: them, case and all.
 _GIT_TRANSPORTS = frozenset({"file", "ftp", "ftps", "git", "git+ssh", "http",
                              "https", "ssh", "ssh+git"})
+
+#: The lines of a failed push's stderr a refusal keeps: git's own `fatal:`
+#: and `error:` lines, and the adapter's timeout line. Everything else is what
+#: the user's environment asked git to print, and under `GIT_TRACE_CURL=1` or
+#: `GIT_CURL_VERBOSE=1` that is curl's trace of every request header, an
+#: `http.extraheader` secret among them (lane 3's review R1 of #92, MEASURED
+#: against a loopback 403; git redacts `Authorization:` alone).
+_KEPT_PUSH_STDERR = re.compile(r"(?:fatal|error): |timed out after ")
 
 #: Below this length a held value is not scrubbed out of foreign text: a
 #: two-letter value replaced everywhere garbles the message and protects
@@ -210,14 +219,23 @@ def _submit_with(git: GitRunner, root: Path, branch: str) -> Submission:
     except GitCommandFailed as failed:
         raise SubmissionRefused(
             f"the push of `{branch}` to `{remote}` ({shown}) failed "
-            f"({_scrubbed(str(failed), url)}); nothing is reported as "
-            "submitted") from None
+            f"({_scrubbed(_what_the_push_said(failed), url)}); nothing is "
+            "reported as submitted") from None
     except repository_act.RepositoryActRefused as refused:
         raise SubmissionRefused(
             f"the push of `{branch}` to `{remote}` ({shown}) is refused "
             f"before it runs: {_scrubbed(str(refused), url)}") from None
     return Submission(remote=remote, ref=f"refs/heads/{branch}", url=shown,
                       branch=branch, commit=commit)
+
+
+def _what_the_push_said(failed: GitCommandFailed) -> str:
+    """`git push exited <n>:` and the stderr lines `_KEPT_PUSH_STDERR` keeps."""
+    said = failed.completed.stderr.decode("utf-8", "replace").splitlines()
+    kept = [line.strip() for line in said if _KEPT_PUSH_STDERR.match(line)]
+    return (f"git {subcommand_of(failed.args_run)} exited "
+            f"{failed.completed.returncode}: "
+            + (" ".join(kept) or "git's other output is withheld"))
 
 
 def _refuse_unless_the_root(git: GitRunner, root: Path) -> None:
