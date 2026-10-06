@@ -1821,6 +1821,25 @@ svg.edges path.topic { stroke: var(--st-captured); stroke-dasharray: 4 3; opacit
   border: 1px dashed var(--border); border-radius: 6px;
 }
 .doxchat-unavailable[hidden] { display: none; }
+/* The rail's two REMEDY lines (#1144 16.4 and 16.3a; plan 034 T081 and T100),
+   each shown only when the catalog has answered and offers no available
+   model: the `doxchat-no-model` line when it is EMPTY (how to declare a
+   model), and the `doxchat-untrusted` line when it holds a declared model and
+   none is available (how to trust one). They are the same class of quiet
+   inline note as `.doxchat-unavailable`, because each is a state with a stated
+   repair and never an error. Their text carries commands, so it may run long:
+   it wraps anywhere (as `.doxchat-turn` does) and never widens the rail. They
+   are not live regions themselves, so `hidden` is the right way to hide them:
+   the rail announces their text through `.doxchat-announce`. The two class
+   names carry no leading dot in this comment on purpose: openXdox-code's styles
+   tripwire asks whether the text `.<class>` occurs in this file, and a dotted
+   mention here would let it pass with both rules gone. */
+.doxchat-no-model, .doxchat-untrusted {
+  font-size: 12px; color: var(--muted); padding: 6px 8px;
+  border: 1px dashed var(--border); border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+.doxchat-no-model[hidden], .doxchat-untrusted[hidden] { display: none; }
 .doxchat-transcript {
   flex: 1 1 auto; min-height: 0; overflow-y: auto; margin: 0; padding: 0;
   list-style: none; display: flex; flex-direction: column; gap: 8px;
