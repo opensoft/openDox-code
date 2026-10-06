@@ -301,7 +301,8 @@ def _assert_the_neutral_port(port: object, checkout: Path, remote: Path) -> None
     report = port.submit("sess-1")
     assert _tip(remote, "sess-1") == _tip(checkout, "sess-1"), (
         "the branch did not arrive")
-    assert report.ref == "refs/heads/sess-1" and str(remote) in report.url, report
+    assert report.ref == "refs/heads/sess-1", report
+    assert str(remote) in report.url, report
 
 
 def test_server_unset_submission_factory_binds_the_neutral_default(
