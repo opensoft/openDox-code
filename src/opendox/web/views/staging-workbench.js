@@ -2792,9 +2792,21 @@ export function mountStagingWorkbench(container, snapshot,
   // refused by name"), so it stands beside whatever a chat rung moved onto the
   // send button. A governed host's postures carry none, so its note is what it
   // was.
+  //
+  // TWO ENTRY POINTS, ONE RULE (plan 038 T025, S1). `showPostureNote` is how a
+  // caller states a NEW plane: `drawCanvas` and the rail's catalog report, the
+  // two callers the rule has always had. T102's two re-shows, the restored-scope
+  // reconcile and an unload, state no new plane; they redraw the plane already
+  // stated, because only the note's out-of-scope line changed. So they call
+  // `redrawPostureNote`, the draw itself, and the one rule stays in one place.
   let lastPlane = null;
   function showPostureNote(plane) {
     lastPlane = plane;
+    redrawPostureNote();
+  }
+  function redrawPostureNote() {
+    const plane = lastPlane;
+    if (!plane) return;
     const stands = !!plane.note && plane.chat !== true;
     const stale = outOfScopeLoaded();
     const lines = [stands ? plane.note : null, plane.scopeNote || null,
@@ -2841,10 +2853,10 @@ export function mountStagingWorkbench(container, snapshot,
     for (const buffer of outOfScopeLoaded()) {
       if (!buffer.dirty) canvasController.unloadDocument(buffer.key);
     }
-    if (lastPlane) showPostureNote(lastPlane);
+    redrawPostureNote();
   }
 
-  // THE EDITING POSTURE (T102, RULED `5963618568`), read off the facts this
+  // `editingPosture` (T102, RULED `5963618568`), read off the facts this
   // console has: a host's gate column and its gate, the hosted plane, the
   // `edit` capability, and the open tile's own editable documents as openDox's
   // scope default answers them. A governed host asks only its gate.
@@ -2944,7 +2956,7 @@ export function mountStagingWorkbench(container, snapshot,
         syncContextFromCanvas();
         refreshDocTiles();
         // an unload of a restored out-of-scope buffer retires its note (T102)
-        if (lastPlane) showPostureNote(lastPlane);
+        redrawPostureNote();
       },
     });
     // T055: the chat rail mounts ONLY when the seam bundle carries BOTH
