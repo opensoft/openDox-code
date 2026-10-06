@@ -434,10 +434,25 @@ def _number_from_url(url: str) -> int:
     return int(tail) if tail.isdigit() else 0
 
 
+# --------------------------------------------------------------------------
+# THE LANDING SEAM, declared here (#1144 12.6a; spec FR-007; plan 038 T012)
+# --------------------------------------------------------------------------
+#
+# 12.6a declares `session_pr.LandingPort` and
+# `session_pr.repository_governance(checkout_root)`, and this module is where a
+# caller reaches the ports. They are DEFINED in `opendox.landing` and re-exported
+# here, so the protocol above keeps its three operations and nothing that lands
+# lives beside it: `PullRequestPort` still has no merge (FR-030), and landing is
+# a separate protocol with ONE operation, `land(branch, *, confirmation)`.
+# Imported last, because `landing` reaches `session_git` and nothing here.
+from .landing import LandingPort, repository_governance  # noqa: E402
+
+
 __all__ = [
     "AMBIENT_TARGET_OVERRIDES", "DEFAULT_BASE", "DEFAULT_REMOTE",
     "PORT_OPERATIONS", "STATE_OPEN",
-    "CommandRunner", "FakePullRequests", "GhPullRequests", "PullRequest",
-    "PullRequestPort", "PullRequestRefused", "SubprocessCommandRunner",
-    "child_env", "parse_repo_pin",
+    "CommandRunner", "FakePullRequests", "GhPullRequests", "LandingPort",
+    "PullRequest", "PullRequestPort", "PullRequestRefused",
+    "SubprocessCommandRunner", "child_env", "parse_repo_pin",
+    "repository_governance",
 ]

@@ -560,8 +560,146 @@ def test_the_allowlist_still_admits_every_operation_the_contract_names(git_and_r
         assert allowed in sg.SERVED_ALLOWED_SUBCOMMANDS, allowed
     for refused in sg.FORBIDDEN_SERVED_SUBCOMMANDS:
         assert refused not in sg.SERVED_ALLOWED_SUBCOMMANDS
-    for refused in ("add", "commit", "merge", "clean", "update-ref", "rm", "mv"):
+    for refused in ("add", "commit", "clean", "update-ref", "rm", "mv"):
         assert refused not in sg.SERVED_ALLOWED_SUBCOMMANDS
+    # `merge`'s pin MOVES TO THE ADMITTED FORM (R2Q6 (a); feature 007's exception
+    # 1). It is still absent from the NAME-ONLY allowlist; what the served root
+    # admits is one ARGUMENT-checked form, `merge --ff-only <commit>`, for a clean
+    # checkout on `main`, and only by the guard's argument check below.
+    assert "merge" not in sg.SERVED_ALLOWED_SUBCOMMANDS
+    assert sg.SERVED_FAST_FORWARD_ARGV == ("merge", "--ff-only")
+    assert sg.SERVED_FAST_FORWARD_BRANCH == "main"
+    commit = "0" * 40
+    admitted = ("merge", "--ff-only", commit)
+    root = git_and_repo[0].served_root
+    assert sg.guard_served_command(root, root, admitted,
+                                   served_on_clean_main=True) is True
+    assert sg.guard_served_command(root, root, admitted) is False
+    assert sg.guard_served_command(root, root / "ideation", admitted,
+                                   served_on_clean_main=True) is False
+    assert sg.guard_served_command(root, root, ("merge", "other-branch"),
+                                   served_on_clean_main=True) is False
+
+
+# --------------------------------------------------------------------------
+# the landing's fast-forward: the ONE admitted move of the served checkout
+# (R2Q6 (a), openxFactory#656 6003486656; feature 007's four exceptions)
+# --------------------------------------------------------------------------
+
+def _a_commit_ahead_of_main(git, repo) -> str:
+    """A commit whose parent is `main`'s tip, made in a session worktree, so the
+    served checkout is untouched by the making of it."""
+    path = _session_dir(repo, "draft/ahead")
+    git.worktree_add("draft/ahead", path, "main")
+    repo.write("ahead.md", "ahead\n", cwd=path)
+    git.stage(path, ["ahead.md"])
+    return git.commit(path, "ahead\n\nGate-Action: ahead")
+
+
+def test_the_served_root_admits_the_landings_fast_forward_on_a_clean_main(
+        git_and_repo):
+    git, repo, runner = git_and_repo
+    ahead = _a_commit_ahead_of_main(git, repo)
+    assert repo.branch() == "main" and repo.served_fingerprint().porcelain == ()
+
+    assert git.fast_forward_served(ahead) == ahead
+
+    assert repo.head("main") == ahead and repo.head() == ahead
+    assert repo.branch() == "main"
+    assert (repo.root / "ahead.md").read_text(encoding="utf-8") == "ahead\n"
+    assert ("merge", "--ff-only", ahead) in runner.calls
+
+
+@pytest.mark.parametrize("dirt", ["tracked", "untracked"])
+def test_the_fast_forward_is_refused_on_a_served_checkout_that_is_not_clean(
+        git_and_repo, dirt):
+    git, repo, runner = git_and_repo
+    ahead = _a_commit_ahead_of_main(git, repo)
+    if dirt == "tracked":
+        repo.write(f"ideation/staging/{repo.topic_id}/README.md", "an edit\n")
+    else:
+        repo.write("scratch.txt", "untracked\n")
+    before = repo.served_fingerprint()
+    n = len(runner.calls)
+
+    with pytest.raises(sg.ServedCheckoutImmovable) as refused:
+        git.fast_forward_served(ahead)
+
+    assert "not clean" in str(refused.value)
+    assert "merge" not in [sg.command_subcommand(c) for c in runner.calls[n:]]
+    assert repo.served_fingerprint() == before
+
+
+def test_the_fast_forward_is_refused_when_the_served_checkout_holds_another_branch(
+        git_and_repo):
+    git, repo, runner = git_and_repo
+    ahead = _a_commit_ahead_of_main(git, repo)
+    repo.git("checkout", "-q", "-b", "elsewhere")
+    before = repo.served_fingerprint()
+    n = len(runner.calls)
+
+    with pytest.raises(sg.ServedCheckoutImmovable) as refused:
+        git.fast_forward_served(ahead)
+
+    assert "it holds elsewhere" in str(refused.value)
+    assert "merge" not in [sg.command_subcommand(c) for c in runner.calls[n:]]
+    assert repo.served_fingerprint() == before
+    assert repo.head("main") != ahead
+
+
+@pytest.mark.parametrize("argv", [
+    ("merge", "other-branch"),
+    ("merge", "--ff-only", "other-branch"),
+    ("merge", "--ff-only", "main"),
+    ("merge", "--ff-only", "{short}"),
+    ("merge", "--ff-only", "{ahead}", "other-branch"),
+    ("merge", "--ff-only", "--", "{ahead}"),
+    ("merge", "--no-ff", "{ahead}"),
+    ("merge", "{ahead}"),
+    ("-c", "core.hooksPath=/tmp", "merge", "--ff-only", "{ahead}"),
+    ("merge", "--ff-only", "--no-verify", "{ahead}"),
+])
+def test_no_other_merge_spelling_is_admitted_even_on_a_clean_main(git_and_repo,
+                                                                   argv):
+    """The argument check admits EXACTLY `merge --ff-only <full commit id>`. A
+    branch name, a short id, a second argument, an option before or after it, and
+    every other merge are refused before git is invoked, on a checkout that is
+    clean and on `main`, so only the argv decides."""
+    git, repo, runner = git_and_repo
+    ahead = _a_commit_ahead_of_main(git, repo)
+    args = tuple(a.format(ahead=ahead, short=ahead[:12]) for a in argv)
+    before = repo.served_fingerprint()
+    n = len(runner.calls)
+
+    with pytest.raises(sg.ServedCheckoutImmovable):
+        git.git(repo.root, *args)
+
+    assert "merge" not in [sg.command_subcommand(c) for c in runner.calls[n:]]
+    assert repo.served_fingerprint() == before
+
+
+def test_the_fast_forward_is_refused_from_a_served_subdirectory(git_and_repo):
+    """AT THE SERVED ROOT and nowhere under it: a subdirectory is the served
+    working tree too, and the admission is for the root's exact cwd."""
+    git, repo, runner = git_and_repo
+    ahead = _a_commit_ahead_of_main(git, repo)
+    before = repo.served_fingerprint()
+    n = len(runner.calls)
+
+    with pytest.raises(sg.ServedCheckoutImmovable):
+        git.git(repo.root / "ideation", "merge", "--ff-only", ahead)
+
+    assert runner.calls[n:] == []
+    assert repo.served_fingerprint() == before
+
+
+def test_the_fast_forward_takes_only_a_full_commit_id(git_and_repo):
+    git, repo, runner = git_and_repo
+    n = len(runner.calls)
+    for bad in ("main", "HEAD", "0" * 12, "-x", ""):
+        with pytest.raises(sg.SessionGitRefused):
+            git.fast_forward_served(bad)
+    assert runner.calls[n:] == []
 
 
 def test_stage_and_commit_cannot_advance_the_served_head(git_and_repo):

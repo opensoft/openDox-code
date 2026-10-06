@@ -17,7 +17,11 @@ Four structural rules, enforced by construction rather than by convention:
      INSIDE the served checkout? A routing option is refused outright, at every
      cwd, because it redirects the command at a repository the guard did not
      inspect; and a cwd at or under the served root may run only the ALLOWLISTED
-     read/bookkeeping subcommands (`SERVED_ALLOWED_SUBCOMMANDS`). PR #49 review
+     read/bookkeeping subcommands (`SERVED_ALLOWED_SUBCOMMANDS`), plus ONE move
+     admitted by an ARGUMENT check: `git merge --ff-only <commit>` at the served
+     ROOT, for a CLEAN checkout that holds `main` and nothing else — the landing's
+     fast-forward (`SERVED_FAST_FORWARD_ARGV`; R2Q6 (a), feature 007's four
+     named exceptions). PR #49 review
      finding 18 measured all three bypasses the previous cwd-equality denylist
      permitted — a served SUBDIRECTORY, `git -C <served>`, and
      `git --git-dir <served>/.git --work-tree <served>` each moved the served
@@ -68,6 +72,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import socket
 import subprocess
 import time
@@ -87,20 +92,41 @@ GATE_RECORDS_PREFIX = "ideation/dashboard/gate-records/"
 # allowlist below is what actually decides.
 FORBIDDEN_SERVED_SUBCOMMANDS = ("checkout", "switch", "reset", "stash", "restore")
 
-# The ONLY subcommands permitted with a cwd at or under the served checkout: reads
-# plus the ref/worktree bookkeeping the session lifecycle genuinely performs there
-# (worktree add/remove/list/prune, branch create/delete, the remote branch delete).
-# Nothing that touches the served working tree, its index, or its HEAD is here —
-# `add`, `commit`, `mv`, `rm`, `merge`, `clean`, `apply`, `am`, `rebase`,
-# `cherry-pick`, `revert`, `update-ref`, `symbolic-ref`, `update-index`,
-# `sparse-checkout`, `filter-branch` and the five FORBIDDEN_SERVED_SUBCOMMANDS all
-# fall through to a refusal because they are ABSENT, which is the property a
-# denylist could never have (PR #49 finding 18).
+# The subcommands permitted BY NAME with a cwd at or under the served checkout:
+# reads plus the ref/worktree bookkeeping the session lifecycle genuinely performs
+# there (worktree add/remove/list/prune, branch create/delete, the remote branch
+# delete). Nothing that touches the served working tree, its index, or its HEAD is
+# on this NAME-ONLY list — `add`, `commit`, `mv`, `rm`, `merge`, `clean`, `apply`,
+# `am`, `rebase`, `cherry-pick`, `revert`, `update-ref`, `symbolic-ref`,
+# `update-index`, `sparse-checkout`, `filter-branch` and the five
+# FORBIDDEN_SERVED_SUBCOMMANDS all fall through to a refusal because they are
+# ABSENT, which is the property a denylist could never have (PR #49 finding 18).
+#
+# THE STATED RULE HAS ONE NAMED EXCEPTION, and it is not on this list (R2Q6 (a),
+# Brett Heap, openxFactory#656 comment 6003486656; feature 007's four exceptions,
+# codexFactory `specs/007-workbench-branch-sessions/spec.md`): a CONFIRMED
+# landing fast-forwards the served checkout, its index and its HEAD to the merge
+# commit the lander made in its own landing worktree. The guard admits that move
+# by an ARGUMENT check, not by name: exactly `git merge --ff-only <commit>`, a
+# full object id, at the served ROOT, while the served checkout holds `main` and
+# `git status --porcelain` is empty, and nothing else (`SERVED_FAST_FORWARD_ARGV`,
+# `served_fast_forward_commit`). So `merge` stays absent here, `merge
+# <branch>` and every other spelling stay refused, and a dirty checkout or one on
+# another branch is never moved.
 SERVED_ALLOWED_SUBCOMMANDS = frozenset({
     "branch", "cat-file", "check-ref-format", "diff", "for-each-ref", "log",
     "ls-files", "ls-remote", "ls-tree", "merge-base", "push", "remote",
     "rev-list", "rev-parse", "show", "show-ref", "status", "worktree",
 })
+
+# The ONE argument-checked admission at the served root, above: the argv's
+# first two words, then exactly one full commit id.
+SERVED_FAST_FORWARD_ARGV = ("merge", "--ff-only")
+# The branch the served checkout must hold for it (R2Q7 (a): `main`).
+SERVED_FAST_FORWARD_BRANCH = "main"
+# A full object id, SHA-1 or SHA-256: never a branch or a short id, which name
+# whatever they name when git resolves them.
+_OBJECT_ID_SHAPE = re.compile(r"\A(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 
 # Refused at EVERY cwd. `fetch`/`pull` would touch local refs; the remote is read
 # with `ls-remote` and NEVER fetched.
@@ -263,8 +289,27 @@ def targets_served_checkout(served_root: Path, cwd: Path) -> bool:
     return here == served or served in here.parents
 
 
-def guard_served_command(served_root: Path, cwd: Path,
-                         args: Sequence[str]) -> bool:
+def is_served_root(served_root: Path, cwd: Path) -> bool:
+    """Whether `cwd` IS the served root itself, not a directory under it."""
+    try:
+        return Path(cwd).resolve() == Path(served_root).resolve()
+    except OSError:                                  # pragma: no cover - defensive
+        return False
+
+
+def served_fast_forward_commit(args: Sequence[str]) -> str | None:
+    """The `<commit>` when `args` is EXACTLY `merge --ff-only <commit>` with a
+    full object id, else None. No option before or after it, no `--`, no branch
+    name and no short id: the one argv the landing's fast-forward issues."""
+    argv = tuple(args)
+    if len(argv) != 3 or argv[:2] != SERVED_FAST_FORWARD_ARGV:
+        return None
+    commit = argv[2]
+    return commit if _OBJECT_ID_SHAPE.match(commit) else None
+
+
+def guard_served_command(served_root: Path, cwd: Path, args: Sequence[str], *,
+                         served_on_clean_main: bool = False) -> bool:
     """True when this argv is permitted. False when it could move the SERVED
     checkout, or when it routes around the cwd the guard was given (FR-004).
 
@@ -277,7 +322,13 @@ def guard_served_command(served_root: Path, cwd: Path,
          the remote with `ls-remote` and never fetches.
       3. does the cwd resolve at or under the served checkout? Then the subcommand
          must be in `SERVED_ALLOWED_SUBCOMMANDS` — an ALLOWLIST, so a subcommand
-         nobody enumerated is refused rather than permitted.
+         nobody enumerated is refused rather than permitted — OR the argv must be
+         the landing's fast-forward, `merge --ff-only <commit>`, at the served
+         ROOT, and `served_on_clean_main` must say the served checkout holds
+         `main` and is clean (R2Q6 (a); feature 007's exceptions 1 and 2). The
+         caller that knows the checkout's state passes it: `SessionGit._guard`
+         reads it from git, immediately before the command, and only for that
+         argv. Unstated, it is False, so the pure answer refuses the move.
 
     A worktree is disposable, so inside a session worktree only (1) and (2) apply:
     the write operations exist precisely to run there."""
@@ -288,7 +339,11 @@ def guard_served_command(served_root: Path, cwd: Path,
         return False
     if not targets_served_checkout(served_root, cwd):
         return True
-    return subcommand in SERVED_ALLOWED_SUBCOMMANDS
+    if subcommand in SERVED_ALLOWED_SUBCOMMANDS:
+        return True
+    return (served_on_clean_main
+            and served_fast_forward_commit(args) is not None
+            and is_served_root(served_root, cwd))
 
 
 # --------------------------------------------------------------------------
@@ -501,13 +556,50 @@ class SessionGit:
             raise GitError(args, done.returncode, done.stderr or "")
         return (done.stdout or "").rstrip("\n")
 
+    def _served_state(self) -> tuple[str, tuple[str, ...]]:
+        """The served checkout's `HEAD` ref (`refs/heads/<name>`, or `HEAD` when
+        detached) and its `git status --porcelain` lines, untracked included —
+        the two facts the landing's fast-forward is admitted on. Two READS."""
+        ok, ref = self._try(self.served_root, "rev-parse", "--symbolic-full-name",
+                            "HEAD")
+        done, listed = self._try(self.served_root, "status", "--porcelain",
+                                 "--untracked-files=all")
+        lines = tuple(l for l in listed.splitlines() if l.strip()) if done \
+            else ("<git status failed>",)
+        return (ref if ok else ""), lines
+
     def _guard(self, cwd: Path | str, args: Sequence[str]) -> None:
         """Raise `ServedCheckoutImmovable` when the guard refuses, with the reason
-        the human needs: which of the three questions answered no."""
-        if guard_served_command(self.served_root, Path(cwd), args):
+        the human needs: which of the three questions answered no.
+
+        For the landing's fast-forward alone (`merge --ff-only <commit>` at the
+        served root) it first READS the served checkout's state, so the guard
+        decides on git's answer immediately before the move and never on the
+        caller's word."""
+        fast_forward = (served_fast_forward_commit(args) is not None
+                        and is_served_root(self.served_root, Path(cwd)))
+        state: tuple[str, tuple[str, ...]] | None = None
+        if fast_forward:
+            state = self._served_state()
+        clean_main = bool(state) and state[0] == (
+            f"refs/heads/{SERVED_FAST_FORWARD_BRANCH}") and not state[1]
+        if guard_served_command(self.served_root, Path(cwd), args,
+                                served_on_clean_main=clean_main):
             return
         routing = command_routing_options(args)
         subcommand = command_subcommand(args)
+        if fast_forward and state is not None:
+            held = state[0][len("refs/heads/"):] if state[0].startswith(
+                "refs/heads/") else "no branch (a detached HEAD)"
+            why = (f"it holds {held}" if held != SERVED_FAST_FORWARD_BRANCH else
+                   f"it is not clean ({'; '.join(l.strip() for l in state[1][:5])})")
+            raise ServedCheckoutImmovable(
+                f"refusing `git merge --ff-only` against the served checkout "
+                f"{self.served_root}: the landing's fast-forward is admitted only "
+                f"for a CLEAN checkout that holds {SERVED_FAST_FORWARD_BRANCH}, "
+                f"and {why} (R2Q6 (a); feature 007's exceptions). It is never "
+                "switched, reset or stashed to make it so: commit or stash, then "
+                "land again")
         if routing:
             raise ServedCheckoutImmovable(
                 f"refusing `git {subcommand or '<no subcommand>'}` carrying "
@@ -527,8 +619,10 @@ class SessionGit:
             "served checkout may run only "
             f"{', '.join(sorted(SERVED_ALLOWED_SUBCOMMANDS))} — no session "
             "operation may switch, reset, stash, restore, merge, clean, stage, or "
-            "commit there (FR-004). Session writes reach a branch only through "
-            "that branch's own worktree")
+            "commit there (FR-004), and the one admitted move is a confirmed "
+            "landing's `merge --ff-only <commit>` of a clean checkout on "
+            f"{SERVED_FAST_FORWARD_BRANCH} (R2Q6 (a)). Session writes reach a "
+            "branch only through that branch's own worktree")
 
     def git(self, cwd: Path | str, *args: str) -> str:
         """`git_raw` with the output stripped — the ordinary read/write form."""
@@ -598,6 +692,19 @@ class SessionGit:
             if line.strip():
                 return line.strip()
         return None
+
+    def fast_forward_served(self, commit: str) -> str:
+        """`git merge --ff-only <commit>` at the served root, and return the new
+        HEAD: the landing's fast-forward, the ONE move of the served checkout
+        feature 007 admits (R2Q6 (a)). The guard re-reads the served checkout and
+        refuses unless it holds `main` and is clean; git itself refuses a
+        `<commit>` that is not a fast-forward, and then nothing moved."""
+        if not isinstance(commit, str) or not _OBJECT_ID_SHAPE.match(commit):
+            raise SessionGitRefused(
+                f"the served checkout is fast-forwarded only to a full commit id, "
+                f"and {commit!r} is not one")
+        self.git(self.served_root, *SERVED_FAST_FORWARD_ARGV, commit)
+        return self.head(self.served_root)
 
     def worktree_remove(self, path: Path | str) -> None:
         """`git worktree remove --force <path>` — teardown, BOTH endings
