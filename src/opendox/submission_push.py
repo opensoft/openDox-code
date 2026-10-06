@@ -184,6 +184,7 @@ def _submit_with(git: GitRunner, root: Path, branch: str) -> Submission:
         url = _the_one_push_url(git, remote, branch)
         repository_act.refuse_command_executing_remote(url)
         _refuse_a_helper_transport(url, branch)
+        _refuse_a_file_url_git_reads_otherwise(url, branch)
         # A URL `urlsplit` refuses (`file://[bad`) is refused HERE, by name:
         # the push core reads the destination before it binds it, and a
         # `ValueError` from there would escape as no refusal at all.
@@ -290,6 +291,23 @@ def _refuse_a_helper_transport(url: str, branch: str) -> None:
             f"not carry: it would resolve and run `git-remote-{name}` from "
             f"PATH, so the push of `{branch}` is refused before it runs. Use "
             "an ssh, https, git or file URL, or a path.")
+
+
+def _refuse_a_file_url_git_reads_otherwise(url: str, branch: str) -> None:
+    """Refuse a `file://` URL holding a `?` or a `#`.
+
+    MEASURED on git 2.43.0: git reads both as part of the path, so
+    `file://…/remote.git?x` pushed to `remote.git?x`, while `urlsplit`, which
+    the push core binds the destination with, drops them and the push went to
+    `remote.git` (Copilot review of openDox-code#92 at 5e3ca9c2). Refused,
+    never reinterpreted; the URL is not echoed.
+    """
+    if url.startswith("file://") and ("?" in url or "#" in url):
+        raise SubmissionRefused(
+            f"the push URL of `{branch}` is a `file://` URL with a `?` or "
+            "`#`, which git reads as part of the path and this push would "
+            "not, so it is refused before it runs. Name the path without "
+            "`file://`.")
 
 
 def _the_one_push_url(git: GitRunner, remote: str, branch: str) -> str:

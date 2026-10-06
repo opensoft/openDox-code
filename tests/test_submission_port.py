@@ -410,6 +410,31 @@ def test_a_scheme_git_does_not_carry_is_refused_before_its_helper_runs(
     assert not marker.exists(), "the helper ran"
 
 
+@pytest.mark.parametrize("suffix", ["?x", "#x"])
+def test_a_file_url_with_a_query_or_fragment_is_refused_not_reinterpreted(
+        checkout: Path, tmp_path: Path, suffix: str) -> None:
+    """MEASURED on git 2.43.0: git reads `?` and `#` in a `file://` URL as
+    part of the path and pushed to `remote.git?x`, while the core, through
+    `urlsplit`, bound `remote.git` and the report named the first (Copilot
+    review of openDox-code#92 at 5e3ca9c2). Both repositories exist and
+    neither moves; the same path, named without `file://`, is pushed to as
+    git names it."""
+    stripped = _bare(tmp_path / "remote.git")
+    literal = _bare(tmp_path / f"remote.git{suffix}")
+    _git(checkout, "remote", "add", "origin", f"file://{literal}")
+    port = LocalGitSubmissions(checkout)
+    with pytest.raises(SubmissionError) as caught:
+        port.submit("sess-1")
+    assert type(caught.value) is SubmissionRefused
+    assert "a `?` or `#`" in str(caught.value)
+    assert _heads(stripped) == _heads(literal) == ""
+
+    _git(checkout, "remote", "set-url", "origin", str(literal))
+    report = port.submit("sess-1")
+    assert _tip(literal, "sess-1") == report.commit
+    assert _heads(stripped) == ""
+
+
 def test_no_hook_runs_on_either_side(checkout: Path, origin: Path,
                                      tmp_path: Path) -> None:
     """The core's two hook guards hold for a submission: the checkout's own
