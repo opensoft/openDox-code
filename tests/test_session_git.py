@@ -788,6 +788,49 @@ def test_the_fast_forward_refusal_cannot_be_reordered_by_a_file_name(
     assert "\\u202e" in str(refused.value)
 
 
+def test_nul_delimited_fields_are_read_as_git_wrote_them(git_and_repo):
+    """`git_nul` reads BYTES and decodes with `surrogateescape`: a carriage
+    return stays one, and a name that is not UTF-8 is read rather than raising
+    (Copilot 4195681954; openxFactory#656 `6026275158`)."""
+    git, repo, runner = git_and_repo
+    names = {"car\rriage.md", "line\nfeed.md", "dök.md"}
+    raw = b"bad\xffname.md"
+    for name in names:
+        (repo.root / name).write_text("x\n", encoding="utf-8")
+    try:
+        with open(os.path.join(os.fsencode(str(repo.root)), raw), "wb") as made:
+            made.write(b"x\n")
+        names.add(os.fsdecode(raw))
+    except OSError:
+        pass                                     # a filesystem that refuses it
+
+    listed = git.git_nul(repo.root, "ls-files", "-z", "--others",
+                         "--exclude-standard")
+
+    assert names <= set(listed)
+    assert runner.calls[-1] == ("ls-files", "-z", "--others", "--exclude-standard")
+
+
+def test_a_branch_whose_name_only_looks_like_main_is_never_fast_forwarded(
+        git_and_repo):
+    """`main\u00a0` (a no-break space ends it) is a legal branch, and a
+    stripped read of `HEAD` took it for `main`: the guard must refuse it before
+    any merge runs (Copilot's fifth review of openDox-code#90)."""
+    git, repo, runner = git_and_repo
+    ahead = _a_commit_ahead_of_main(git, repo)
+    lookalike = "main\u00a0"
+    repo.git("checkout", "-q", "-b", lookalike)
+    before = (repo.head(lookalike), repo.head("main"))
+    n = len(runner.calls)
+
+    with pytest.raises(sg.ServedCheckoutImmovable) as refused:
+        git.fast_forward_served(ahead)
+
+    assert "merge" not in [sg.command_subcommand(c) for c in runner.calls[n:]]
+    assert (repo.head(lookalike), repo.head("main")) == before
+    assert repr(lookalike) in str(refused.value)
+
+
 def test_branch_sha_reads_the_exact_ref(git_and_repo):
     """`show-ref` without `--verify` matches every ref that ENDS in the name, so
     a tag `backup/refs/heads/main` made a second line and a fast-forward that

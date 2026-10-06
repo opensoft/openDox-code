@@ -1404,12 +1404,30 @@ def test_a_directory_rename_stays_a_conflict_whatever_git_is_configured_to_do(
     assert world.refs() == before
 
 
+def _a_name_that_is_not_utf8(tmp_path: Path) -> str | None:
+    """A file name whose bytes are not UTF-8 (`\\xff`), as Python spells it
+    (`surrogateescape`), where this filesystem takes one; None where not."""
+    name = "bad\udcffname.md"
+    probe = tmp_path / name
+    try:
+        probe.write_text("probe\n", encoding="utf-8")
+        probe.unlink()
+    except (OSError, UnicodeEncodeError):
+        return None
+    return name
+
+
 def test_a_conflict_names_its_paths_as_they_are_spelled(tmp_path):
     """git QUOTES a path with a non-ASCII byte or a quote unless it is asked for
     NUL-delimited names (`"d\\303\\266k.md"`), so the conflict's paths are read
-    with `-z` (Copilot review of openDox-code#90)."""
-    world = World(tmp_path)
-    names = ("dök.md", 'say "hi".md')
+    with `-z` (Copilot review of openDox-code#90). They are read as BYTES too:
+    text mode turned a carriage return into a newline and raised on a name
+    that is not UTF-8 (Copilot 4195681954; openxFactory#656 `6026275158`)."""
+    world = World(tmp_path / "world")
+    names = ["dök.md", 'say "hi".md', "car\rriage.md"]
+    not_utf8 = _a_name_that_is_not_utf8(tmp_path)
+    if not_utf8 is not None:
+        names.append(not_utf8)
     for name in names:
         world.branch_with(BRANCH, name, "the branch's words\n")
         world.on_main(name, "main's words\n")
@@ -1418,8 +1436,34 @@ def test_a_conflict_names_its_paths_as_they_are_spelled(tmp_path):
     with pytest.raises(MergeConflict) as conflict:
         port.land(BRANCH, confirmation=token)
 
-    assert conflict.value.paths == names
-    assert all(name in str(conflict.value) for name in names)
+    assert set(conflict.value.paths) == set(names)
+    assert all(session_git.shown(name) in str(conflict.value) for name in names)
+
+
+def test_a_driver_set_for_a_name_with_a_carriage_return_is_refused(tmp_path):
+    """The merge-driver check asks `check-attr` about the paths either side
+    changed. Read in text mode, `car\\rriage.md` became `car\\nriage.md`, the
+    check asked about a path no attribute names, and the merge then ran the
+    driver this machine sets for the real one, resolving the conflict with no
+    human (Copilot 4195681954; openxFactory#656 `6026275158`)."""
+    world = World(tmp_path)
+    name = "car\rriage.md"
+    world.branch_with(BRANCH, name, "the branch's words\n")
+    world.on_main(name, "main's words\n")
+    info = Path(world.git("rev-parse", "--git-common-dir"))
+    info = (info if info.is_absolute() else world.root / info) / "info"
+    info.mkdir(parents=True, exist_ok=True)
+    (info / "attributes").write_text('"car\\rriage.md" merge=mine\n',
+                                     encoding="utf-8")
+    world.git("config", "merge.mine.driver", "cp %B %A")
+    before = world.refs()
+    port, token = lander(world), mint(world)
+
+    refused = refusal(port.land, BRANCH, confirmation=token)
+
+    assert refused.code == "merge-driver"
+    assert repr(f"{name} (merge=mine)") in str(refused)
+    assert world.refs() == before
 
 
 def test_a_conflict_path_cannot_write_to_the_terminal(tmp_path):

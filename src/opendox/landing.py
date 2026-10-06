@@ -231,8 +231,11 @@ def _redact(text: str) -> str:
     Imported here rather than at the top, so this module keeps its light
     import."""
     from opendox.runtime.local_git_adapter import redact_credentials
-    return _URL_QUERY_VALUE.sub(r"\1***", _URL_USERINFO.sub(
+    redacted = _URL_QUERY_VALUE.sub(r"\1***", _URL_USERINFO.sub(
         r"\1***@", redact_credentials(text or "")))
+    # A byte git wrote that is not UTF-8 arrives as a surrogate; a message
+    # spells it as an escape, so it can always be printed.
+    return redacted.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 class LandingRefused(Exception):
@@ -839,10 +842,10 @@ class NeutralLander:
         changed: set[str] = set()
         for base in bases:
             for tip in (main, head):
-                listed = self.git.git_raw(path, "diff", "--no-ext-diff",
+                listed = self.git.git_nul(path, "diff", "--no-ext-diff",
                                           "--no-textconv", "--no-renames",
                                           "--name-only", "-z", base, tip)
-                changed.update(name for name in listed.split("\0") if name)
+                changed.update(name for name in listed if name)
         return sorted(changed)
 
     def _refuse_merge_drivers(self, path: Path, neutral: tuple[str, ...],
@@ -854,9 +857,8 @@ class NeutralLander:
         names = self._changed_paths(path, main, head)
         drivers: list[str] = []
         for start in range(0, len(names), _PATHS_PER_CHECK):
-            listed = self.git.git_raw(path, *neutral, "check-attr", "-z", "merge",
+            fields = self.git.git_nul(path, *neutral, "check-attr", "-z", "merge",
                                       "--", *names[start:start + _PATHS_PER_CHECK])
-            fields = listed.split("\0")
             for name, value in zip(fields[0::3], fields[2::3]):
                 if name and value not in _GITS_OWN_MERGE_VALUES:
                     drivers.append(shown(f"{name} (merge={value})"))
@@ -900,9 +902,9 @@ class NeutralLander:
                              "merge", "--strategy=ort", "--no-ff", "--no-edit",
                              "-m", message, head)
         except GitError as failed:
-            unmerged = self.git.git_raw(path, "diff", "--name-only", "-z",
+            unmerged = self.git.git_nul(path, "diff", "--name-only", "-z",
                                         "--diff-filter=U")
-            paths = tuple(dict.fromkeys(p for p in unmerged.split("\0") if p))
+            paths = tuple(dict.fromkeys(p for p in unmerged if p))
             if paths:
                 raise MergeConflict(branch, paths) from None
             raise LandingRefused(

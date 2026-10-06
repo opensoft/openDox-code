@@ -257,10 +257,12 @@ class SessionActionInProgress(SessionGitRefused):
 
 class GitRunner(Protocol):
     def run(self, cwd: Path, *args: str,
-            config: Sequence[tuple[str, str]] = ()) -> subprocess.CompletedProcess:
+            config: Sequence[tuple[str, str]] = (),
+            binary: bool = False) -> subprocess.CompletedProcess:
         """Run `git *args` in `cwd`. `config`, when given, is command-scope
         configuration for this one command, delivered in its environment
-        (only the landing's fast-forward passes any)."""
+        (only the landing's fast-forward passes any). `binary` returns stdout
+        and stderr as BYTES, untranslated (`SessionGit.git_nul`)."""
         ...
 
 
@@ -281,7 +283,8 @@ class SubprocessGitRunner:
     top so this module keeps its light import (`authoring.py`'s precedent)."""
 
     def run(self, cwd: Path, *args: str,
-            config: Sequence[tuple[str, str]] = ()) -> subprocess.CompletedProcess:
+            config: Sequence[tuple[str, str]] = (),
+            binary: bool = False) -> subprocess.CompletedProcess:
         from opendox.runtime.local_git_adapter import sanitized_git_environment
         env = sanitized_git_environment()
         if config:
@@ -289,8 +292,18 @@ class SubprocessGitRunner:
             for index, (key, value) in enumerate(config):
                 env[f"GIT_CONFIG_KEY_{index}"] = key
                 env[f"GIT_CONFIG_VALUE_{index}"] = value
+        if binary:
+            return subprocess.run(["git", *args], cwd=str(cwd),
+                                  capture_output=True, check=False, env=env)
+        # TEXT MODE NEVER RAISES on output that is not in the locale's
+        # encoding: a file name that is not UTF-8 reaches a merge's own
+        # output ("Auto-merging <name>"), and a strict decode raised
+        # `UnicodeDecodeError` out of a command git had already run (Copilot
+        # 4195681954; openxFactory#656 `6026275158`). The bytes survive as
+        # surrogates; paths are read exactly through `SessionGit.git_nul`.
         return subprocess.run(["git", *args], cwd=str(cwd), text=True,
-                              capture_output=True, check=False, env=env)
+                              errors="surrogateescape", capture_output=True,
+                              check=False, env=env)
 
 
 # --------------------------------------------------------------------------
@@ -628,6 +641,26 @@ class SessionGit:
             raise GitError(args, done.returncode, done.stderr or "")
         return (done.stdout or "").rstrip("\n")
 
+    def git_nul(self, cwd: Path | str, *args: str) -> tuple[str, ...]:
+        """The fields of a NUL-delimited (`-z`) git output, exactly as git wrote
+        them. The output is read as BYTES and each field is decoded UTF-8 with
+        `surrogateescape`, with NO newline translation. Text mode turned a
+        carriage return in a file name into a newline (so a guard asked about
+        another path), and raised `UnicodeDecodeError` on a name that is not
+        UTF-8 (Copilot 4195681954; holder ruling openxFactory#656
+        `6026275158` item 1). A field passed back to git as an argument is
+        encoded the same way, so it names the same file. Guarded like every
+        other command."""
+        self._guard(cwd, args)
+        done = self.runner.run(Path(cwd), *args, binary=True)
+        if done.returncode != 0:
+            raise GitError(args, done.returncode,
+                           (done.stderr or b"").decode("utf-8", "replace"))
+        fields = (done.stdout or b"").split(b"\0")
+        if fields and not fields[-1]:
+            fields.pop()
+        return tuple(field.decode("utf-8", "surrogateescape") for field in fields)
+
     def ls_remote_url(self, cwd: Path | str, url: str, ref: str) -> str:
         """`git ls-remote` of ONE ref at `url`, with the URL kept OUT of the
         argv: it is the value of a TRANSIENT remote, `remote.<fresh name>.url`,
@@ -660,13 +693,18 @@ class SessionGit:
         """The served checkout's `HEAD` ref (`refs/heads/<name>`, or `HEAD` when
         detached) and its `git status --porcelain` lines, untracked included —
         the two facts the landing's fast-forward is admitted on. Two READS."""
-        ok, ref = self._try(self.served_root, "rev-parse", "--symbolic-full-name",
-                            "HEAD")
+        # The ref EXACTLY as git wrote it, only its newline removed: a strip
+        # would read the legal branch `main\u00a0` (a no-break space ends it)
+        # as `refs/heads/main`, and admit the move of another branch (Copilot's
+        # fifth review of openDox-code#90).
+        read = self._run(self.served_root,
+                         ("rev-parse", "--symbolic-full-name", "HEAD"))
+        ref = (read.stdout or "").removesuffix("\n") if read.returncode == 0 else ""
         done, listed = self._try(self.served_root, "status", "--porcelain",
                                  UNTRACKED_FILES_ALL)
         lines = tuple(l for l in listed.splitlines() if l.strip()) if done \
             else ("<git status failed>",)
-        return (ref if ok else ""), lines
+        return ref, lines
 
     def _fast_forward_refusal(self, state: tuple[str, tuple[str, ...]]
                               ) -> ServedCheckoutImmovable:
