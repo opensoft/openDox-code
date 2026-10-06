@@ -55,6 +55,7 @@ import re
 import secrets
 import sys
 import threading
+import weakref
 from dataclasses import dataclass
 
 __all__ = [
@@ -142,7 +143,10 @@ class Confirmation:
     Its `branch`, `head` and `issuer` are for display; `redeem` checks the
     registry's record of them, never these attributes."""
 
-    __slots__ = ("_branch", "_head", "_issuer", "_key")
+    # `__weakref__`: the registry forgets a token's key when the token itself
+    # is gone (`_forget`), so a long-running server keeps no record per
+    # confirmation it ever minted.
+    __slots__ = ("_branch", "_head", "_issuer", "_key", "__weakref__")
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         raise ConfirmationRefused(
@@ -217,7 +221,20 @@ def _mint(branch: str, head: str, issuer: str) -> Confirmation:
     object.__setattr__(token, "_key", key)
     with _LOCK:
         _LIVE[key] = _Grant(branch=branch, head=head, issuer=issuer)
+    weakref.finalize(token, _forget, key)
     return token
+
+
+def _forget(key: str) -> None:
+    """Drop a key once its token is gone (Copilot's third review of
+    openDox-code#90). Safe: the key lives only in that token, which cannot be
+    copied, pickled or rebuilt, so once it is collected the key can never be
+    presented again. A token still held keeps its record, so a spent one is
+    still refused as spent. No lock: a collection can run this inside a
+    section that holds `_LOCK`, and one `pop` and one `discard` are each
+    atomic."""
+    _LIVE.pop(key, None)
+    _SPENT.discard(key)
 
 
 def redeem(confirmation: object, *, branch: str, head: str) -> str:

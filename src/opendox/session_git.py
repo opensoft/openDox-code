@@ -611,6 +611,22 @@ class SessionGit:
             raise GitError(args, done.returncode, done.stderr or "")
         return (done.stdout or "").rstrip("\n")
 
+    def ls_remote_url(self, cwd: Path | str, url: str, ref: str) -> str:
+        """`git ls-remote` of ONE ref at `url`, with the URL kept OUT of the
+        argv: it is the value of a TRANSIENT remote, `remote.<fresh name>.url`,
+        passed in the command's environment (`GIT_CONFIG_COUNT=1`), and the
+        argv names only that remote. A URL may carry a credential, and an argv
+        is readable by any local user; the environment is not (plan 038, T012).
+        The transient remote has none of a configured remote's other settings."""
+        transient = f"opendox-probe-{uuid.uuid4().hex}"
+        args = ("ls-remote", transient, ref)
+        self._guard(cwd, args)
+        done = self.runner.run(Path(cwd), *args,
+                               config=((f"remote.{transient}.url", url),))
+        if done.returncode != 0:
+            raise GitError(args, done.returncode, done.stderr or "")
+        return (done.stdout or "").strip()
+
     def _run(self, cwd: Path | str, args: Sequence[str]
              ) -> subprocess.CompletedProcess:
         """Guard, then run. The landing's fast-forward, the one argv the guard

@@ -208,8 +208,27 @@ def _commit_at(git: SessionGit, ref: str) -> str | None:
 
 def _redact(text: str) -> str:
     """A git message with any credential a remote URL carries removed: the
-    userinfo of a URL and every query-string value (12.1a's rule)."""
-    return _URL_QUERY_VALUE.sub(r"\1***", _URL_USERINFO.sub(r"\1***@", text or ""))
+    userinfo of a URL and every query-string value (12.1a's rule).
+
+    The runtime's own `local_git_adapter.redact_credentials` runs FIRST: it
+    knows a credential in a FRAGMENT (`#token=secret`) and a value after
+    whitespace (`?token= secret`), and `git ls-remote` echoes a URL it could not
+    read in exactly those shapes (Copilot's third review of openDox-code#90).
+    Imported here rather than at the top, so this module keeps its light
+    import."""
+    from opendox.runtime.local_git_adapter import redact_credentials
+    return _URL_QUERY_VALUE.sub(r"\1***", _URL_USERINFO.sub(
+        r"\1***@", redact_credentials(text or "")))
+
+
+def _shown(path: str) -> str:
+    """A path as a message shows it: as it is, unless it holds a character a
+    terminal would act on (a control, a format character such as a bidi
+    override, a line separator), and then escaped, as `repr` spells it. A file
+    name is the branch author's to choose, and a refusal is printed where the
+    human reads it (Copilot's third review of openDox-code#90). Callers keep
+    the path itself; only the message escapes it."""
+    return path if path.isprintable() else repr(path)
 
 
 class LandingRefused(Exception):
@@ -244,7 +263,8 @@ class MergeConflict(LandingRefused):
             f"bring `main` into {branch} and resolve the conflict there, on the "
             "branch, with git (for example `git merge main` in a checkout of "
             f"{branch}), then land again")
-        listed = ", ".join(self.paths) if self.paths else "(git named no path)"
+        listed = (", ".join(_shown(path) for path in self.paths) if self.paths
+                  else "(git named no path)")
         super().__init__(
             f"{branch} conflicts with `main` in: {listed}. Nothing was merged and "
             f"`main` is where it was. Remedy: {self.remedy}",
@@ -258,7 +278,8 @@ class Landed:
     `merge_commit` is the `--no-ff` merge commit on `main`, so `git revert -m 1
     <merge_commit>` restores `previous_main`'s tree. `served_checkout` is
     `fast-forwarded` (it held `main` and was clean, and now holds the merge) or
-    `left` (it holds another branch, and only the `main` ref moved). `pushed` is
+    `left` (it holds another branch, and `main` moved in the landing's own
+    worktree). `pushed` is
     always False: `land` pushes nothing (R2Q6 (a))."""
 
     branch: str
@@ -673,14 +694,44 @@ class NeutralLander:
         for name in names:
             self._check_remote(name, main)
 
+    def _push_url(self, name: str) -> str:
+        """The ONE URL a `git push` to remote `name` reaches: its push URL, or
+        its fetch URL where it has no `pushurl` (`git remote get-url --push`).
+        The owner's later `git push` of `main` goes there, so that is the
+        repository whose `main` local `main` must contain; `git ls-remote
+        <name>` would read the FETCH URL, another repository where a `pushurl`
+        differs (data-model.md § Landed, "The remote check"). A remote with
+        several push URLs is refused by name, as `submit` refuses it."""
+        try:
+            listed = self.git.git(self.checkout_root, "remote", "get-url",
+                                  "--push", "--all", name)
+        except GitError as failed:
+            raise LandingRefused(
+                f"`land` could not read the remote {name!r}'s push URL "
+                f"({_redact(failed.stderr) or 'no reason given'}); fix or remove "
+                "the remote, then land again", code="remote-unreadable") from None
+        urls = [url for url in listed.splitlines() if url.strip()]
+        if len(urls) != 1:
+            raise LandingRefused(
+                f"the remote {name!r} has {len(urls)} push URLs, and `land` "
+                f"checks the one repository a `git push` of `{DEFAULT_BRANCH}` "
+                "reaches before it merges. Give the remote one push URL "
+                "(`git remote set-url --push`), then land again",
+                code="several-push-urls")
+        return urls[0]
+
     def _check_remote(self, name: str, main: str) -> None:
         if name.startswith("-"):
             raise LandingRefused(
                 f"a remote is named {name!r}, like an option; rename it before "
                 "landing", code="remote-unreadable")
+        url = self._push_url(name)
         try:
-            answer = self.git.git(self.checkout_root, "ls-remote", name,
-                                  f"refs/heads/{DEFAULT_BRANCH}")
+            # The push URL is read through a TRANSIENT remote passed in the
+            # command's environment, so it never reaches git's argv, where any
+            # local user could read a credential it carries.
+            answer = self.git.ls_remote_url(self.checkout_root, url,
+                                            f"refs/heads/{DEFAULT_BRANCH}")
         except GitError as failed:
             raise LandingRefused(
                 f"`land` reads the remote {name!r}'s `{DEFAULT_BRANCH}` with "
@@ -795,7 +846,7 @@ class NeutralLander:
             fields = listed.split("\0")
             for name, value in zip(fields[0::3], fields[2::3]):
                 if name and value not in _GITS_OWN_MERGE_VALUES:
-                    drivers.append(f"{name} (merge={value})")
+                    drivers.append(_shown(f"{name} (merge={value})"))
         if drivers:
             raise LandingRefused(
                 f"{', '.join(drivers[:5])} carry a `merge` attribute that selects a "

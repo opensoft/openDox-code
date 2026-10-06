@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import gc
 import pickle
 import subprocess
 import sys
@@ -834,9 +835,11 @@ def test_a_dirty_served_checkout_on_main_is_refused_before_merging(world):
 class RecordingRunner(session_git.SubprocessGitRunner):
     def __init__(self) -> None:
         self.calls: list[tuple[Path, tuple[str, ...]]] = []
+        self.settings: list[dict] = []
 
     def run(self, cwd, *args, **settings):
         self.calls.append((Path(cwd), tuple(args)))
+        self.settings.append(settings)
         return super().run(cwd, *args, **settings)
 
     def subcommands(self) -> list[str]:
@@ -1040,6 +1043,89 @@ def test_several_remotes_and_none_named_origin_are_each_checked(world, tmp_path)
     refused = refusal(port.land, BRANCH, confirmation=token)
     assert refused.code == "remote-main-not-contained"
     assert "'second'" in str(refused)
+
+
+def test_the_remote_check_reads_the_push_url_not_the_fetch_url(world, tmp_path):
+    """The owner's later `git push` of `main` goes to the remote's PUSH URL, so
+    that is the repository whose `main` local `main` must contain; `ls-remote
+    <remote>` would read the FETCH URL (data-model.md § Landed, "The remote
+    check"). A remote with several push URLs is refused by name."""
+    in_step = _bare_remote(tmp_path, "in-step")
+    ahead = _bare_remote(tmp_path, "ahead")
+    for remote in (in_step, ahead):
+        world.git("push", "-q", str(remote), "main")
+    _advance_remote_main(tmp_path, ahead, "ahead-clone")
+
+    # the fetch URL is in step, the push URL is ahead: refused
+    world.git("remote", "add", "origin", str(in_step))
+    world.git("remote", "set-url", "--push", "origin", str(ahead))
+    before = world.refs()
+    port, token = lander(world), mint(world)
+    refused = refusal(port.land, BRANCH, confirmation=token)
+    assert refused.code == "remote-main-not-contained"
+    assert "'origin'" in str(refused)
+    assert world.refs() == before
+
+    # two push URLs: refused by name, before anything is read or merged
+    world.git("remote", "set-url", "--add", "--push", "origin", str(in_step))
+    token = mint(world)
+    refused = refusal(port.land, BRANCH, confirmation=token)
+    assert refused.code == "several-push-urls"
+    assert "'origin' has 2 push URLs" in str(refused)
+    assert world.refs() == before
+
+    # the fetch URL is ahead, the push URL is in step: it lands
+    world.git("remote", "set-url", "origin", str(ahead))
+    world.git("config", "--unset-all", "remote.origin.pushurl")
+    world.git("remote", "set-url", "--push", "origin", str(in_step))
+    landed = port.land(BRANCH, confirmation=mint(world))
+    assert world.head("refs/heads/main") == landed.merge_commit
+
+
+def test_the_push_url_never_reaches_git_argv(world, tmp_path):
+    """A push URL may carry a credential, and an argv is readable by any local
+    user: the URL travels as a TRANSIENT remote in the command's environment
+    (`GIT_CONFIG_COUNT=1`, `remote.<transient>.url`), and the argv names only
+    that remote."""
+    remote = _bare_remote(tmp_path, "pushed-to-only")
+    world.git("push", "-q", str(remote), "main")
+    world.git("remote", "add", "origin", str(tmp_path / "fetched-from.git"))
+    world.git("remote", "set-url", "--push", "origin", str(remote))
+    runner = RecordingRunner()
+
+    landed = lander(world, runner=runner).land(BRANCH, confirmation=mint(world))
+
+    assert world.head("refs/heads/main") == landed.merge_commit
+    assert not [args for _cwd, args in runner.calls
+                if any(str(remote) in arg for arg in args)]
+    probes = [(args, settings) for (_cwd, args), settings
+              in zip(runner.calls, runner.settings)
+              if session_git.command_subcommand(args) == "ls-remote"]
+    assert len(probes) == 1
+    (args, settings), = probes
+    transient = args[1]
+    assert transient.startswith("opendox-probe-")
+    assert args == ("ls-remote", transient, "refs/heads/main")
+    assert settings == {"config": ((f"remote.{transient}.url", str(remote)),)}
+
+
+@pytest.mark.parametrize("url", ["/nonexistent/remote.git#token=sekrit-fragment",
+                                 "/nonexistent/remote.git?token= sekrit-spaced"],
+                         ids=["fragment", "spaced-value"])
+def test_a_credential_in_the_push_url_never_reaches_a_refusal(world, url):
+    """`git ls-remote` echoes a URL it could not read, and a credential can sit
+    in its fragment or after whitespace (Copilot's third review of
+    openDox-code#90): the refusal names the remote and redacts the value."""
+    world.git("remote", "add", "origin", url)
+    before = world.refs()
+    port, token = lander(world), mint(world)
+
+    refused = refusal(port.land, BRANCH, confirmation=token)
+
+    assert refused.code == "remote-unreadable"
+    assert "sekrit" not in str(refused)
+    assert "'origin'" in str(refused)
+    assert world.refs() == before
 
 
 def test_a_fast_forward_that_no_longer_applies_refuses_leaving_main(world):
@@ -1260,6 +1346,46 @@ def test_a_conflict_names_its_paths_as_they_are_spelled(tmp_path):
     assert all(name in str(conflict.value) for name in names)
 
 
+def test_a_conflict_path_cannot_write_to_the_terminal(tmp_path):
+    """A file name is the branch author's to choose, and the refusal is printed
+    where the human reads it: a control character in a conflicting path is
+    escaped in the message, and `paths` keeps the name itself (Copilot's third
+    review of openDox-code#90)."""
+    world = World(tmp_path)
+    name = "e\x1b[2Jvil\nname.md"
+    world.branch_with(BRANCH, name, "the branch's words\n")
+    world.on_main(name, "main's words\n")
+    port, token = lander(world), mint(world)
+
+    with pytest.raises(MergeConflict) as conflict:
+        port.land(BRANCH, confirmation=token)
+
+    assert conflict.value.paths == (name,)
+    message = str(conflict.value)
+    assert "\x1b" not in message
+    assert "\n" not in message
+    assert repr(name) in message
+
+
+def test_a_driver_refusal_cannot_write_to_the_terminal(tmp_path):
+    world = World(tmp_path)
+    name = "e\x1b]0;title\x07vil.md"
+    world.branch_with(BRANCH, name, "the branch's words\n")
+    info = Path(world.git("rev-parse", "--git-common-dir"))
+    info = (info if info.is_absolute() else world.root / info) / "info"
+    info.mkdir(parents=True, exist_ok=True)
+    (info / "attributes").write_text("* merge=mine\n", encoding="utf-8")
+    world.git("config", "merge.mine.driver", "cp %B %A")
+    port, token = lander(world), mint(world)
+
+    refused = refusal(port.land, BRANCH, confirmation=token)
+
+    assert refused.code == "merge-driver"
+    assert "\x1b" not in str(refused)
+    assert "\x07" not in str(refused)
+    assert repr(f"{name} (merge=mine)") in str(refused)
+
+
 def test_an_ambient_git_dir_cannot_redirect_the_landing(world, tmp_path):
     """`GIT_DIR` and `GIT_WORK_TREE` outrank the directory a command runs in,
     so a process started with them set (a git hook, an alias) would have had
@@ -1447,6 +1573,27 @@ def test_the_view_issuer_is_single_use_and_bound_to_its_branch(world):
                                 third).code == "no-nonce"
     refused = confirmation_refusal(nonces.issue_nonce, BRANCH, "not-a-commit")
     assert refused.code == "bad-binding"
+
+
+def test_a_discarded_confirmation_leaves_no_record(world):
+    """The registry forgets a key once its token is gone, so a long-running
+    server keeps no record per confirmation it ever minted; a spent token still
+    held keeps its record and is still refused as spent (Copilot's third review
+    of openDox-code#90)."""
+    nonces = landing_confirm.LandingNonces()
+    head = world.head(BRANCH)
+    unspent = nonces.confirm_nonce(BRANCH, nonces.issue_nonce(BRANCH, head))
+    spent = nonces.confirm_nonce(BRANCH, nonces.issue_nonce(BRANCH, head))
+    landing_confirm.redeem(spent, branch=BRANCH, head=head)
+    keys = {object.__getattribute__(token, "_key") for token in (unspent, spent)}
+    assert confirmation_refusal(landing_confirm.redeem, spent, branch=BRANCH,
+                                head=head).code == "spent"
+
+    del unspent, spent
+    gc.collect()
+
+    assert not keys & set(landing_confirm._LIVE)
+    assert not keys & landing_confirm._SPENT
 
 
 @pytest.mark.parametrize("presented", ["\ud800", "dök", b"bytes", None],
