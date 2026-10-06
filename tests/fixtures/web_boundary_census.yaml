@@ -191,9 +191,9 @@ measured_at: "opensoft/openDox-code main a99eba03e31a0aee1cc15a061fdf718cc88a2c4
 # shape and `test_the_declared_totals_are_re_derived_from_the_rows` can refuse a
 # drift between the two. Measured at slice S4 (see the S4 block above).
 totals:
-  A: {files: 26, loc: 18621}
+  A: {files: 26, loc: 18759}
   B: {files: 1, loc: 73}
-  C: {files: 14, loc: 12757}
+  C: {files: 14, loc: 12769}
   "?": {files: 1, loc: 1586}
 files:
   - path: app.js
@@ -381,14 +381,14 @@ files:
 
   - path: views/staging-workbench-model.js
     class: A
-    loc: 2330
+    loc: 2468
     tail: capturedStatus
-    note: "SPLIT AT S4 (RULED Q3): all six class-B route constants left for the two class-B files that already called them and imported them -- CREATE_ROUTE :543 to views/swb-create.js, and EDIT_DOCUMENT_ROUTE :817 / OPEN_PR_ROUTE :818 / FIRST_EDIT_ROUTE :821 / ABANDON_SESSION_ROUTE :822 / SHARE_SESSION_ROUTE :826, with the SESSION_ROUTES table and sessionRoute(), to views/swb-session.js. What is left is the pure scope derivation, the affordance ids, the verbs, the labels and the request builders. The `tail:` is the note's own reading of the row (\u00a7 3.2: 'plus STATUS_BRAINSTORM / BRAINSTORM_AREA / STAGING_AREA (class-C)'): class-A substance with a class-C vocabulary tail. PARAMETERIZED AT S7: the three became capturedStatus() / capturedArea() / organizedArea(), read off the snapshot's closed documents[].stage enum and the profile's corpus areas, and the section labels became a function of the facet loc 2012 -> 2330 on plan 034 T102 (RULED openxFactory#656 `5963618568`, on `5961651355`): editing BY SCOPE -- `editingPosture`, `documentEditable`, `tileOwnEditablePaths` (the browser's mirror of `default_columns.resolve_scope`, held to it by tests/test_workbench_edit_by_scope.py), GATELESS_SAVE_REFUSAL and the two plane notes; `presentationPosture` gains the `editing` fact and is unchanged for every caller that does not pass the by-scope mode; `doxbenchScopeProjection` gains `editableBy: tile` (projecting no outline, as the neutral scope projects none) and `docWheelEntries` an optional editable set. Every new literal is plain English or a facet read."
+    note: "SPLIT AT S4 (RULED Q3): all six class-B route constants left for the two class-B files that already called them and imported them -- CREATE_ROUTE :543 to views/swb-create.js, and EDIT_DOCUMENT_ROUTE :817 / OPEN_PR_ROUTE :818 / FIRST_EDIT_ROUTE :821 / ABANDON_SESSION_ROUTE :822 / SHARE_SESSION_ROUTE :826, with the SESSION_ROUTES table and sessionRoute(), to views/swb-session.js. What is left is the pure scope derivation, the affordance ids, the verbs, the labels and the request builders. The `tail:` is the note's own reading of the row (\u00a7 3.2: 'plus STATUS_BRAINSTORM / BRAINSTORM_AREA / STAGING_AREA (class-C)'): class-A substance with a class-C vocabulary tail. PARAMETERIZED AT S7: the three became capturedStatus() / capturedArea() / organizedArea(), read off the snapshot's closed documents[].stage enum and the profile's corpus areas, and the section labels became a function of the facet loc 2012 -> 2330 on plan 034 T102 (RULED openxFactory#656 `5963618568`, on `5961651355`): editing BY SCOPE -- `editingPosture`, `documentEditable`, `tileOwnEditablePaths` (the browser's mirror of `default_columns.resolve_scope`, held to it by tests/test_workbench_edit_by_scope.py), GATELESS_SAVE_REFUSAL and the two plane notes; `presentationPosture` gains the `editing` fact and is unchanged for every caller that does not pass the by-scope mode; `doxbenchScopeProjection` gains `editableBy: tile` (projecting no outline, as the neutral scope projects none) and `docWheelEntries` an optional editable set. Every new literal is plain English or a facet read. loc 2330 -> 2468 on plan 038 T025 (W-1 (A), RULED openxFactory#656 `6013547504`, which reverses S7's one sibling import): the model is IMPORT-FREE again, so a harness that copies it alone runs it. The nine `views/display.js` tables it read are inlined, each declared under `inlined_display_tables` below and exported together as `INLINED_DISPLAY_TABLES` for T050's equality guard, and its neutral vocabulary is a reader over three of them that answers the five reads the model makes. The facet itself still arrives only through `setDisplay`."
 
   - path: views/staging-workbench.js
     class: C
-    loc: 3621
-    note: "full-screen workbench scoped to one topic-bearing tile loc 3397 -> 3402 on this PR's round-2 review (Copilot): the two contributed columns are per-mount `const`s inside mountStagingWorkbench rather than module-level `let`s, so two live workbenches cannot share them. loc 3459 -> 3471 on the § 3.4 SLICE S7 RESIDUE (Copilot review 5192900474 on openDox-code#21 @ c7a216c, thread 2 and suppressed comment 5): the nested renderDocWheel is mounted WITH `display: vocab` (doc-wheel.js resets its module vocabulary to `opts.display || neutralDisplay()` on every render, so one pane had rendered in two vocabularies), and runAddSection() hands `display: vocab` to insertSection, so the only interactive add route places and duplicate-checks against the HOST's canonical heading order rather than the neutral SECTION_ORDER. loc 3471 -> 3621 on plan 034 T102 (RULED openxFactory#656 `5963618568`): the canvas, the rail and the docs tile's `edit` verb are offered by `editingNow().editors` -- the gate where a host's column is registered (either half), exactly as before, and the scope where none is; the pill and the posture note state the by-scope posture, and the abstract's generation stays keyed on the gate (ruling 7.7). By scope there is no outline buffer, so the add-section controls state that absence, and a restored buffer the scope no longer owns is reconciled once the canvas is ready (Copilot review of #81): a clean one is unloaded, a dirty one is kept and named in the posture note."
+    loc: 3633
+    note: "full-screen workbench scoped to one topic-bearing tile loc 3397 -> 3402 on this PR's round-2 review (Copilot): the two contributed columns are per-mount `const`s inside mountStagingWorkbench rather than module-level `let`s, so two live workbenches cannot share them. loc 3459 -> 3471 on the § 3.4 SLICE S7 RESIDUE (Copilot review 5192900474 on openDox-code#21 @ c7a216c, thread 2 and suppressed comment 5): the nested renderDocWheel is mounted WITH `display: vocab` (doc-wheel.js resets its module vocabulary to `opts.display || neutralDisplay()` on every render, so one pane had rendered in two vocabularies), and runAddSection() hands `display: vocab` to insertSection, so the only interactive add route places and duplicate-checks against the HOST's canonical heading order rather than the neutral SECTION_ORDER. loc 3471 -> 3621 on plan 034 T102 (RULED openxFactory#656 `5963618568`): the canvas, the rail and the docs tile's `edit` verb are offered by `editingNow().editors` -- the gate where a host's column is registered (either half), exactly as before, and the scope where none is; the pill and the posture note state the by-scope posture, and the abstract's generation stays keyed on the gate (ruling 7.7). By scope there is no outline buffer, so the add-section controls state that absence, and a restored buffer the scope no longer owns is reconciled once the canvas is ready (Copilot review of #81): a clean one is unloaded, a dirty one is kept and named in the posture note. loc 3621 -> 3633 on plan 038 T025 (S1, T102's follow-on): T102's two re-shows redraw the stated plane through `redrawPostureNote` and no longer call `showPostureNote` again, so the one rule keeps its two callers; and one comment names `editingPosture` instead of spelling its header in capitals, the one place this file carried the substring the no-write-path pin refuses."
 
   - path: views/swb-model-intake.js
     class: A
@@ -661,3 +661,80 @@ prose_exemptions:
       the legend sentence that STATES the rule the five labels above follow --
       "a draft a human commits" is the noun for an uncommitted file, and the
       sentence exists precisely to say that machinery writes nothing.
+
+# ---------------------------------------------------------------------------
+# PLAN 038 T025: THE TABLES THE STAGING MODEL INLINES. W-1 (A), RULED by Brett
+# Heap on opensoft/openxFactory#656 comment `6013547504`, makes
+# `views/staging-workbench-model.js` import-free again and so reverses S7's one
+# sibling import: every harness that copies the model ALONE (openXdox-code's
+# governed `tests/test_staging_workbench.py` does, at five helper sites) failed
+# on `ERR_MODULE_NOT_FOUND ... display.js`. The model therefore carries its own
+# copy of each `views/display.js` table it reads.
+#
+# Five of the nine carry words assertion 4 watches: four SEAM KEY tables
+# (`SCOPE_KINDS`, `TAB_IDS`, `SESSION_SCOPE_KINDS`, `SESSION_BRANCH_NAMESPACES`:
+# `cluster`, `possible`, `staged`, `draft`, `docs`) and `STATUS_ROLE`, whose
+# `ratified` / `superseded` / `retired` are role names spelled like status words.
+# In `views/display.js` they sit in a class-A file, out of the sweep's scope,
+# and `declared_exemptions` records why. Here they sit in a declared class-A
+# TAIL, inside the scope, so every inlined table is DECLARED here instead, by
+# (path, identifier), and the sweep skips the string literals INSIDE that one
+# declaration and nowhere else in the file: a seam key spelled anywhere outside
+# its table is still a violation.
+#
+# `copies` names the `views/display.js` expression the table copies, and the
+# model exports the same nine as `INLINED_DISPLAY_TABLES`, keyed by that
+# expression. `tests/test_web_boundary.py` holds this list to that export and
+# each `copies` to a name `views/display.js` really declares; that the VALUES
+# are equal is the guard plan 038 T050 adds (its "inline-parity guard"), so the
+# two copies cannot drift.
+inlined_display_tables:
+  - path: views/staging-workbench-model.js
+    identifier: STAGE_ROLES
+    copies: STAGE_ROLES
+    reason: the six stage ROLE names, in spine order; the model reads four of them.
+  - path: views/staging-workbench-model.js
+    identifier: STATUS_ROLE
+    copies: STATUS_ROLE
+    reason: >-
+      the eight status ROLE names as named constants. Three of them are spelled
+      like openxFactory's status words, which is `views/display.js`'s own
+      coincidence (its STATUS_ROLE note) and why the copy needs this row.
+  - path: views/staging-workbench-model.js
+    identifier: SCOPE_KINDS
+    copies: SCOPE_KINDS
+    reason: >-
+      the workbench's scope-kind seam keys; the wheel, the workbench and the
+      stored session state must spell them identically.
+  - path: views/staging-workbench-model.js
+    identifier: TAB_IDS
+    copies: TAB_IDS
+    reason: the workbench's three tab seam keys, never rendered as a word.
+  - path: views/staging-workbench-model.js
+    identifier: SESSION_SCOPE_KINDS
+    copies: SESSION_SCOPE_KINDS
+    reason: >-
+      the branch-session transport's scope vocabulary, read off the wire by
+      `src/opendox/branch_session.py`.
+  - path: views/staging-workbench-model.js
+    identifier: SESSION_BRANCH_NAMESPACES
+    copies: SESSION_BRANCH_NAMESPACES
+    reason: >-
+      the git ref namespace each scope kind's session branch is cut under,
+      mirroring `branch_session.session_branch`.
+  - path: views/staging-workbench-model.js
+    identifier: SNAPSHOT_VALUES
+    copies: SNAPSHOT_VALUES
+    reason: >-
+      the snapshot's two closed enums by role; the model matches
+      `documents[].stage` for the status a captured document carries.
+  - path: views/staging-workbench-model.js
+    identifier: NEUTRAL_STAGES
+    copies: NEUTRAL_DISPLAY.stages
+    reason: openDox's own neutral word for each stage, read where no host facet is set.
+  - path: views/staging-workbench-model.js
+    identifier: NEUTRAL_AREAS
+    copies: NEUTRAL_DISPLAY.areas
+    reason: >-
+      openDox's own corpus areas, every prefix null, read where no host facet is
+      set.
