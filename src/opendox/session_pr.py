@@ -35,6 +35,11 @@ exists and never a personal credential — and the hosted plane is not built in 
 feature (FR-048), so this adapter has NO hosted mode and no plane switch. A
 successor change adds that adapter beside this one; it never adds a mode to this
 one.
+
+**The neutral submit act is declared here too, and kept apart** (plan 038 T011;
+#1144 12.1-12.3): `SubmissionPort`, ONE operation, with `LocalGitSubmissions`
+as its platform-free default, in the block at the end of this module. It is a
+second protocol beside `PullRequestPort`, never an operation added to it.
 """
 
 from __future__ import annotations
@@ -434,10 +439,97 @@ def _number_from_url(url: str) -> int:
     return int(tail) if tail.isdigit() else 0
 
 
+# ==========================================================================
+# THE SUBMISSION PORT — the NEUTRAL submit act (plan 038 T011; #1144 boxes
+# 12.1, 12.1a, 12.2 and 12.3). Every class above this block is unchanged
+# by it: `PullRequestPort` keeps its three operations and the absence of
+# every other one, and `GhPullRequests` stays the governed host's platform
+# implementation (12.1; R2Q2 (a), `6003486656`).
+# ==========================================================================
+#
+# A plain push can perform neither `open_or_update` nor `find_open`, so a
+# neutral class claiming `PullRequestPort` would be lying about two thirds of
+# its interface (12.1). The neutral act therefore has its OWN protocol, with
+# ONE operation, and a report naming where the work went (12.1a). The default
+# implementation, `LocalGitSubmissions`, pushes through
+# `opendox.submission_push`, which hands the push to the runtime's push core.
+
+# The protocol's WHOLE operation set, as data, as `PORT_OPERATIONS` is.
+SUBMISSION_OPERATIONS = ("submit",)
+
+
+class SubmissionError(Exception):
+    """A submission that did not happen. Raised, never returned, so a failure
+    is told apart from a success by what `submit` does (12.1a). Every message
+    is REDACTED: a remote URL's credential never reaches it."""
+
+
+class SubmissionRefused(SubmissionError):
+    """The submission was refused or failed, and nothing is reported as
+    submitted: the default branch, a branch that is not there, a remote with
+    several push URLs, a checkout whose own config names a program git would
+    run, a push the remote rejected, or a transport that failed."""
+
+
+class NoSubmissionTarget(SubmissionError):
+    """There is no remote to submit to, and the message names what is missing:
+    none is attached, or several are and none is named `origin` (12.3;
+    CF-7, `6013547504`). Named so a caller can catch THIS refusal and
+    nothing else."""
+
+
+@dataclass(frozen=True)
+class Submission:
+    """Where the work went (12.1a): the `remote` pushed to, the `ref` that
+    received it, the remote's `url` as git resolves it WITH EVERY CREDENTIAL
+    REDACTED (its host and path kept), the `branch` submitted and the
+    `commit` pushed."""
+
+    remote: str
+    ref: str
+    url: str
+    branch: str
+    commit: str
+
+
+@runtime_checkable
+class SubmissionPort(Protocol):
+    """Submit a branch, and report where it went. One operation (12.1)."""
+
+    def submit(self, branch: str) -> Submission: ...
+
+
+class LocalGitSubmissions:
+    """The NEUTRAL default `SubmissionPort` (12.2): a plain `git push` of a
+    named local branch to the remote named `origin`, else the sole remote,
+    with no platform and no `gh`. Constructed as `GhPullRequests` is, with one
+    positional checkout root. It is deliberately NOT a `PullRequestPort`: it
+    has no `push`, `open_or_update` or `find_open`."""
+
+    def __init__(self, checkout_root: Path | str, *,
+                 executable: str = "git") -> None:
+        self.checkout_root = Path(checkout_root)
+        self.executable = executable
+
+    def submit(self, branch: str) -> Submission:
+        """Push `branch` and return the `Submission`; raise on any failure."""
+        # IMPORTED HERE: `submission_push` imports this module for the names
+        # above, so the two do not import each other at load.
+        from opendox import submission_push
+        return submission_push.submit_branch(self.checkout_root, branch,
+                                             executable=self.executable)
+
+
+# ======================== end of the submission port ======================
+
+
 __all__ = [
     "AMBIENT_TARGET_OVERRIDES", "DEFAULT_BASE", "DEFAULT_REMOTE",
     "PORT_OPERATIONS", "STATE_OPEN",
     "CommandRunner", "FakePullRequests", "GhPullRequests", "PullRequest",
     "PullRequestPort", "PullRequestRefused", "SubprocessCommandRunner",
     "child_env", "parse_repo_pin",
+    # the submission port (plan 038 T011)
+    "SUBMISSION_OPERATIONS", "LocalGitSubmissions", "NoSubmissionTarget",
+    "Submission", "SubmissionError", "SubmissionPort", "SubmissionRefused",
 ]

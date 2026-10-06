@@ -340,6 +340,7 @@ __all__ = [
     "create_repository",
     "initialize_repository",
     "PUSH_TIMEOUT_SECONDS",
+    "PushPlan",
     "refuse_command_executing_remote",
     "refuse_credential_bearing_remote",
     "refuse_unusable_location",
@@ -1324,7 +1325,29 @@ def push_to_remote(store: Any, *, project_id: str,
     # about `git-remote-evil` (Copilot review of openDox-code#26, round 12).
     refuse_command_executing_remote(row.remote_url)
     with _bound_to_mapped_repository(row, executable) as git:
-        return _push_to_remote_with(git, row)
+        plan = _mapped_push_plan(git, row)
+        try:
+            _push_to_remote_with(git, plan)
+        except GitCommandFailed as failed:
+            # THE STORED URL IS REDACTED IN THE REFUSAL. A row written before
+            # `refuse_credential_bearing_remote` existed can still carry a
+            # credential, and this message reaches an API response (Copilot
+            # review of openDox-code#26).
+            # AND GIT'S OWN STDERR HAS THE KNOWN DESTINATION TAKEN OUT OF IT.
+            # `GitCommandFailed` redacts its stderr with `redact_credentials`,
+            # whose userinfo class excludes a newline on purpose (round 14: a
+            # pattern cannot tell a URL's own newline from a diagnostic's), so
+            # a LEGACY row holding `https://user:secret\n@host/repo` could
+            # still ride the failure text git echoes back (Copilot review of
+            # openDox-code#26, round 17, suppressed). This path does not need a
+            # pattern: it KNOWS the destination, so the literal value is
+            # removed before the text is exposed.
+            raise RepositoryActRefused(
+                f"the push to {redact_remote_url(row.remote_url)} failed "
+                f"({_without(str(failed), row.remote_url)}); the project is "
+                f"unchanged and is still served from {row.location}"
+            ) from failed
+    return row.remote_url
 
 
 #: Config keys whose value git EXECUTES, and which a repository this service
@@ -1611,7 +1634,8 @@ _NOT_CHECKED = object()
 
 
 def _bound_local_destination(destination: str | None, location: Any, *,
-                             checked: Any = _NOT_CHECKED):
+                             checked: Any = _NOT_CHECKED,
+                             contained: bool = True):
     """A LOCAL push destination named by an OPEN DIRECTORY, where the OS allows.
 
     THE WINDOW THIS CLOSES (Copilot review of openDox-code#26, round 29): the
@@ -1635,6 +1659,14 @@ def _bound_local_destination(destination: str | None, location: Any, *,
     EXISTS the handle is released and the pathname is used, which is the ladder
     `runner_bound_to` already documents — unlike the creation path, the guard
     here is real on every platform and only its NAMING degrades.
+
+    `contained=False` SKIPS ONE QUESTION, the service-root containment of the
+    opened object, and only for the caller that has no service root: a
+    submission pushes a user's own checkout to the user's own remote (plan 038
+    T011), where `location.parent` is just the directory the checkout sits in,
+    and a sibling bare repository there is the ordinary local remote, not
+    another project. The no-follow open, the identity check and the naming by
+    descriptor stay. The runtime's push never passes it.
     """
     if destination is None:
         return None, None
@@ -1672,6 +1704,8 @@ def _bound_local_destination(destination: str | None, location: Any, *,
         for base in ("/proc/self/fd", "/dev/fd"):
             if os.path.isdir(base):
                 bound = f"{base}/{handle}"
+                if not contained:
+                    return handle, bound
                 # AND THE CONTAINMENT IS RE-ASKED OF THE OPEN OBJECT, which is
                 # the half the first cut left open. `_refuse_a_destination_this
                 # _service_owns` approved a NAME; this function then resolved
@@ -1739,8 +1773,37 @@ def _receive_pack_for(destination: str | None, location: Any) -> str:
             + " receive-pack") if local else "--receive-pack=git-receive-pack"
 
 
-def _push_to_remote_with(git: GitRunner, row: Any) -> str:
-    """`push_to_remote`'s git half, on a runner bound to an open directory."""
+@dataclass(frozen=True)
+class PushPlan:
+    """WHAT the push core sends, decided before it runs (plan 038 T011).
+
+    `_push_to_remote_with` has two callers, and this is everything that
+    differs between them. `push_to_remote` plans the project's own push: the
+    map is the destination of record, HEAD's branch is the branch, the
+    remote is `REMOTE_NAME`, and the destination's identity and the service
+    root's containment travel with it. `opendox.submission_push` plans a
+    named branch of a user's checkout to the remote 12.3 chooses, pushed by
+    its commit, with no service root to contain it (`contained=False`).
+    """
+
+    #: The repository pushed FROM. A relative local destination is the
+    #: repository's, and the containment root is its parent.
+    location: Any
+    #: What git is told when the destination is not a local path.
+    remote_name: str
+    #: The ONE effective push URL, already counted and agreed.
+    destination: str | None
+    #: `<source>:refs/heads/<branch>`.
+    refspec: str
+    #: The `(st_dev, st_ino)` a guard approved, or `_NOT_CHECKED`.
+    checked: Any = _NOT_CHECKED
+    #: Re-ask the service-root containment of the opened destination.
+    contained: bool = True
+
+
+def _mapped_push_plan(git: GitRunner, row: Any) -> PushPlan:
+    """`push_to_remote`'s checks, on a runner bound to an open directory:
+    what the push core then sends (`PushPlan`), or a named refusal."""
 
     # THE MAP IS THE DESTINATION OF RECORD, AND GIT IS ASKED WHETHER IT AGREES.
     # This pushed to whatever `origin` happened to be configured as and never
@@ -1821,88 +1884,87 @@ def _push_to_remote_with(git: GitRunner, row: Any) -> str:
     # review of openDox-code#26, round 5). It is the same reason `remote_name`
     # is a constant: a push destination the map cannot record is not a push
     # this act can make.
+    return PushPlan(location=row.location, remote_name=REMOTE_NAME,
+                    destination=effective,
+                    refspec=f"refs/heads/{branch}:refs/heads/{branch}",
+                    checked=checked.get(effective))
+
+
+def _push_to_remote_with(git: GitRunner, plan: PushPlan) -> None:
+    """THE PUSH CORE, on a runner bound to an open directory: send `plan`.
+
+    Its two callers are `push_to_remote` and `opendox.submission_push`, so
+    every guard below holds for both, and a later one is added once (plan 038
+    T011, OQ-12-12). A push git refuses raises `GitCommandFailed`, which each
+    caller names in its own words; the bind's refusal is
+    `RepositoryActRefused`.
+    """
+    # THE ONE OPERATION THAT TOUCHES A NETWORK, and the only one with a
+    # wall-clock bound: a stalled remote used to hold the request, the
+    # repository and the caller's DATABASE TRANSACTION for as long as it
+    # liked. `out_bounded` also refuses every interactive prompt, so a
+    # remote that wants a password fails instead of waiting for one that is
+    # never coming.
+    # `-c protocol.ext.allow=never` BEFORE THE SUBCOMMAND, and it is not
+    # belt and braces for `refuse_command_executing_remote`: that refusal
+    # covers what an act STORES, and a row written before it — or by a
+    # future caller of the store — still reaches this push. Git's `ext::`
+    # transport runs its argument as a command in THIS process, gated by a
+    # config value the host sets; measured on git 2.43.0,
+    # `protocol.ext.allow=user` in the repository's own config is enough to
+    # execute it (Copilot review of openDox-code#26, round 10). A
+    # command-line `-c` outranks every config file, so the policy travels
+    # with the push instead of being assumed of the machine.
+    # AND THE RECEIVE-PACK IS NAMED ON THE COMMAND LINE. `git push` runs
+    # the destination's `receive-pack`, and for a LOCAL or `file://`
+    # destination it runs it HERE — as a program chosen by
+    # `remote.<name>.receivepack` in the pushing repository's own config.
+    # The repositories this service manages are writable by it and by
+    # whoever can reach their directory, so that key was a command this
+    # runtime would execute on every push, which is the same class of
+    # defect as the `ext::` transport and the `pre-push` hook and was
+    # covered by neither (Copilot review of openDox-code#26, round 16).
+    # `--receive-pack` on the command line outranks the config value.
+    # AND THE RECEIVER RUNS WITH THE DESTINATION'S HOOKS OFF. For a LOCAL
+    # destination — which this act accepts by design, a governed factory
+    # being a repository — `git push` forks `git-receive-pack` IN THIS
+    # PROCESS TREE, and that process reads the DESTINATION's config and
+    # runs its `pre-receive`, `update` and `post-receive` hooks. The
+    # client's own `core.hooksPath` does not reach it: MEASURED on git
+    # 2.43.0, a planted `pre-receive` RAN under `git -c
+    # core.hooksPath=/dev/null push`, and did NOT run when the option was
+    # carried on `--receive-pack` instead — where it becomes the receiving
+    # command's own `-c` — with the push still landing (Copilot review of
+    # openDox-code#26, round 21). The value is still one THIS act chooses
+    # rather than one the repository names, which is the property round 16
+    # pinned.
+    # AND A LOCAL DESTINATION IS NAMED BY THE OBJECT THE GUARD CHECKED.
+    # `REMOTE_NAME` made git re-read `remote.origin.url` and re-walk that
+    # pathname, so the destination the containment check resolved and the
+    # destination git opened were two lookups with a window between them —
+    # see `_bound_local_destination`. The runtime's plan has already proved
+    # the remote's two URLs and the map row equal (`_mapped_push_plan`), and
+    # a submission's plan carries the one push URL git resolves, so naming
+    # the handle loses nothing and closes that window. A network destination
+    # still pushes to `plan.remote_name`.
+    # AND THE IDENTITY THE RUNTIME'S GUARD CHECKED TRAVELS WITH IT
+    # (`plan.checked`), so the object that was judged is the object that is
+    # written to. Without it the window is real for an EXTERNAL
+    # destination, which containment cannot close: both A and B are outside
+    # the root.
+    handle, bound = _bound_local_destination(
+        plan.destination, plan.location, checked=plan.checked,
+        contained=plan.contained)
     try:
-        # THE ONE OPERATION THAT TOUCHES A NETWORK, and the only one with a
-        # wall-clock bound: a stalled remote used to hold the request, the
-        # repository and the caller's DATABASE TRANSACTION for as long as it
-        # liked. `out_bounded` also refuses every interactive prompt, so a
-        # remote that wants a password fails instead of waiting for one that is
-        # never coming.
-        # `-c protocol.ext.allow=never` BEFORE THE SUBCOMMAND, and it is not
-        # belt and braces for the refusal above: that refusal covers what this
-        # act STORES, and a row written before it — or by a future caller of
-        # the store — still reaches this push. Git's `ext::` transport runs its
-        # argument as a command in THIS process, gated by a config value the
-        # host sets; measured on git 2.43.0, `protocol.ext.allow=user` in the
-        # repository's own config is enough to execute it (Copilot review of
-        # openDox-code#26, round 10). A command-line `-c` outranks every
-        # config file, so the policy travels with the push instead of being
-        # assumed of the machine.
-        # AND THE RECEIVE-PACK IS NAMED ON THE COMMAND LINE. `git push` runs
-        # the destination's `receive-pack`, and for a LOCAL or `file://`
-        # destination it runs it HERE — as a program chosen by
-        # `remote.<name>.receivepack` in the pushing repository's own config.
-        # The repositories this service manages are writable by it and by
-        # whoever can reach their directory, so that key was a command this
-        # runtime would execute on every push, which is the same class of
-        # defect as the `ext::` transport and the `pre-push` hook and was
-        # covered by neither (Copilot review of openDox-code#26, round 16).
-        # `--receive-pack` on the command line outranks the config value.
-        # AND THE RECEIVER RUNS WITH THE DESTINATION'S HOOKS OFF. For a LOCAL
-        # destination — which this act accepts by design, a governed factory
-        # being a repository — `git push` forks `git-receive-pack` IN THIS
-        # PROCESS TREE, and that process reads the DESTINATION's config and
-        # runs its `pre-receive`, `update` and `post-receive` hooks. The
-        # client's own `core.hooksPath` does not reach it: MEASURED on git
-        # 2.43.0, a planted `pre-receive` RAN under `git -c
-        # core.hooksPath=/dev/null push`, and did NOT run when the option was
-        # carried on `--receive-pack` instead — where it becomes the receiving
-        # command's own `-c` — with the push still landing (Copilot review of
-        # openDox-code#26, round 21). The value is still one THIS act chooses
-        # rather than one the repository names, which is the property round 16
-        # pinned.
-        # AND A LOCAL DESTINATION IS NAMED BY THE OBJECT THE GUARD CHECKED.
-        # `REMOTE_NAME` made git re-read `remote.origin.url` and re-walk that
-        # pathname, so the destination the containment check resolved and the
-        # destination git opened were two lookups with a window between them —
-        # see `_bound_local_destination`. The remote's two URLs and the map row
-        # have already been proved equal above, so naming the handle loses
-        # nothing and closes that window. A network destination still pushes to
-        # `REMOTE_NAME`, which is the value all three agree on.
-        # AND THE IDENTITY THE GUARD ABOVE CHECKED TRAVELS WITH IT, so the
-        # object that was judged is the object that is written to. Without it
-        # the window is real for an EXTERNAL destination, which containment
-        # cannot close: both A and B are outside the root.
-        handle, bound = _bound_local_destination(
-            effective, row.location, checked=checked.get(effective))
-        try:
-            runner = (dataclasses.replace(git, extra_fd=handle)
-                      if handle is not None else git)
-            runner.out_bounded("-c", "protocol.ext.allow=never",
-                               "push",
-                               _receive_pack_for(effective, row.location),
-                               bound or REMOTE_NAME,
-                               f"refs/heads/{branch}:refs/heads/{branch}",
-                               timeout=PUSH_TIMEOUT_SECONDS)
-        finally:
-            if handle is not None:
-                os.close(handle)
-    except GitCommandFailed as failed:
-        # THE STORED URL IS REDACTED IN THE REFUSAL. A row written before
-        # `refuse_credential_bearing_remote` existed can still carry a
-        # credential, and this message reaches an API response (Copilot review
-        # of openDox-code#26).
-        # AND GIT'S OWN STDERR HAS THE KNOWN DESTINATION TAKEN OUT OF IT.
-        # `GitCommandFailed` redacts its stderr with `redact_credentials`,
-        # whose userinfo class excludes a newline on purpose (round 14: a
-        # pattern cannot tell a URL's own newline from a diagnostic's), so a
-        # LEGACY row holding `https://user:secret\n@host/repo` could still ride
-        # the failure text git echoes back (Copilot review of openDox-code#26,
-        # round 17, suppressed). This path does not need a pattern: it KNOWS
-        # the destination, so the literal value is removed before the text is
-        # exposed.
-        raise RepositoryActRefused(
-            f"the push to {redact_remote_url(row.remote_url)} failed "
-            f"({_without(str(failed), row.remote_url)}); the project is "
-            f"unchanged and is still served from {row.location}") from failed
-    return row.remote_url
+        runner = (dataclasses.replace(git, extra_fd=handle)
+                  if handle is not None else git)
+        runner.out_bounded("-c", "protocol.ext.allow=never",
+                           "push",
+                           _receive_pack_for(plan.destination,
+                                             plan.location),
+                           bound or plan.remote_name,
+                           plan.refspec,
+                           timeout=PUSH_TIMEOUT_SECONDS)
+    finally:
+        if handle is not None:
+            os.close(handle)
