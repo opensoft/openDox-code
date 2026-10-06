@@ -128,6 +128,13 @@ comment `6013547504`, which reverses S7's one sibling import) makes
        through `setDisplay`, which the shell calls at mount, instead of through an
        import the model no longer has.
 
+PLAN 038 T015 (#1144 12.4a) adds openDox's own submit control,
+`views/branch-actions.js`, class A, and pins where it lives:
+`test_the_submit_route_is_addressed_by_the_branch_actions_view_alone` holds the
+route to that one module (never a `doxbench-*.js` file, OQ-12-14), and
+`test_the_submit_control_keys_on_submit_never_on_session` holds the control to
+the `actions.submit` key (OQ-12-14, refined by ADV-14).
+
 A CREATED file (this module and its fixture): no carve-manifest row (RULED
 OQ-C) -- the front end's package boundary did not exist before this note, so
 there is nothing for either file to have been carved FROM.
@@ -1402,3 +1409,45 @@ def test_every_in_scope_file_reads_the_display_facet() -> None:
         f"{missing} carry no governance literal and read no display facet -- a "
         f"file in assertion 4's scope renders a station's words or does not "
         f"belong in it (docs/front-end-package-boundary.md § 4.3 step 4).")
+
+
+# ---------------------------------------------------------------------------
+# PLAN 038 T015 -- openDox's own submit control, and where it may live
+# (#1144 12.4a; OQ-12-14, refined by ADV-14).
+# ---------------------------------------------------------------------------
+
+#: The one module that addresses openDox's own submit route.
+BRANCH_ACTIONS_PATH = "views/branch-actions.js"
+SUBMIT_ROUTE = "/actions/session/submit"
+
+
+def test_the_submit_route_is_addressed_by_the_branch_actions_view_alone() -> None:
+    """The submit control lives in `views/branch-actions.js` and nowhere else:
+    never in the `doxbench-*.js` files FR-037's sentinels guard (OQ-12-14),
+    and never in the shell, which mounts it into `#branchactions` and names no
+    route. A second site would be a second control, which nothing holds to
+    the `actions.submit` key."""
+    sites = sorted(row["path"] for row in _ROWS
+                   if SUBMIT_ROUTE in (WEB_ROOT / row["path"]).read_text(
+                       encoding="utf-8"))
+    assert sites == [BRANCH_ACTIONS_PATH], sites
+    assert _ROWS_BY_PATH[BRANCH_ACTIONS_PATH]["class"] == "A"
+    shell = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+    assert 'from "./views/branch-actions.js"' in shell
+    assert 'getElementById("branchactions")' in shell
+    assert 'id="branchactions"' in (WEB_ROOT / "index.html").read_text(
+        encoding="utf-8")
+
+
+def test_the_submit_control_keys_on_submit_never_on_session() -> None:
+    """`actions.submit` is present only where openDox's own profile
+    contributed the route, so a control keyed on it is never offered where no
+    submit route answers. `session` is true on any local human's plane, a
+    host's included, so a control keyed on it would be. Read from the code
+    alone: the route's own literal is emptied, so `session` in it is not a
+    read of the key."""
+    code = _code_only((WEB_ROOT / BRANCH_ACTIONS_PATH).read_text(
+        encoding="utf-8"))
+    assert "caps?.actions?.submit === true" in code
+    assert not re.search(r"\bsession\b", code), (
+        "views/branch-actions.js reads `session`")

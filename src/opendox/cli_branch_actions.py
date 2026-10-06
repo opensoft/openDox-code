@@ -1,0 +1,191 @@
+"""openDox's OWN submit verb: `opendox submit` (plan 038 T015; #1144 12.4a;
+openxFactory `specs/038-.../contracts/cli-http-submit-land.md`).
+
+    opendox submit --repo-root PATH --branch BRANCH [--local] [--json]
+
+12.4a's ratified shape (ADV-01). Before this module a standalone openDox could
+not submit at all, `gh` or no `gh`: the only act that submitted was openXdox's
+`gate open-pr`. This is openDox's own, in its own surface and not under
+`gate`, and `opendox.serve_branch_actions` is its route.
+
+A CONTRIBUTION OF openDox'S DEFAULT PROFILE (decision N-2, refined by ADV-14;
+R2Q3 (a)). `opendox.default_profile` declares `BranchActionSubcommands` in
+`SUBCOMMAND_EXTENSIONS`, so `cli.build_parser()` registers it through the § 2.4
+seam with the runtime verbs. A host profile that replaces the default carries
+no `submit`, and its command tree is what it was.
+
+THE ACT, SHARED BY BOTH DOORS (`submit_branch`): refuse the default branch,
+`main`, by name (R2Q5 (a)); push the branch through the bound `SubmissionPort`;
+and answer the `Submission` report (12.1a), its five fields read by name. The
+verb takes its port from `cli._submission_port` and the route from the
+server's `submission_factory` (12.4's two bindings, T014). Each is
+`LocalGitSubmissions` where nothing is injected, a plain `git push` that names
+no platform and never runs `gh`. Where a governed host contributes its own
+port through them, the act goes through that port and reports where the work
+went (R2Q4 (a)). So the act is the same in every governance mode (CF-1), and it
+reads no governance itself.
+
+THE INSTALL MODE IS NOT READ (decision N-17; ADV-04). The verb pushes the
+invoking user's own checkout with that user's own git, which a hosted plane
+never holds, so it does not depend on the mode, and F12.2 runs it with neither
+`--local` nor `OPENDOX_INSTALL_MODE`. `--local` is accepted, as
+`generate-and-open` accepts it (R2Q9 (a) item 7), and is refused only where
+the selector refuses it: beside `OPENDOX_INSTALL_MODE=hosted`, naming both, or
+beside a value that is neither `local` nor `hosted`, naming it
+(`runtime.config.install_mode`, the one reading of the selector).
+
+NO ACTOR GATE (OQ-12-9). The verb runs as the invoking user, in that user's
+checkout. F12.2 runs it non-interactively, with no actor.
+
+REFUSALS: a named sentence on stderr and exit 1, with nothing pushed and no
+traceback (requirement 11's fourth scenario): `main`; no remote, or several
+and none named `origin` (`NoSubmissionTarget`); a remote with several push
+URLs, a rejected push or a failed transport (`SubmissionRefused`). Every
+message is the port's own, which 12.1a redacts.
+
+IMPORT WEIGHT. The standard library and `opendox.session_pr` (itself
+standard-library only) at import, because `opendox.default_profile` imports
+this module. `opendox.cli`, the runtime's configuration and the git adapter
+are imported where they are used.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+from opendox.session_pr import SubmissionError, SubmissionRefused
+
+__all__ = [
+    "SUBMISSION_FIELDS", "BranchActionSubcommands", "cmd_submit",
+    "submission_object", "submit_branch",
+]
+
+#: The `Submission` report's fields, in the order the verb prints them
+#: (data-model.md § Submission; 12.1a).
+SUBMISSION_FIELDS = ("remote", "ref", "url", "branch", "commit")
+
+
+def _core():
+    """The core CLI module of this module's own package, resolved when the
+    verb RUNS, as `cli_project._core()` resolves it: the port binding is
+    `cli._submission_port`, a named seam a host or a test replaces, so it is
+    read at call time and never bound here."""
+    from . import cli
+
+    return cli
+
+
+def submission_object(report) -> dict[str, str]:
+    """The `Submission` report's five fields, read by name.
+
+    A port answers ONLY on success (12.1a), so an answer that does not name
+    where the work went is refused rather than printed: a report missing a
+    field, or carrying one that is not a non-empty string. A host's port is
+    the case this guards; `LocalGitSubmissions` always answers all five.
+    """
+    fields: dict[str, str] = {}
+    for name in SUBMISSION_FIELDS:
+        value = getattr(report, name, None)
+        if not isinstance(value, str) or not value:
+            raise SubmissionRefused(
+                "the submission port answered without naming where the work "
+                f"went (its report carries no `{name}`), so nothing is "
+                "reported as submitted")
+        fields[name] = value
+    return fields
+
+
+def submit_branch(port, branch: str) -> dict[str, str]:
+    """THE ACT: push `branch` through `port` and answer the report.
+
+    Refuses the default branch BEFORE the port is asked (R2Q5 (a)), so no
+    port, a host's included, is ever handed `main`. Raises `SubmissionError`
+    (its `NoSubmissionTarget` or `SubmissionRefused`) on every failure, and
+    returns only the report of a submission that happened.
+    """
+    from opendox.runtime.local_git_adapter import DEFAULT_BRANCH
+
+    if branch == DEFAULT_BRANCH:
+        raise SubmissionRefused(
+            f"`{DEFAULT_BRANCH}` is the default branch, and a submission takes "
+            "any local branch except it (R2Q5 (a)); nothing is pushed. Submit "
+            "the branch the work is on.")
+    return submission_object(port.submit(branch))
+
+
+def _install_mode_refusal(args: argparse.Namespace) -> str | None:
+    """Why `--local` is refused here, or None (decision N-17).
+
+    Without `--local` nothing is read. With it, the selector is asked as
+    `generate-and-open` asks it, and its refusal is this verb's.
+    """
+    if not args.local:
+        return None
+    from opendox.runtime import config as runtime_config
+
+    try:
+        runtime_config.install_mode(os.environ, local_flag=True)
+    except runtime_config.ConfigurationError as exc:
+        return str(exc)
+    return None
+
+
+def _report_lines(report: dict[str, str]) -> list[str]:
+    """The printed report: where the work went (12.1a)."""
+    return [f"submitted `{report['branch']}` to `{report['remote']}`",
+            f"  ref:    {report['ref']}",
+            f"  url:    {report['url']}",
+            f"  commit: {report['commit']}"]
+
+
+def cmd_submit(args: argparse.Namespace) -> int:
+    """`opendox submit`: push one branch and print where it went."""
+    refusal = _install_mode_refusal(args)
+    if refusal is not None:
+        print(f"submit refused: {refusal}", file=sys.stderr)
+        return 1
+    try:
+        report = submit_branch(_core()._submission_port(Path(args.repo_root)),
+                               args.branch)
+    except SubmissionError as exc:
+        print(f"submit refused: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(report))
+    else:
+        print("\n".join(_report_lines(report)))
+    return 0
+
+
+class BranchActionSubcommands:
+    """The default profile's contributed verb: `submit`.
+
+    Conforms to `subcommand_extension.SubcommandExtension` STRUCTURALLY, as
+    `RuntimeSubcommand` does, importing nothing from it.
+    """
+
+    def register(self, subparsers) -> None:
+        submit = subparsers.add_parser(
+            "submit",
+            help="push a local branch to its remote and report where it went",
+            description=(
+                "Push BRANCH, any local branch but main, to the remote named "
+                "origin (else the sole remote), with plain git, and print the "
+                "remote, the ref, the URL (any credential redacted) and the "
+                "commit."))
+        submit.add_argument("--repo-root", required=True,
+                            help="the checkout the branch is in")
+        submit.add_argument("--branch", required=True,
+                            help="the local branch to push (any but main)")
+        submit.add_argument(
+            "--local", action="store_true",
+            help="the local single-user install, as OPENDOX_INSTALL_MODE=local "
+                 "selects it. submit does not depend on the install mode; the "
+                 "flag is refused beside OPENDOX_INSTALL_MODE=hosted")
+        submit.add_argument("--json", action="store_true",
+                            help="print the report as one JSON object")
+        submit.set_defaults(func=cmd_submit)

@@ -38,6 +38,7 @@ import { renderLineage, renderStats } from "./views/lineage.js";
 import { mountExplorer } from "./views/explorer.js";
 import { renderViewer } from "./views/viewer.js";
 import { createEditAction } from "./views/edit.js";
+import { mountBranchActions } from "./views/branch-actions.js";
 import { renderCanvas } from "./views/canvas.js";
 import { renderLens } from "./views/lens.js";
 // THE GATE BAR IS NOT IMPORTED HERE ANY MORE (§ 3.4 slice S3, the view
@@ -1685,6 +1686,13 @@ async function render() {
         : null,
       onSelect: (key) => { storeKey(key); render(); },
       onRefreshed: () => render(),
+    });
+    // openDox's OWN SUBMIT CONTROL (plan 038 T015; #1144 12.4a), keyed on
+    // `actions.submit` and never on `session` (OQ-12-14): the key is present
+    // only where openDox's default profile contributed the route. It proposes
+    // the branch on screen, and a composed render offers no control (D10).
+    mountBranchActions(document.getElementById("branchactions"), {
+      caps, composed, branch: safeKey(active)?.ref || null,
     });
     initAbout(signal);
     // global header search (#13): fan out to the active view's search hook.

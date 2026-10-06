@@ -38,21 +38,28 @@ FIRST landing (R1Q5 (a)), so no build ever meets an empty default:
   the 31-entry `--help` tree openxFactory's golden pins, because it never meets
   this one.
 
-Release 2's `submit`, `land` and `health` join the tuple when they exist.
+Release 2's `submit`, `land` and `health` join the tuple as they land. `submit`
+has (plan 038 T015; #1144 12.4a; decision N-2, refined by ADV-14):
+`cli_branch_actions.BranchActionSubcommands` follows `RuntimeSubcommand`, so a
+parser built on this default carries `opendox submit` too, and a host's
+command tree, which never meets this one, does not (R2Q3 (a)).
 `ProjectSubcommand` is NOT here. R1Q5 (a) names the runtime verbs alone, so
 `project create-repository` stays on the `opendox-runtime` alias until a ruling
 says otherwise (plan 034, T006's finding U4). The holder's reading, recorded on
 `openxFactory#656` comment `5851560764`, keeps it out under R1Q5 (a).
 
-THE FIVE FACETS, AND WHY ONLY TWO ARE DECLARED.
+THE FIVE FACETS, AND WHY ONLY THREE ARE DECLARED.
 
 * `SUBCOMMAND_EXTENSIONS` is declared, above. `cli.build_parser()` reads it
   strictly: a registered profile without it is `ProfileFacetMissing`.
-* `ROUTE_EXTENSIONS` is declared, and EMPTY, which is not the empty default the
-  ruling refuses. openDox's own routes are the core server's fixed dispatch, so
-  nothing openDox owns reaches the server as a contribution yet. It is declared
-  because `serve.build_server()` reads it as strictly as the parser reads the
-  verbs.
+* `ROUTE_EXTENSIONS` is declared, and `serve.build_server()` reads it as
+  strictly as the parser reads the verbs. openDox's older routes are the core
+  server's fixed dispatch. The submit route, `POST /actions/session/submit`, is
+  the first that is not (plan 038 T015; 12.4a): it is this profile's
+  contribution, `serve_branch_actions.BranchActionRouteExtension`, so a host
+  profile that replaces the default carries no submit route, and its
+  `/capabilities` payload carries no `actions.submit` key (decision N-2,
+  refined by ADV-14; OQ-12-14; R2Q3 (a)).
 * `DISPLAY` is NOT declared, and that is how the default's vocabulary is
   `NEUTRAL_DISPLAY` unchanged (requirement 3's third scenario; R1Q4 (a)). For a
   registered profile without the facet, `display_profile.host_display()`
@@ -71,11 +78,12 @@ THE FIVE FACETS, AND WHY ONLY TWO ARE DECLARED.
   panel, because openDox's own views are its core arm, and
   `view_extension.host_view_facet()` answers an empty column, named `absent`,
   for a profile without the facet.
-* `HANDLER_CONTRIBUTIONS` is NOT declared (plan 034's T010; R1Q1 (a)). It
-  holds the mixin classes whose methods a profile's route bindings name, and
-  `serve.build_server()` reads it by presence, so an absent facet contributes
-  nothing (`route_extension.declared_handler_contributions()` answers `()`).
-  The default contributes no route, so it has no method to supply.
+* `HANDLER_CONTRIBUTIONS` is declared (plan 038 T015). It holds the mixin
+  classes whose methods a profile's route bindings name (plan 034's T010;
+  R1Q1 (a)), and `serve.build_server()` reads it by presence and composes each
+  mixin after the core handler (`route_extension.compose_handler`). The
+  default's one mixin is `serve_branch_actions.BranchActionRoutes`, which holds
+  the submit binding's method and nothing else.
 
 HOW IT IS REGISTERED: by the entry points, and never at import (R1Q3 (a)).
 `cli.build_parser()`, `serve.build_server()` and both `main()`s call
@@ -98,9 +106,11 @@ module"). This one is a MODULE, so `domain_profile.name_of()` names it by its
 dotted path, `opendox.default_profile`, in every refusal and in the
 `host_profile` field that `/capabilities` publishes.
 
-IMPORT WEIGHT. The standard library and `opendox.runtime.cli`, which
-`opendox/runtime/__init__.py` holds to the standard library as a contract. So
-this module imports with no extra installed, and it imports nothing from
+IMPORT WEIGHT. The standard library, `opendox.runtime.cli`, which
+`opendox/runtime/__init__.py` holds to the standard library as a contract, and
+the two branch-action modules, which import only the standard library and
+`opendox.session_pr` when they load. So this module imports with no extra
+installed, and it imports nothing from
 `openxdox`, `ideation_dashboard`, `doc_health` or `corpus_adapter_openxfactory`.
 
 A CREATED FILE: no row in openxFactory's `docs/opendox-carve-manifest.yaml`,
@@ -110,15 +120,24 @@ destination assembles (RULED OQ-C).
 
 from __future__ import annotations
 
+from opendox.cli_branch_actions import BranchActionSubcommands
 from opendox.runtime.cli import RuntimeSubcommand
+from opendox.serve_branch_actions import (
+    BranchActionRouteExtension,
+    BranchActionRoutes,
+)
 
-__all__ = ["ROUTE_EXTENSIONS", "SUBCOMMAND_EXTENSIONS"]
+__all__ = ["HANDLER_CONTRIBUTIONS", "ROUTE_EXTENSIONS", "SUBCOMMAND_EXTENSIONS"]
 
 #: openDox's OWN verbs, contributed through the § 2.4 subcommand seam (R1Q4 (a),
-#: R1Q5 (a)). Never empty: the module docstring gives the ruling that forbids it.
-SUBCOMMAND_EXTENSIONS: tuple = (RuntimeSubcommand(),)
+#: R1Q5 (a)): the runtime's, then `submit` (plan 038 T015; 12.4a). Never
+#: empty: the module docstring gives the ruling that forbids it.
+SUBCOMMAND_EXTENSIONS: tuple = (RuntimeSubcommand(), BranchActionSubcommands())
 
-#: openDox's OWN contributed routes. There are none yet, because every route
-#: openDox owns is in the core server's fixed dispatch. The facet is declared so
-#: that `serve.build_server()`'s strict read of it resolves.
-ROUTE_EXTENSIONS: tuple = ()
+#: openDox's OWN contributed routes: the submit route (plan 038 T015; 12.4a).
+#: Every older route openDox owns is in the core server's fixed dispatch.
+ROUTE_EXTENSIONS: tuple = (BranchActionRouteExtension(),)
+
+#: The mixin holding the method the submit binding names (plan 038 T015),
+#: composed after the core handler by `serve.build_server()`.
+HANDLER_CONTRIBUTIONS: tuple = (BranchActionRoutes,)
