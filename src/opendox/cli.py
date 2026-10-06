@@ -1306,6 +1306,23 @@ def _pull_request_port(repo_root: Path):
     return GhPullRequests(repo_root)
 
 
+def _submission_port(repo_root: Path):
+    """The product's OWN submission port (plan 038 T014; #1144 12.4, R2Q2 (a)).
+
+    It NAMES NO PLATFORM: with nothing injected it is `LocalGitSubmissions` for
+    the checkout, a plain `git push` of a named branch to the remote named
+    `origin` (else the sole remote), with no `gh`. It is a NEW seam beside
+    `_pull_request_port`, which keeps `GhPullRequests` and serves `gate open-pr`
+    unchanged. The push runs as the invoking user, in that user's checkout,
+    with that user's own git credentials; nothing is stored.
+
+    A named seam, as `_pull_request_port` is, so a governed host may contribute
+    its own `SubmissionPort` and a test may inject one."""
+    from opendox.session_pr import LocalGitSubmissions
+
+    return LocalGitSubmissions(repo_root)
+
+
 def _stats(snapshot: dict) -> dict[str, int]:
     """How many of each collection the snapshot carries. One it lacks, or
     carries as something other than a list or a mapping, counts 0: a
