@@ -425,6 +425,23 @@ def test_no_hook_runs_on_either_side(checkout: Path, origin: Path,
     assert not marker.exists()
 
 
+@pytest.mark.parametrize(("key", "value"), [
+    ("push.followTags", "true"), ("push.recurseSubmodules", "only")])
+def test_the_checkout_s_push_settings_neither_widen_nor_skip_the_push(
+        checkout: Path, origin: Path, key: str, value: str) -> None:
+    """MEASURED on git 2.43.0, exit 0 both times: `push.followTags` also sent
+    an annotated tag the report never names, and `push.recurseSubmodules=only`
+    sent nothing at all, so `submit` reported a branch that never left
+    (Copilot review of openDox-code#92 at 3ccf77b7). The origin holds the
+    branch, at the reported commit, and nothing else."""
+    _git(checkout, "tag", "-a", "v1", "-m", "v1", "sess-1")
+    _git(checkout, "config", "--local", key, value)
+    report = LocalGitSubmissions(checkout).submit("sess-1")
+    assert _tip(origin, "sess-1") == report.commit == _tip(checkout, "sess-1")
+    assert _git(origin, "for-each-ref", "--format=%(refname)") == (
+        "refs/heads/sess-1")
+
+
 def test_the_runtime_push_keeps_its_containment_and_the_submission_skips_it(
         checkout: Path, origin: Path) -> None:
     """The ONE runtime check a submission does not make, asked of the shared

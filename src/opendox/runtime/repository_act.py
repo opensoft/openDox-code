@@ -1952,6 +1952,12 @@ def _push_to_remote_with(git: GitRunner, plan: PushPlan) -> None:
     # written to. Without it the window is real for an EXTERNAL
     # destination, which containment cannot close: both A and B are outside
     # the root.
+    # AND THE REFSPEC IS ALL THAT IS SENT. MEASURED on git 2.43.0, exit 0
+    # both times: `push.followTags` in the repository's config also sent an
+    # annotated tag the refspec never named, and `push.recurseSubmodules=
+    # only` sent nothing at all, so a caller reported a branch that never
+    # left (Copilot review of openDox-code#92 at 3ccf77b7). The two options
+    # outrank both keys, and `submodule.recurse` with them.
     handle, bound = _bound_local_destination(
         plan.destination, plan.location, checked=plan.checked,
         contained=plan.contained)
@@ -1959,7 +1965,8 @@ def _push_to_remote_with(git: GitRunner, plan: PushPlan) -> None:
         runner = (dataclasses.replace(git, extra_fd=handle)
                   if handle is not None else git)
         runner.out_bounded("-c", "protocol.ext.allow=never",
-                           "push",
+                           "push", "--no-follow-tags",
+                           "--no-recurse-submodules",
                            _receive_pack_for(plan.destination,
                                              plan.location),
                            bound or plan.remote_name,
