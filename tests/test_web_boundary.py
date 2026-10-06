@@ -1004,16 +1004,49 @@ def _inlined_table_spans(path: str, text: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _template_substitutions(text: str, start: int, end: int) -> list[tuple[int, int]]:
+    """The insides of the `${...}` substitutions of the template literal
+    `text[start:end]`, as offsets. Braces are counted the way `_js_spans`
+    counts them, so the two agree on where a substitution ends."""
+    out = []
+    j = start + 1
+    while j < end - 1:
+        if text[j] == "\\":
+            j += 2
+            continue
+        if text[j] == "$" and text[j + 1] == "{":
+            depth, k = 1, j + 2
+            while k < end and depth:
+                if text[k] == "{":
+                    depth += 1
+                elif text[k] == "}":
+                    depth -= 1
+                k += 1
+            out.append((j + 2, k - 1))
+            j = k
+            continue
+        j += 1
+    return out
+
+
 def _code_only(text: str) -> str:
     """`text` with every comment blanked and every string and regex literal
     emptied to its delimiters. Newlines and offsets are kept, so what is left
-    is the code: a keyword found in it is a keyword, not a word in a sentence."""
+    is the code: a keyword found in it is a keyword, not a word in a sentence.
+
+    A template literal's `${...}` substitutions ARE code, and `_js_spans`
+    reports the whole template as one string span, so each substitution is put
+    back and read the same way, recursively (Copilot on openDox-code#91: a
+    `${import("./x.js")}` was blanked with the template around it)."""
     out = list(text)
     for kind, start, end in _js_spans(text):
         low, high = (start, end) if kind == "comment" else (start + 1, end - 1)
         for i in range(low, high):
             if out[i] != "\n":
                 out[i] = " "
+        if kind == "string" and text[start] == "`":
+            for first, last in _template_substitutions(text, start, end):
+                out[first:last] = _code_only(text[first:last])
     return "".join(out)
 
 
@@ -1217,11 +1250,14 @@ def test_the_staging_model_is_import_free() -> None:
                    for m in re.finditer(r"\bimport\b", code)]
         froms = [_line_of(code, m.start())
                  for m in re.finditer(r"\bfrom\s*[\"'`]", code)]
-        assert not imports and not froms, (
-            f"{path} loads another module (an `import` at lines {imports}, a "
-            f"`from` clause at lines {froms}). W-1 (A) makes it import-free, so a "
-            f"table it needs from `views/display.js` is inlined and declared in "
-            f"the census's `inlined_display_tables` instead.")
+        remedy = (
+            "W-1 (A) makes it import-free, so a table it needs from "
+            "`views/display.js` is inlined and declared in the census's "
+            "`inlined_display_tables` instead.")
+        assert not imports, (
+            f"{path} loads another module: an `import` at lines {imports}. {remedy}")
+        assert not froms, (
+            f"{path} loads another module: a `from` clause at lines {froms}. {remedy}")
 
 
 def test_every_inlined_display_table_is_real() -> None:

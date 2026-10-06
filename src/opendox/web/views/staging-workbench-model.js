@@ -180,8 +180,7 @@ function neutralDisplay() {
     one: (role) => stage(role).one,
     many: (role) => stage(role).many,
     short: (role) => stage(role).short,
-    area: (role) => Object.assign({ role: role },
-                                  neutralEntry("area", NEUTRAL_AREAS, role)),
+    area: (role) => ({ role: role, ...neutralEntry("area", NEUTRAL_AREAS, role) }),
     documentStage: (role) => neutralEntry(
       "document_stage value", SNAPSHOT_VALUES.document_stage, role),
   });
