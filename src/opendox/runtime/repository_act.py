@@ -1337,11 +1337,11 @@ def push_to_remote(store: Any, *, project_id: str,
             # `GitCommandFailed` redacts its stderr with `redact_credentials`,
             # whose userinfo class excludes a newline on purpose (round 14: a
             # pattern cannot tell a URL's own newline from a diagnostic's), so
-            # a LEGACY row holding `https://user:secret\n@host/repo` could
-            # still ride the failure text git echoes back (Copilot review of
-            # openDox-code#26, round 17, suppressed). This path does not need a
-            # pattern: it KNOWS the destination, so the literal value is
-            # removed before the text is exposed.
+            # a LEGACY row whose userinfo is split from its `@` by a newline
+            # could still ride the failure text git echoes back (Copilot
+            # review of openDox-code#26, round 17, suppressed). This path does
+            # not need a pattern: it KNOWS the destination, so the literal
+            # value is removed before the text is exposed.
             raise RepositoryActRefused(
                 f"the push to {redact_remote_url(row.remote_url)} failed "
                 f"({_without(str(failed), row.remote_url)}); the project is "

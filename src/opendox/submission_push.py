@@ -49,8 +49,10 @@ from __future__ import annotations
 import os
 import re
 import urllib.parse
+from contextlib import ExitStack
 from pathlib import Path
 
+from opendox.corpus_adapter import CorpusRefused
 from opendox.runtime import repository_act
 from opendox.runtime.config import MAX_REMOTE_URL_CHARS
 from opendox.runtime.local_git_adapter import (
@@ -59,6 +61,7 @@ from opendox.runtime.local_git_adapter import (
     GitRunner,
     carries_a_control_character,
     decoded_path,
+    metadata_held_open,
     open_no_follow_chain,
     redact_credentials,
     runner_bound_to,
@@ -111,11 +114,34 @@ def submit_branch(checkout_root: Path | str, branch: str, *,
     try:
         try:
             git = runner_bound_to(handle, root, executable)
-        except OSError as exc:
+            _refuse_unless_the_root(git, root)
+        except GitCommandFailed as failed:
+            raise SubmissionRefused(
+                f"{root} could not be read as a repository "
+                f"({_scrubbed(str(failed), None)}); nothing is pushed"
+            ) from failed
+        except (OSError, RuntimeError) as exc:
             raise SubmissionRefused(
                 f"the checkout {root} could not be held open "
                 f"({type(exc).__name__}); nothing is pushed") from exc
-        return _submit_with(git, root, branch)
+        # AND SO IS A LINKED WORKTREE'S METADATA. Its `.git` is a FILE naming
+        # directories elsewhere, which every later git call would re-resolve,
+        # so its git directory and common directory are held by descriptor
+        # for the whole submission, as the adapter's write path holds them
+        # (`metadata_held_open`; a checkout or a bare repository needs none).
+        # Asked AFTER the root check: with `GIT_DIR` bound, git reads the
+        # working directory as the top level, so the check would pass for a
+        # directory inside the checkout.
+        with ExitStack() as held:
+            try:
+                bound, _git_dir = held.enter_context(
+                    metadata_held_open(git, subject=str(root)))
+            except CorpusRefused as exc:
+                raise SubmissionRefused(
+                    f"the git metadata of {root} could not be held open "
+                    f"({type(exc.__cause__ or exc).__name__}); nothing is "
+                    "pushed") from exc
+            return _submit_with(bound, root, branch)
     finally:
         os.close(handle)
 
@@ -124,7 +150,6 @@ def _submit_with(git: GitRunner, root: Path, branch: str) -> Submission:
     """`submit_branch` on a runner bound to the open checkout."""
     remote = url = None
     try:
-        _refuse_unless_the_root(git, root)
         repository_act._refuse_repository_local_command_config(git, root)
         remote = _chosen_remote(git, root, branch)
         commit = _branch_tip(git, root, branch)
@@ -230,6 +255,13 @@ def _the_one_push_url(git: GitRunner, remote: str, branch: str) -> str:
     URLs are refused because git pushes to EACH, and a submission reports one
     destination. The URLs are not echoed: they are read by line, and a
     credential split across lines is one a redactor cannot see whole.
+
+    THE URL IS READ EXACTLY, git's terminating newline aside. Git keeps
+    surrounding whitespace in a configured URL, and a local path is the one
+    place it is meaningful: `/srv/remote ` and `/srv/remote` are two
+    directories, so a trimmed reading would push somewhere git does not mean.
+    Such a URL is REFUSED rather than trimmed, as `repository_act` refuses
+    one where it attaches a remote.
     """
     if not any(git.run("config", "--get-all", f"remote.{remote}.{key}")
                .stdout.strip() for key in ("url", "pushurl")):
@@ -237,13 +269,20 @@ def _the_one_push_url(git: GitRunner, remote: str, branch: str) -> str:
             f"the remote `{remote}` names no URL, so there is nowhere to push "
             f"`{branch}`; nothing is pushed. Set one (`git remote set-url "
             f"{remote} <url>`).")
-    urls = repository_act._configured_remote_url(git, remote, for_push=True)
-    if not urls or len(urls) != 1:
+    listed = git.out("remote", "get-url", "--push", "--all", remote)
+    urls = [line for line in decoded_path(listed).split("\n") if line]
+    if len(urls) != 1:
         raise SubmissionRefused(
-            f"the remote `{remote}` would push to {len(urls or ())} "
-            "destinations, and a submission goes to exactly one; nothing is "
-            f"pushed. Leave one (`git remote set-url --push {remote} <url>`); "
-            "the URLs are not echoed.")
+            f"the remote `{remote}` would push to {len(urls)} destinations, "
+            "and a submission goes to exactly one; nothing is pushed. Leave "
+            f"one (`git remote set-url --push {remote} <url>`); the URLs are "
+            "not echoed.")
+    if urls[0] != urls[0].strip():
+        raise SubmissionRefused(
+            f"the push URL of the remote `{remote}` has leading or trailing "
+            "whitespace, which git keeps and a push would use; it is refused "
+            "rather than trimmed, and not echoed. Set it again without the "
+            f"whitespace (`git remote set-url --push {remote} <url>`).")
     return urls[0]
 
 
@@ -283,12 +322,18 @@ def _redacted_query(tail: str) -> str:
     """`tail` with every query value, and the fragment, replaced."""
     head, hashmark, fragment = tail.partition("#")
     path, question, query = head.partition("?")
-    query = "".join(
-        part if part in ("&", ";") else
-        part.partition("=")[0] + "=" + REDACTED if "=" in part else
-        REDACTED if part else part
-        for part in re.split(r"([&;])", query))
+    query = "".join(_redacted_parameter(part)
+                    for part in re.split(r"([&;])", query))
     return path + question + query + hashmark + (REDACTED if fragment else "")
+
+
+def _redacted_parameter(part: str) -> str:
+    """One query piece: a delimiter or an empty piece as it is, `name=value`
+    as `name=<redacted>`, and a bare value as `<redacted>`."""
+    if part in ("", "&", ";"):
+        return part
+    name, equals, _value = part.partition("=")
+    return f"{name}={REDACTED}" if equals else REDACTED
 
 
 def _held_secrets(url: str | None) -> list[str]:

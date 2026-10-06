@@ -209,7 +209,8 @@ def test_a_credential_in_the_remote_url_never_reaches_the_report(
                             ("the report", repr(report)),
                             ("the report", str(report))):
             _assert_clean(text, where)
-        assert host in report.url and "/remote.git" in report.url, report.url
+        assert host in report.url, report.url
+        assert "/remote.git" in report.url, report.url
 
         # REJECTED: the remote's branch moved on, so the push is not a
         # fast-forward. git echoes the query string in its own error.

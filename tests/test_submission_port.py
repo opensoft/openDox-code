@@ -145,8 +145,9 @@ def test_no_remote_is_no_submission_target_naming_what_is_missing(
         checkout: Path) -> None:
     """12.3: not an opaque failure and not a reported success; the TYPE is
     `NoSubmissionTarget` and the message names the missing remote."""
+    port = LocalGitSubmissions(checkout)
     with pytest.raises(SubmissionError) as caught:
-        LocalGitSubmissions(checkout).submit("sess-1")
+        port.submit("sess-1")
     assert type(caught.value) is NoSubmissionTarget
     assert "no remote is attached" in str(caught.value)
 
@@ -158,12 +159,13 @@ def test_several_remotes_and_none_named_origin_are_refused_by_name(
     remotes = [_bare(tmp_path / f"{name}.git") for name in ("aaa", "bbb")]
     for path in remotes:
         _git(checkout, "remote", "add", path.stem, str(path))
+    port = LocalGitSubmissions(checkout)
     with pytest.raises(SubmissionError) as caught:
-        LocalGitSubmissions(checkout).submit("sess-1")
+        port.submit("sess-1")
     message = str(caught.value)
     assert type(caught.value) is NoSubmissionTarget
-    assert "several remotes" in message and "`origin`" in message
-    assert "`aaa`" in message and "`bbb`" in message
+    for said in ("several remotes", "`origin`", "`aaa`", "`bbb`"):
+        assert said in message, said
     for path in remotes:
         assert _heads(path) == "", path
 
@@ -173,8 +175,9 @@ def test_several_remotes_and_none_named_origin_are_refused_by_name(
 
 def test_the_default_branch_is_refused(checkout: Path, origin: Path) -> None:
     """R2Q5 (a): any local branch EXCEPT `main`."""
+    port = LocalGitSubmissions(checkout)
     with pytest.raises(SubmissionError) as caught:
-        LocalGitSubmissions(checkout).submit("main")
+        port.submit("main")
     assert type(caught.value) is SubmissionRefused
     assert "`main` is the default branch" in str(caught.value)
     assert _heads(origin) == ""
@@ -190,8 +193,9 @@ def test_a_branch_that_is_not_there_or_not_a_name_is_refused(
         checkout: Path, origin: Path, branch: str, said: str) -> None:
     """The name is checked as a REF NAME before `rev-parse` reads it, so a
     revision expression never selects a commit to push."""
+    port = LocalGitSubmissions(checkout)
     with pytest.raises(SubmissionError) as caught:
-        LocalGitSubmissions(checkout).submit(branch)
+        port.submit(branch)
     assert type(caught.value) is SubmissionRefused
     assert said in str(caught.value)
     assert _heads(origin) == ""
@@ -207,12 +211,59 @@ def test_several_push_urls_are_refused(checkout: Path, tmp_path: Path) -> None:
     _git(checkout, "remote", "set-url", "--add", "--push", "origin", str(first))
     _git(checkout, "remote", "set-url", "--add", "--push", "origin",
          str(second))
+    port = LocalGitSubmissions(checkout)
     with pytest.raises(SubmissionError) as caught:
-        LocalGitSubmissions(checkout).submit("sess-1")
+        port.submit("sess-1")
     assert type(caught.value) is SubmissionRefused
     assert "would push to 2 destinations" in str(caught.value)
     assert str(first) not in str(caught.value), "the URLs were echoed"
-    assert _heads(first) == "" and _heads(second) == ""
+    assert _heads(first) == ""
+    assert _heads(second) == ""
+
+
+def test_a_push_url_with_surrounding_whitespace_is_refused_not_trimmed(
+        checkout: Path, tmp_path: Path) -> None:
+    """Git keeps surrounding whitespace in a configured URL, and for a local
+    path it names another directory: `<dir>/remote ` is not `<dir>/remote`.
+    A trimmed reading would push to the second; the URL is refused instead."""
+    trimmed = _bare(tmp_path / "remote")
+    _git(checkout, "remote", "add", "origin", f"{trimmed} ")
+    kept = subprocess.run(["git", "-C", str(checkout), "config",
+                           "remote.origin.url"], capture_output=True,
+                          text=True).stdout
+    assert kept == f"{trimmed} \n", "git trimmed it; this case measures nothing"
+    port = LocalGitSubmissions(checkout)
+    with pytest.raises(SubmissionError) as caught:
+        port.submit("sess-1")
+    assert type(caught.value) is SubmissionRefused
+    assert "leading or trailing whitespace" in str(caught.value)
+    assert _heads(trimmed) == ""
+
+
+def test_a_linked_worktree_is_submitted_with_its_metadata_held_open(
+        checkout: Path, origin: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """A linked worktree's `.git` is a FILE naming its git and common
+    directories elsewhere. Both are held by descriptor for the whole
+    submission (`metadata_held_open`), so the runner the push core receives
+    names them as `/proc/self/fd/<n>` and the push still lands."""
+    linked = tmp_path / "linked"
+    _git(checkout, "worktree", "add", "-q", str(linked), "sess-1")
+    seen: list[dict[str, str]] = []
+    real = repository_act._push_to_remote_with
+
+    def _spy(git: GitRunner, plan: repository_act.PushPlan) -> None:
+        seen.append(dict(git.held_environment))
+        real(git, plan)
+
+    monkeypatch.setattr(repository_act, "_push_to_remote_with", _spy)
+    report = LocalGitSubmissions(linked).submit("sess-1")
+    assert report.commit == _tip(checkout, "sess-1")
+    assert _tip(origin, "sess-1") == report.commit
+    assert len(seen) == 1
+    assert set(seen[0]) == {"GIT_DIR", "GIT_COMMON_DIR"}
+    for name, value in seen[0].items():
+        assert value.startswith(("/proc/self/fd/", "/dev/fd/")), (name, value)
 
 
 def test_a_remote_with_no_url_is_refused_not_pushed_to_as_a_path(
@@ -223,8 +274,9 @@ def test_a_remote_with_no_url_is_refused_not_pushed_to_as_a_path(
     _git(checkout, "config", "remote.origin.fetch",
          "+refs/heads/*:refs/remotes/origin/*")
     beside = _bare(checkout / "origin")      # what the name would reach
+    port = LocalGitSubmissions(checkout)
     with pytest.raises(SubmissionError) as caught:
-        LocalGitSubmissions(checkout).submit("sess-1")
+        port.submit("sess-1")
     assert type(caught.value) is SubmissionRefused
     assert "names no URL" in str(caught.value)
     assert _heads(beside) == ""
@@ -238,8 +290,9 @@ def test_a_rejected_push_is_refused_and_moves_nothing(
     _git(checkout, "commit", "-q", "--allow-empty", "-m", "ahead")
     _git(checkout, "push", "-q", "origin", "ahead:refs/heads/sess-1")
     moved = _tip(origin, "sess-1")
+    port = LocalGitSubmissions(checkout)
     with pytest.raises(SubmissionError) as caught:
-        LocalGitSubmissions(checkout).submit("sess-1")
+        port.submit("sess-1")
     assert type(caught.value) is SubmissionRefused
     assert "the push of `sess-1` to `origin`" in str(caught.value)
     assert _tip(origin, "sess-1") == moved
@@ -255,8 +308,9 @@ def test_a_transport_failure_is_refused(checkout: Path, tmp_path: Path,
     and the third is a URL `urlsplit` refuses (`ValueError`)."""
     url = str(tmp_path / "missing.git") if where.startswith("a path") else where
     _git(checkout, "remote", "add", "origin", url)
+    port = LocalGitSubmissions(checkout)
     with pytest.raises(SubmissionError) as caught:
-        LocalGitSubmissions(checkout).submit("sess-1")
+        port.submit("sess-1")
     assert type(caught.value) is SubmissionRefused
     assert "Traceback" not in str(caught.value)
 
@@ -272,8 +326,9 @@ def test_a_checkout_whose_own_config_names_a_program_is_refused(
     the submission's too: refused, named, and the program never runs."""
     marker = tmp_path / "ran"
     _git(checkout, "config", "--local", key, f"!touch {marker}")
+    port = LocalGitSubmissions(checkout)
     with pytest.raises(SubmissionError) as caught:
-        LocalGitSubmissions(checkout).submit("sess-1")
+        port.submit("sess-1")
     assert type(caught.value) is SubmissionRefused
     assert key.lower() in str(caught.value).lower()
     assert not marker.exists()
@@ -288,8 +343,9 @@ def test_a_remote_that_names_a_command_is_refused(
     any push, as the runtime refuses it."""
     marker = tmp_path / "ran"
     _git(checkout, "remote", "add", "origin", url.format(marker=marker))
+    port = LocalGitSubmissions(checkout)
     with pytest.raises(SubmissionError) as caught:
-        LocalGitSubmissions(checkout).submit("sess-1")
+        port.submit("sess-1")
     assert type(caught.value) is SubmissionRefused
     assert "runs a command" in str(caught.value)
     assert not marker.exists()
@@ -321,7 +377,8 @@ def test_the_runtime_push_keeps_its_containment_and_the_submission_skips_it(
     handle, bound = repository_act._bound_local_destination(
         str(origin), checkout, contained=False)
     try:
-        assert handle is not None and bound.endswith(f"/{handle}")
+        assert handle is not None
+        assert bound.endswith(f"/{handle}")
     finally:
         os.close(handle)
 
@@ -374,8 +431,9 @@ def test_a_checkout_root_that_is_not_a_repository_root_is_refused(
             "nothing there": tmp_path / "absent"}[which]
     if which != "nothing there":
         root.mkdir()
+    port = LocalGitSubmissions(root)
     with pytest.raises(SubmissionError) as caught:
-        LocalGitSubmissions(root).submit("sess-1")
+        port.submit("sess-1")
     assert type(caught.value) is SubmissionRefused
     assert _heads(origin) == ""
 
@@ -420,4 +478,5 @@ def test_a_report_names_the_place_and_never_the_credential(
     scheme, host, port and path stay. An ssh LOGIN NAME is not a credential
     and stays; an `https` user name alone may be a token and does not."""
     assert submission_push.redact_destination(url) == shown
-    assert "S3C" not in shown and "T0KEN" not in shown
+    assert "S3C" not in shown
+    assert "T0KEN" not in shown
