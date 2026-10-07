@@ -107,20 +107,30 @@ def outside_any_repository(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.fixture
-def checkout(outside_any_repository):
-    repo = outside_any_repository / "checkout"
+def _new_checkout(base: Path) -> Path:
+    """A repository under `base` with one commit."""
+    repo = base / "checkout"
     repo.mkdir()
     _git("init", "-q", str(repo))
     _commit(repo, "a.txt")
     return repo
 
 
-@pytest.fixture
-def unborn(outside_any_repository):
-    repo = outside_any_repository / "unborn"
+def _new_unborn(base: Path) -> Path:
+    """A repository under `base` with no commit, so its HEAD is unborn."""
+    repo = base / "unborn"
     _git("init", "-q", str(repo))
     return repo
+
+
+@pytest.fixture
+def checkout(outside_any_repository):
+    return _new_checkout(outside_any_repository)
+
+
+@pytest.fixture
+def unborn(outside_any_repository):
+    return _new_unborn(outside_any_repository)
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +310,8 @@ def test_every_short_text_reads_as_the_rule_reads_it() -> None:
 
 def test_the_head_of_a_real_repository_is_read(checkout) -> None:
     expected = _head(checkout)
-    assert len(expected) == 40 and set(expected) <= set("0123456789abcdef")
+    assert len(expected) == 40
+    assert set(expected) <= set("0123456789abcdef")
     assert head_sha(checkout) == expected
     assert head_sha(str(checkout)) == expected
 
@@ -414,16 +425,22 @@ def test_any_other_error_propagates_as_realgits_does(tmp_path,
 # 5. parity with serve._head_of, the other reader of the same read
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("case", ["repository", "unborn HEAD", "not a repository"])
-def test_head_sha_and_serves_reader_agree(case: str, outside_any_repository,
-                                          request) -> None:
-    path = {"repository": lambda: request.getfixturevalue("checkout"),
-            "unborn HEAD": lambda: request.getfixturevalue("unborn"),
-            "not a repository": lambda: outside_any_repository}[case]()
+#: Each case's path, built under the test's own directory.
+_PARITY_CASES = {
+    "repository": _new_checkout,
+    "unborn HEAD": _new_unborn,
+    "not a repository": lambda base: base,
+}
+
+
+@pytest.mark.parametrize("case", list(_PARITY_CASES))
+def test_head_sha_and_serves_reader_agree(case: str, outside_any_repository) -> None:
+    path = _PARITY_CASES[case](outside_any_repository)
     ours, serves = head_sha(path), serve._head_of(path)
     assert ours == serves, f"{case}: lines.head_sha {ours!r}, serve._head_of {serves!r}"
     if case == "repository":
-        assert ours is not None and len(ours) == 40
+        assert ours is not None, "the two agreed only by both failing to read"
+        assert len(ours) == 40
 
 
 # ---------------------------------------------------------------------------
