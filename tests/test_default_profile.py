@@ -319,9 +319,11 @@ def test_the_default_declares_the_two_facets_the_composition_points_read() -> No
     `build_parser()` reads `SUBCOMMAND_EXTENSIONS` and `build_server()` reads
     `ROUTE_EXTENSIONS`, and a registered profile without either is refused
     (`profile_proxy.ProfileFacetMissing`), so both are declared. `DISPLAY` and
-    `VIEW_EXTENSIONS` are read with a named absence, and T010's
-    `HANDLER_CONTRIBUTIONS` by presence. The default declares none of those
-    three (the module docstring gives why).
+    `VIEW_EXTENSIONS` are read with a named absence, and the default declares
+    neither (the module docstring gives why). T010's `HANDLER_CONTRIBUTIONS`
+    is read by presence, and the default declares it since plan 038 T015: its
+    one mixin, `serve_branch_actions.BranchActionRoutes`, holds the method the
+    default's submit route names (#1144 12.4a).
     """
     assert isinstance(default_profile.SUBCOMMAND_EXTENSIONS, tuple)
     assert isinstance(default_profile.ROUTE_EXTENSIONS, tuple)
