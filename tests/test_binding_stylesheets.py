@@ -557,9 +557,13 @@ def test_the_design_tokens_and_the_shared_selectors_stayed() -> None:
     # commit says which. It does NOT move for this act any more, because this
     # act is finished; a change to it in a Q7 follow-up is a rule that left
     # when it should not have.
-    assert len(declared) == 572, (
+    #
+    # 572 -> 574 on plan 038 T104 (R2-INV-R9's SF): `.doxchat-no-model` and
+    # `.doxchat-untrusted`, two classes `views/doxbench-chat.js` constructs and
+    # this file had no rule for. Both are openDox's own, named by its bundle.
+    assert len(declared) == 574, (
         f"`styles.css` declares {len(declared)} classes in selectors and this "
-        "census says 572. If a rule LEFT, the extraction took an openDox-owned "
+        "census says 574. If a rule LEFT, the extraction took an openDox-owned "
         "selector with it; if one arrived, re-derive this number and say so")
 
     # THE COMPLETE SHARED SET, not a sample of it (Copilot review, round 2).
