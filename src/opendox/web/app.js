@@ -1692,8 +1692,8 @@ async function render() {
     // only where openDox's default profile contributed the route. It proposes
     // the branch on screen, and a composed render offers no control (D10).
     // The route submits from the SERVED checkout alone, so the control is
-    // offered only while the active repository is the one `/capabilities`
-    // declares (the view decides, `servesTheActiveRepository`).
+    // withheld while another repository is active; with none active, as on a
+    // standalone plane, it is offered (`anotherRepositoryIsActive` decides).
     mountBranchActions(document.getElementById("branchactions"), {
       caps, composed, branch: safeKey(active)?.ref || null,
       repository: safeKey(active)?.repository || null,

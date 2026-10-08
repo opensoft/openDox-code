@@ -600,13 +600,14 @@ out.capable = {
 };
 out.proposed = [m.proposedBranch("sess-1"), m.proposedBranch("main"),
                 m.proposedBranch(""), m.proposedBranch(undefined)];
-out.serves = {
-  served: m.servesTheActiveRepository(live, SERVED),
-  other: m.servesTheActiveRepository(live, "other-repo"),
-  noActive: m.servesTheActiveRepository(live, null),
-  undeclared: m.servesTheActiveRepository({ ...live, repository: undefined }, SERVED),
-  emptyDeclared: m.servesTheActiveRepository({ ...live, repository: "" }, ""),
-  nothing: m.servesTheActiveRepository(undefined, SERVED),
+out.another = {
+  served: m.anotherRepositoryIsActive(live, SERVED),
+  other: m.anotherRepositoryIsActive(live, "other-repo"),
+  noActive: m.anotherRepositoryIsActive(live, null),
+  emptyActive: m.anotherRepositoryIsActive(live, ""),
+  undeclared: m.anotherRepositoryIsActive({ ...live, repository: undefined }, SERVED),
+  nothingDeclaredNoneActive: m.anotherRepositoryIsActive(undefined, null),
+  nothingDeclared: m.anotherRepositoryIsActive(undefined, SERVED),
 };
 
 let h = host();
@@ -627,6 +628,9 @@ h = host();
 c = m.mountBranchActions(h, { caps: { ...live, repository: undefined },
                               branch: "sess-1", repository: SERVED });
 out.undeclared = { enabled: c.enabled, children: h.children.length };
+h = host();
+c = m.mountBranchActions(h, { caps: live, branch: null, repository: null });
+out.noneActive = { enabled: c.enabled, children: h.children.length };
 
 h = host();
 c = m.mountBranchActions(h, { caps: live, branch: "sess-1", repository: SERVED,
@@ -705,18 +709,24 @@ def test_the_control_is_keyed_on_submit_and_the_token(control) -> None:
     assert control["composed"] == {"enabled": False, "children": 0}
 
 
-def test_the_control_is_offered_only_for_the_served_repository(control) -> None:
+def test_the_control_is_withheld_only_while_another_repository_is_active(
+        control) -> None:
     """The route submits from the SERVED checkout alone and takes no
-    repository from the request (12.4a), so the control is offered only
-    while the active repository is the one `/capabilities` declares as
-    `repository`. With another repository active it would offer that
-    repository's branch name, and the push would go out from the served one
-    (Copilot's finding on #96 at `39a73a33`)."""
-    assert control["serves"] == {"served": True, "other": False,
-                                 "noActive": False, "undeclared": False,
-                                 "emptyDeclared": False, "nothing": False}
+    repository from the request (12.4a). With another repository active the
+    control would offer that repository's branch name, and the push would go
+    out from the served one (Copilot's finding on #96 at `39a73a33`), so it
+    is withheld then, and where an active key meets a plane that declares no
+    repository. With NO repository active it is offered: a standalone plane
+    has no snapshot index, so nothing is ever active there (lane 3's MAJOR on
+    R1-T015 at `63a12ad4`)."""
+    assert control["another"] == {"served": False, "other": True,
+                                  "noActive": False, "emptyActive": False,
+                                  "undeclared": True,
+                                  "nothingDeclaredNoneActive": False,
+                                  "nothingDeclared": True}
     assert control["otherRepository"] == {"enabled": False, "children": 0}
     assert control["undeclared"] == {"enabled": False, "children": 0}
+    assert control["noneActive"] == {"enabled": True, "children": 3}
 
 
 def test_the_control_posts_the_branch_and_shows_where_it_went(control) -> None:
@@ -751,6 +761,88 @@ def test_the_control_states_a_refusal_in_the_servers_words(control) -> None:
     assert control["describe"] == ["not submitted: HTTP 500",
                                    "not submitted: loopback_only"]
 
+
+
+# --------------------------------------------------------------------------
+# The control on a REAL standalone plane, its arguments derived as the page
+# derives them (lane 3's MAJOR on R1-T015 at `63a12ad4`).
+# --------------------------------------------------------------------------
+
+_DERIVE = r"""
+const [BASE, TOKEN] = process.argv.slice(2);
+// The page as the standalone entry point opens it: the console token in the
+// URL's fragment (`console_access.publish`), never on `/capabilities`.
+globalThis.location = { hash: "#console_token=" + TOKEN,
+                        pathname: "/index.html", search: "" };
+globalThis.history = { state: null, replaceState() {} };
+const served = (path, options) => fetch(new URL(path, BASE + "/"), options);
+const { probeCapabilities } = await import("./views/notebook.js");
+const { fetchIndex } = await import("./views/repo-selector.js");
+const { resolveActive, resolveStoredKey, safeKey } =
+  await import("./views/repo-selector-model.js");
+const { isComposed } = await import("./views/composed-model.js");
+const { mountBranchActions } = await import("./views/branch-actions.js");
+function node(tag) {
+  return { tag, children: [], attrs: {}, listeners: {}, textContent: "",
+           value: "", disabled: false, className: "", type: "", placeholder: "",
+           setAttribute(k, v) { this.attrs[k] = v; },
+           addEventListener(k, f) { this.listeners[k] = f; },
+           append(...c) { this.children.push(...c); } };
+}
+const host = node("span");
+host.ownerDocument = { createElement: node };
+// `render()` in app.js, in its order: the index, the active key (nothing is
+// stored on a freshly opened page), the snapshot and whether it is composed,
+// then the mount with exactly app.js's arguments.
+const caps = await probeCapabilities(served);
+const index = await fetchIndex(served);
+const active = resolveActive(index, resolveStoredKey(index, null));
+const snapshot = await (await served("./snapshot.json", { cache: "no-store" })).json();
+const composed = isComposed(snapshot);
+const control = mountBranchActions(host, {
+  caps, composed, branch: safeKey(active)?.ref || null,
+  repository: safeKey(active)?.repository || null,
+});
+process.stdout.write(JSON.stringify({
+  submit: caps?.actions?.submit ?? null, repository: caps?.repository ?? null,
+  tokenDelivered: caps?.console_token === TOKEN, index, active, composed,
+  offered: control.enabled, children: host.children.length,
+}));
+"""
+
+
+def test_a_standalone_plane_offers_the_control_as_the_page_derives_it(
+        checkout: Path, tmp_path: Path, standalone_profile) -> None:
+    """The one plane that carries `actions.submit` is a standalone one, and it
+    has no snapshot index: `/snapshot-index.json` answers 404, so `fetchIndex`
+    gives null, `resolveActive` gives no key, and the mount is handed no
+    repository. The control must be OFFERED there. The bundle's own modules
+    derive every argument against a real standalone serve, as app.js does,
+    the console token included, which reaches the page in its URL's fragment.
+    """
+    if NODE is None:
+        pytest.skip("node not available for the page's derivation")
+    from opendox import console_access
+
+    bundle = tmp_path / "bundle"
+    shutil.copytree(WEB, bundle)
+    (bundle / "package.json").write_text('{"type": "module"}', encoding="utf-8")
+    derive = bundle / "derive.mjs"
+    derive.write_text(_DERIVE, encoding="utf-8")
+    with _serving(checkout, tmp_path) as httpd:
+        assert httpd.console_token_delivery == console_access.DELIVERY_OPENED_URL
+        declared = _capabilities(httpd)
+        assert "console_token" not in declared
+        done = subprocess.run(
+            [NODE, str(derive), f"http://127.0.0.1:{httpd.server_address[1]}",
+             httpd.console_token],
+            capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout) == {
+        "submit": True, "repository": declared["repository"],
+        "tokenDelivered": True, "index": None, "active": None,
+        "composed": False, "offered": True, "children": 3,
+    }
 
 # --------------------------------------------------------------------------
 # The account menu names the verb `actions.submit` grants (Codex's P2 on #96;

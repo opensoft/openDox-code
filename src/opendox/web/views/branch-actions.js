@@ -27,16 +27,23 @@ export function submitCapable(caps) {
     && caps.console_token.length > 0);
 }
 
-// Whether the repository on screen is the one the route submits from. The
-// route takes NO repository from the request (12.4a): it pushes a branch of
-// the checkout this serve was started on, which `/capabilities` declares as
-// `repository` (the same authority a session verb refuses a foreign one
-// against). A plane that reads several repositories writes into that one
-// alone, so with ANOTHER repository active the control would offer a branch
-// name of that repository, and the push would go out from the served one.
-export function servesTheActiveRepository(caps, repository) {
-  return typeof caps?.repository === "string" && caps.repository.length > 0
-    && repository === caps.repository;
+// Whether ANOTHER repository than the served one is on screen. The route takes
+// NO repository from the request (12.4a): it pushes a branch of the checkout
+// this serve was started on, which `/capabilities` declares as `repository`
+// (the same authority a session verb refuses a foreign one against). A plane
+// that reads several repositories writes into that one alone, so with another
+// repository active the control would offer a branch name of that repository
+// and the push would go out from the served one: then the control is
+// withheld. An active key the plane cannot match, because it declares no
+// repository, is withheld too.
+//
+// NO active key is not another repository. A standalone plane, the one plane
+// that carries `actions.submit`, has no snapshot index (its
+// `/snapshot-index.json` answers 404), so nothing is ever active there, and
+// the only checkout on screen is the served one.
+export function anotherRepositoryIsActive(caps, repository) {
+  return typeof repository === "string" && repository.length > 0
+    && repository !== caps?.repository;
 }
 
 // The branch the control proposes: the one the page is looking at, unless it
@@ -77,7 +84,7 @@ export function describeAnswer(answer) {
 // Mount the control into `host`, or leave `host` empty where this plane offers
 // no submit act. A COMPOSED render offers none either: it is read-only, and
 // every acting control is withheld from it (D10). Nor does a view of another
-// repository than the served one (`servesTheActiveRepository`). Returns a
+// repository than the served one (`anotherRepositoryIsActive`). Returns a
 // controller whose `submit()` runs one submission and resolves to the
 // sentence it showed (null when nothing is offered).
 export function mountBranchActions(
@@ -85,7 +92,7 @@ export function mountBranchActions(
   if (!host) return { enabled: false, submit: async () => null };
   host.textContent = "";
   if (composed || !submitCapable(caps)
-      || !servesTheActiveRepository(caps, repository)) {
+      || anotherRepositoryIsActive(caps, repository)) {
     return { enabled: false, submit: async () => null };
   }
   const doc = host.ownerDocument;
