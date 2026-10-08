@@ -201,7 +201,10 @@ class Confirmation:
 
 
 def _require_binding(branch: str, head: str) -> None:
-    if not isinstance(branch, str) or not branch.strip() or branch != branch.strip():
+    # Not EMPTY, and nothing more: git decides what a branch name is, and a
+    # legal one may end in a no-break space (`sess-1\u00a0`), which a strip
+    # would have refused (Copilot's sixth review of openDox-code#90).
+    if not isinstance(branch, str) or not branch:
         raise ConfirmationRefused(
             f"a confirmation is bound to a branch by name, and {branch!r} is not "
             "one", code="bad-binding")

@@ -79,7 +79,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, Protocol, Sequence
+from typing import Iterable, Iterator, Mapping, Protocol, Sequence
 
 # The one prefix the SERVED checkout's working tree may legitimately change in:
 # `propose` / `demote` / `dispose` already write their records here, and so do
@@ -150,6 +150,18 @@ SERVED_FAST_FORWARD_SETTINGS = (
     (f"branch.{SERVED_FAST_FORWARD_BRANCH}.mergeOptions", ""),
     ("core.hooksPath", os.devnull),
 )
+# The remote probe's environment (`SessionGit.ls_remote_url`): the runtime's
+# non-interactive contract (`local_git_adapter.out_bounded`: no terminal, no
+# askpass, ssh in batch mode), and only the transports git carries itself.
+PROBE_ENVIRONMENT = {
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_ASKPASS": "",
+    "SSH_ASKPASS": "",
+    "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes",
+    "GIT_ALLOW_PROTOCOL": "file:ftp:ftps:git:http:https:ssh",
+}
+# How long the probe may take, in seconds.
+PROBE_TIMEOUT = 60.0
 # The ONE argument-checked admission at the served root, above: exactly these
 # words, then exactly one full commit id: `git merge --ff-only <commit>`.
 SERVED_FAST_FORWARD_ARGV = ("merge", "--ff-only")
@@ -258,11 +270,16 @@ class SessionActionInProgress(SessionGitRefused):
 class GitRunner(Protocol):
     def run(self, cwd: Path, *args: str,
             config: Sequence[tuple[str, str]] = (),
-            binary: bool = False) -> subprocess.CompletedProcess:
+            binary: bool = False,
+            env: Mapping[str, str] | None = None,
+            timeout: float | None = None) -> subprocess.CompletedProcess:
         """Run `git *args` in `cwd`. `config`, when given, is command-scope
         configuration for this one command, delivered in its environment
-        (only the landing's fast-forward passes any). `binary` returns stdout
-        and stderr as BYTES, untranslated (`SessionGit.git_nul`)."""
+        (only the landing's fast-forward and its remote probe pass any).
+        `binary` returns stdout and stderr as BYTES, untranslated
+        (`SessionGit.git_nul`). `env` is laid over the sanitized environment,
+        and `timeout` bounds the command (only the remote probe passes them;
+        `SessionGit.ls_remote_url`)."""
         ...
 
 
@@ -284,17 +301,31 @@ class SubprocessGitRunner:
 
     def run(self, cwd: Path, *args: str,
             config: Sequence[tuple[str, str]] = (),
-            binary: bool = False) -> subprocess.CompletedProcess:
+            binary: bool = False,
+            env: Mapping[str, str] | None = None,
+            timeout: float | None = None) -> subprocess.CompletedProcess:
         from opendox.runtime.local_git_adapter import sanitized_git_environment
-        env = sanitized_git_environment()
+        environment = {**sanitized_git_environment(), **(env or {})}
         if config:
-            env["GIT_CONFIG_COUNT"] = str(len(config))
+            environment["GIT_CONFIG_COUNT"] = str(len(config))
             for index, (key, value) in enumerate(config):
-                env[f"GIT_CONFIG_KEY_{index}"] = key
-                env[f"GIT_CONFIG_VALUE_{index}"] = value
+                environment[f"GIT_CONFIG_KEY_{index}"] = key
+                environment[f"GIT_CONFIG_VALUE_{index}"] = value
+        try:
+            return self._run(cwd, args, environment, binary, timeout)
+        except subprocess.TimeoutExpired:
+            said = f"timed out after {timeout:g}s"
+            return subprocess.CompletedProcess(
+                ["git", *args], 124, b"" if binary else "",
+                said.encode() if binary else said)
+
+    @staticmethod
+    def _run(cwd: Path, args: Sequence[str], env: dict[str, str], binary: bool,
+             timeout: float | None) -> subprocess.CompletedProcess:
         if binary:
             return subprocess.run(["git", *args], cwd=str(cwd),
-                                  capture_output=True, check=False, env=env)
+                                  capture_output=True, check=False, env=env,
+                                  timeout=timeout)
         # TEXT MODE NEVER RAISES on output that is not in the locale's
         # encoding: a file name that is not UTF-8 reaches a merge's own
         # output ("Auto-merging <name>"), and a strict decode raised
@@ -303,7 +334,7 @@ class SubprocessGitRunner:
         # surrogates; paths are read exactly through `SessionGit.git_nul`.
         return subprocess.run(["git", *args], cwd=str(cwd), text=True,
                               errors="surrogateescape", capture_output=True,
-                              check=False, env=env)
+                              check=False, env=env, timeout=timeout)
 
 
 # --------------------------------------------------------------------------
@@ -649,10 +680,11 @@ class SessionGit:
         another path), and raised `UnicodeDecodeError` on a name that is not
         UTF-8 (Copilot 4195681954; holder ruling openxFactory#656
         `6026275158` item 1). A field passed back to git as an argument is
-        encoded the same way, so it names the same file. Guarded like every
-        other command."""
-        self._guard(cwd, args)
-        done = self.runner.run(Path(cwd), *args, binary=True)
+        encoded the same way, so it names the same file. Guarded and pinned
+        like every other command, through `_run` (Copilot's sixth review of
+        openDox-code#90: a bytes command that bypassed it ran the admitted
+        fast-forward argv with no pins)."""
+        done = self._run(cwd, args, binary=True)
         if done.returncode != 0:
             raise GitError(args, done.returncode,
                            (done.stderr or b"").decode("utf-8", "replace"))
@@ -667,27 +699,38 @@ class SessionGit:
         passed in the command's environment (`GIT_CONFIG_COUNT=1`), and the
         argv names only that remote. A URL may carry a credential, and an argv
         is readable by any local user; the environment is not (plan 038, T012).
-        The transient remote has none of a configured remote's other settings."""
+        The transient remote has none of a configured remote's other settings.
+
+        IT NEVER WAITS ON A HUMAN AND NEVER RUNS A HELPER (Copilot's sixth
+        review of openDox-code#90). `PROBE_ENVIRONMENT` is the runtime's own
+        non-interactive contract (`local_git_adapter.out_bounded`) plus
+        `GIT_ALLOW_PROTOCOL`, which admits only the transports git carries
+        itself, so no `git-remote-<name>` and no `ext::` command runs whatever
+        the configuration says. `PROBE_TIMEOUT` bounds it: the confirmation is
+        spent before the probe, and a stalled remote must not hold the
+        landing."""
         transient = f"opendox-probe-{uuid.uuid4().hex}"
         args = ("ls-remote", transient, ref)
         self._guard(cwd, args)
         done = self.runner.run(Path(cwd), *args,
-                               config=((f"remote.{transient}.url", url),))
+                               config=((f"remote.{transient}.url", url),),
+                               env=PROBE_ENVIRONMENT, timeout=PROBE_TIMEOUT)
         if done.returncode != 0:
             raise GitError(args, done.returncode, done.stderr or "")
         return (done.stdout or "").strip()
 
-    def _run(self, cwd: Path | str, args: Sequence[str]
-             ) -> subprocess.CompletedProcess:
+    def _run(self, cwd: Path | str, args: Sequence[str], *,
+             binary: bool = False) -> subprocess.CompletedProcess:
         """Guard, then run. The landing's fast-forward, the one argv the guard
         admits by its arguments, runs with `SERVED_FAST_FORWARD_SETTINGS` pinned
-        in its environment, by whichever method issues it: its argument vector
-        stays exactly the three arguments the guard admitted."""
+        in its environment, by whichever method issues it, a bytes read
+        included: its argument vector stays exactly the three arguments the
+        guard admitted."""
         self._guard(cwd, args)
+        settings: dict[str, object] = {"binary": True} if binary else {}
         if served_fast_forward_commit(args) is not None:
-            return self.runner.run(Path(cwd), *args,
-                                   config=SERVED_FAST_FORWARD_SETTINGS)
-        return self.runner.run(Path(cwd), *args)
+            settings["config"] = SERVED_FAST_FORWARD_SETTINGS
+        return self.runner.run(Path(cwd), *args, **settings)
 
     def _served_state(self) -> tuple[str, tuple[str, ...]]:
         """The served checkout's `HEAD` ref (`refs/heads/<name>`, or `HEAD` when

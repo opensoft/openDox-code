@@ -455,6 +455,7 @@ def test_no_configuration_enables_automatic_landing(tmp_path):
     git_config = (("merge.ff", "only"), ("rerere.enabled", "true"),
                   ("rerere.autoUpdate", "true"), ("pull.twohead", "ours"),
                   ("branch.main.mergeOptions", "-X theirs"),
+                  ("branch.HEAD.mergeOptions", "-X theirs"),
                   ("core.attributesFile", str(union)), ("merge.default", "union"),
                   ("merge.directoryRenames", "true"),
                   ("opendox.autoland", "true"), ("opendox.confirm", "true"))
@@ -486,6 +487,26 @@ def test_no_configuration_enables_automatic_landing(tmp_path):
         BRANCH, confirmation=mint(clean))
     assert len(parents_of(clean, landed.merge_commit)) == 3
     assert (clean.root / "notes/session.md").is_file()
+
+    # The landing merges on a DETACHED HEAD, where git applies the options
+    # configured for a branch named `HEAD`: `-X theirs` would answer the
+    # conflict, and `-s ours` would drop the branch's change with the parents
+    # check passing (lane 3's review R2 of openDox-code#90, `6035652847`).
+    for n, options in enumerate(("-X theirs", "-s ours")):
+        world.git("config", "branch.HEAD.mergeOptions", options)
+        with pytest.raises(MergeConflict) as conflict:
+            NeutralLander(world.root, env=everything).land(
+                BRANCH, confirmation=mint(world))
+        assert conflict.value.paths == ("doc.md",), options
+        detached = World(tmp_path / f"detached-{n}")
+        for key, value in git_config:
+            detached.git("config", key, value)
+        detached.git("config", "branch.HEAD.mergeOptions", options)
+        detached.branch_with(BRANCH, "notes/session.md", "work\n")
+        landed = NeutralLander(detached.root, env=everything).land(
+            BRANCH, confirmation=mint(detached))
+        assert len(parents_of(detached, landed.merge_commit)) == 3
+        assert (detached.root / "notes/session.md").is_file(), options
 
 
 def test_a_governed_repository_binds_no_lander(world):
@@ -763,6 +784,67 @@ def test_only_the_interactive_layers_call_an_issuer():
     assert recorders == {"_mint"}
 
 
+# ---- the static check: only the lander issues the served fast-forward ----
+
+#: The modules that may name the served fast-forward: the lander, and the
+#: funnel that defines and guards it.
+FAST_FORWARD_MOVERS = frozenset({"opendox/landing.py", "opendox/session_git.py"})
+FAST_FORWARD_NAMES = frozenset({"fast_forward_served", "SERVED_FAST_FORWARD_ARGV",
+                                "SERVED_FAST_FORWARD_SETTINGS",
+                                "served_fast_forward_commit", "--ff-only"})
+
+
+def _fast_forward_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.alias):
+        return node.asname if node.asname in FAST_FORWARD_NAMES else \
+            node.name.rsplit(".", 1)[-1]
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def fast_forward_reaches(source: str) -> list[tuple[int, str]]:
+    """Every place a module's source names the served fast-forward: its
+    method, its argv, its settings or its recognizer, as a name, an attribute,
+    an imported name or a string (a `getattr`, or `"--ff-only"` passed to
+    git). A remedy MESSAGE that quotes the command is an f-string, never the
+    string itself."""
+    return [(getattr(node, "lineno", 0), name)
+            for node in ast.walk(ast.parse(source))
+            if (name := _fast_forward_name(node)) in FAST_FORWARD_NAMES]
+
+
+def test_only_the_lander_issues_the_served_fast_forward():
+    """FR-004a's exceptions admit `merge --ff-only <commit>` at the served root
+    for ONE act, a confirmed landing fast-forwarding to that merge commit; the
+    guard admits that argv for any `SessionGit` caller. So no module but the
+    lander (and the funnel that defines it) names it, and a later product path
+    that moved the served checkout with no human act turns this red (lane 3's
+    review R2 of openDox-code#90, `6035652847`)."""
+    offenders = []
+    for path in sorted(PACKAGE.rglob("*.py")):
+        rel = path.relative_to(PACKAGE.parent).as_posix()
+        if rel in FAST_FORWARD_MOVERS:
+            continue
+        for line, name in fast_forward_reaches(path.read_text(encoding="utf-8")):
+            offenders.append(f"{rel}:{line} names {name}")
+    assert offenders == []
+
+    # the check is not vacuous: each spelling of a reach is caught
+    for planted in ("git.fast_forward_served(sha)\n",
+                    "from opendox.session_git import SERVED_FAST_FORWARD_ARGV\n",
+                    "git.git(root, *session_git.SERVED_FAST_FORWARD_ARGV, sha)\n",
+                    "git.git(root, 'merge', '--ff-only', sha)\n",
+                    "getattr(git, 'fast_forward_served')(sha)\n"):
+        assert fast_forward_reaches(planted), planted
+    assert not fast_forward_reaches(
+        'message = f"run `git merge --ff-only {remote}/{base}`"\n')
+
+
 # ==========================================================================
 # T012's named nodes beside them: R2Q7 (a) and ADV-08
 # ==========================================================================
@@ -842,6 +924,50 @@ def test_a_dirty_served_checkout_on_main_is_refused_before_merging(world):
     assert refusal(port.land, BRANCH,
                    confirmation=token).code == "dirty-served-checkout"
     assert world.refs() == before[0]
+
+
+@pytest.mark.parametrize("ignored,committed", [
+    ("local.env", "local.env"),
+    ("build/sub/out.bin", "build/sub/out.bin"),
+    ("keep", "keep/x"),
+], ids=["the-path-itself", "under-an-ignored-directory",
+        "a-file-where-a-directory-goes"])
+def test_an_ignored_file_the_landing_would_overwrite_is_refused(tmp_path, ignored,
+                                                                committed):
+    """"Clean" leaves IGNORED files out, and `git merge --ff-only` overwrites an
+    ignored file with no word, so a branch that commits an ignored path would
+    replace the user's own file (MEASURED, git 2.43). The fast-forward is
+    refused naming the file and the remedy; an ignored file out of the way
+    blocks nothing (lane 3's review R2 of openDox-code#90, `6035652847`)."""
+    world = World(tmp_path)
+    world.write(".gitignore", "local.env\nbuild/\nkeep\n*.log\n")
+    world.commit("ignore local files", ".gitignore")
+    world.git("checkout", "-q", "-b", BRANCH)
+    world.write(committed, "the branch's content\n")
+    world.git("add", "-f", "--", committed)
+    world.git("commit", "-q", "-m", "the branch commits an ignored path")
+    world.git("checkout", "-q", "main")
+    local = world.write(ignored, "SECRET=the user's own\n")
+    aside = world.write("unrelated.log", "an ignored file out of the way\n")
+    assert world.fingerprint()[2] == ""              # clean in git's own sense
+    before = world.refs()
+    port, token = lander(world), mint(world)
+
+    refused = refusal(port.land, BRANCH, confirmation=token)
+
+    assert refused.code == "ignored-files-in-the-way"
+    assert ignored in str(refused)
+    assert "unrelated.log" not in str(refused)
+    assert local.read_text(encoding="utf-8") == "SECRET=the user's own\n"
+    assert world.refs() == before
+    assert world.worktrees() == [world.root.resolve()]
+
+    # the remedy, followed, lands; the ignored file out of the way stays
+    local.rename(tmp_path / "moved-aside")
+    landed = port.land(BRANCH, confirmation=mint(world))
+    assert landed.served_checkout == landing.SERVED_FAST_FORWARDED
+    assert (world.root / committed).read_text(encoding="utf-8") == "the branch's content\n"
+    assert aside.read_text(encoding="utf-8") == "an ignored file out of the way\n"
 
 
 # ==========================================================================
@@ -1122,7 +1248,189 @@ def test_the_push_url_never_reaches_git_argv(world, tmp_path):
     transient = args[1]
     assert transient.startswith("opendox-probe-")
     assert args == ("ls-remote", transient, "refs/heads/main")
-    assert settings == {"config": ((f"remote.{transient}.url", str(remote)),)}
+    assert settings["config"] == ((f"remote.{transient}.url", str(remote)),)
+    assert settings["env"] == session_git.PROBE_ENVIRONMENT
+    assert settings["timeout"] == session_git.PROBE_TIMEOUT
+
+
+def _a_helper_on_path(tmp_path: Path, monkeypatch, name: str) -> Path:
+    """`git-remote-<name>` on PATH, which records that it ran."""
+    bin_dir = tmp_path / "helper-bin"
+    bin_dir.mkdir(exist_ok=True)
+    ran = tmp_path / f"{name}-ran"
+    helper = bin_dir / f"git-remote-{name}"
+    helper.write_text(f"#!/bin/sh\necho ran >> '{ran}'\nexit 1\n", encoding="utf-8")
+    helper.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return ran
+
+
+@pytest.mark.parametrize("url", ["evil://example.invalid/remote.git",
+                                 "evil::example.invalid/remote.git"],
+                         ids=["scheme", "helper-form"])
+def test_a_push_url_that_names_a_helper_is_refused_and_never_runs_it(
+        world, tmp_path, monkeypatch, url):
+    """`<scheme>://` that git does not carry, and every `<name>::`, makes git
+    run `git-remote-<name>` from PATH; the probe refuses before anything runs
+    (Copilot's sixth review of openDox-code#90)."""
+    ran = _a_helper_on_path(tmp_path, monkeypatch, "evil")
+    world.git("remote", "add", "origin", url)
+    before = world.refs()
+    port, token = lander(world), mint(world)
+
+    refused = refusal(port.land, BRANCH, confirmation=token)
+
+    assert refused.code == "remote-transport"
+    assert "git-remote-evil" in str(refused)
+    assert not ran.exists()
+    assert world.refs() == before
+
+
+def test_a_helper_reached_by_a_url_rewrite_is_refused_and_never_runs(
+        world, tmp_path, monkeypatch):
+    """`git remote get-url` applies `url.<base>.insteadOf`, so a push URL
+    spelled https and rewritten to a helper reads as the helper, and is
+    refused before anything runs."""
+    ran = _a_helper_on_path(tmp_path, monkeypatch, "evil")
+    world.git("config", "url.evil://rewritten/.insteadOf",
+              "https://rewrite.invalid/")
+    world.git("remote", "add", "origin", "https://rewrite.invalid/remote.git")
+    port, token = lander(world), mint(world)
+
+    refused = refusal(port.land, BRANCH, confirmation=token)
+
+    assert refused.code == "remote-transport"
+    assert not ran.exists()
+
+
+def test_a_helper_reached_by_a_second_rewrite_never_runs(world, tmp_path,
+                                                         monkeypatch):
+    """The probe applies `insteadOf` AGAIN to the URL `get-url` printed, so a
+    second rewrite (https to https, then https to a helper) passes the
+    transport check. The probe's environment admits only the transports git
+    carries itself (`GIT_ALLOW_PROTOCOL`), so the helper never runs (MEASURED,
+    git 2.43: without it, `git-remote-evil` ran; lane 3's review R2 of
+    openDox-code#90 named the double rewrite as not reached)."""
+    ran = _a_helper_on_path(tmp_path, monkeypatch, "evil")
+    world.git("config", "url.https://second.invalid/.insteadOf",
+              "https://first.invalid/")
+    world.git("config", "url.evil::second/.insteadOf", "https://second.invalid/")
+    world.git("remote", "add", "origin", "https://first.invalid/remote.git")
+    port, token = lander(world), mint(world)
+
+    refused = refusal(port.land, BRANCH, confirmation=token)
+
+    assert refused.code == "remote-unreadable"
+    assert "transport 'evil' not allowed" in str(refused)
+    assert not ran.exists()
+
+
+@pytest.mark.parametrize("url", ["file:///nonexistent/remote.git#ticket=private-value",
+                                 "file:///nonexistent/remote.git?ticket= private-value"],
+                         ids=["fragment", "spaced-value"])
+def test_any_value_the_push_url_carries_never_reaches_a_refusal(world, url):
+    """A value under a name no credential pattern knows (`ticket`) is removed
+    BY VALUE, because the check holds the URL (Copilot's sixth review of
+    openDox-code#90; `submission_push._scrubbed`)."""
+    world.git("remote", "add", "origin", url)
+    port, token = lander(world), mint(world)
+
+    refused = refusal(port.land, BRANCH, confirmation=token)
+
+    assert refused.code == "remote-unreadable"
+    assert "private-value" not in str(refused)
+
+
+def test_a_failed_probe_keeps_only_git_s_own_diagnostic(world, tmp_path):
+    """Under `GIT_TRACE_CURL=1` or `GIT_CURL_VERBOSE=1` a failed HTTP probe's
+    stderr carries every request header, an `http.extraheader` secret among
+    them: the refusal keeps only git's `fatal:` and `error:` lines (Copilot's
+    sixth review of openDox-code#90)."""
+    remote = _bare_remote(tmp_path, "remote")
+    world.git("remote", "add", "origin", str(remote))
+
+    class TracedProbe(session_git.SubprocessGitRunner):
+        def run(self, cwd, *args, **settings):
+            if args[:1] == ("ls-remote",):
+                return subprocess.CompletedProcess(
+                    ["git", *args], 128, "",
+                    "> GET /info/refs HTTP/1.1\n> X-Private: private-value\n"
+                    "< HTTP/1.1 403 Forbidden\nfatal: unable to access "
+                    "'https://example.invalid/': The requested URL returned "
+                    "error: 403\n")
+            return super().run(cwd, *args, **settings)
+
+    port, token = lander(world, runner=TracedProbe()), mint(world)
+
+    refused = refusal(port.land, BRANCH, confirmation=token)
+
+    assert refused.code == "remote-unreadable"
+    assert "private-value" not in str(refused)
+    assert "X-Private" not in str(refused)
+    assert "fatal: unable to access" in str(refused)
+
+
+def test_the_probe_never_waits_on_a_prompt_or_a_stalled_remote(world, tmp_path,
+                                                                monkeypatch):
+    """The confirmation is spent before the probe, so the probe is bounded and
+    asks no human: ssh runs in batch mode, git's terminal prompt is off, and a
+    remote that never answers is refused when the bound passes (Copilot's
+    sixth review of openDox-code#90)."""
+    bin_dir = tmp_path / "ssh-bin"
+    bin_dir.mkdir()
+    seen = tmp_path / "ssh-seen"
+    fake = bin_dir / "ssh"
+    fake.write_text("#!/bin/sh\n"
+                    f"echo \"$* prompt=$GIT_TERMINAL_PROMPT\" > '{seen}'\n"
+                    "sleep 5\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(session_git, "PROBE_TIMEOUT", 1.0)
+    # a repository's own `core.sshCommand` is outranked by the probe's
+    # `GIT_SSH_COMMAND`, as it is for the runtime's own push
+    # (`local_git_adapter.out_bounded`), so it never runs here
+    configured = bin_dir / "configured-ssh"
+    configured_ran = tmp_path / "configured-ssh-ran"
+    configured.write_text(f"#!/bin/sh\necho ran > '{configured_ran}'\n",
+                          encoding="utf-8")
+    configured.chmod(0o755)
+    world.git("config", "core.sshCommand", str(configured))
+    world.git("remote", "add", "origin", "ssh://stalled.invalid/remote.git")
+    port, token = lander(world), mint(world)
+
+    refused = refusal(port.land, BRANCH, confirmation=token)
+
+    assert refused.code == "remote-unreadable"
+    assert "timed out after 1s" in str(refused)
+    assert "BatchMode=yes" in seen.read_text(encoding="utf-8")
+    assert "prompt=0" in seen.read_text(encoding="utf-8")
+    assert not configured_ran.exists()
+
+
+@pytest.mark.parametrize("spelled", ["\n{path}", "{path}\n"],
+                         ids=["leading-newline", "trailing-newline"])
+def test_a_push_url_holding_a_newline_is_refused_never_probed(world, tmp_path,
+                                                              spelled):
+    """A URL holding a newline prints as two records: it is refused, never
+    trimmed and probed as another repository (Copilot's sixth review of
+    openDox-code#90; `submission_push._the_one_push_url`)."""
+    remote = _bare_remote(tmp_path, "remote")
+    world.git("push", "-q", str(remote), "main")
+    world.git("remote", "add", "origin", str(remote))
+    world.git("config", "remote.origin.pushurl", spelled.format(path=remote))
+    runner = RecordingRunner()
+    port, token = lander(world, runner=runner), mint(world)
+
+    refused = refusal(port.land, BRANCH, confirmation=token)
+
+    assert refused.code == "several-push-urls"
+    assert "ls-remote" not in runner.subcommands()
+
+
+def test_the_transports_are_the_submission_path_s(world):
+    from opendox import submission_push
+    assert landing._GIT_TRANSPORTS == submission_push._GIT_TRANSPORTS
+    assert landing._KEPT_STDERR.pattern == submission_push._KEPT_PUSH_STDERR.pattern
 
 
 @pytest.mark.parametrize("url", ["/nonexistent/remote.git#token=sekrit-fragment",
@@ -1360,7 +1668,10 @@ def test_a_merge_driver_this_machine_selects_is_refused_before_merging(
     (("merge.default", "text"), ("merge.text.driver", "cp %B %A")),
     (("merge.default", ""), ("merge..driver", "cp %B %A")),
     (("merge.default", "mine"), ("merge.mine.driver", "cp %B %A")),
-], ids=["union", "text-hijacked", "empty-name-hijacked", "a-named-driver"])
+    (("branch.HEAD.mergeOptions", "-X theirs"),),
+    (("branch.HEAD.mergeOptions", "-s ours"),),
+], ids=["union", "text-hijacked", "empty-name-hijacked", "a-named-driver",
+        "detached-head-theirs", "detached-head-ours"])
 def test_a_configured_fallback_driver_cannot_resolve_a_conflict(tmp_path, config):
     """`merge.default` picks the driver for every file with NO `merge`
     attribute, so a configured `union` (or any driver configured by name) would
@@ -1378,6 +1689,33 @@ def test_a_configured_fallback_driver_cannot_resolve_a_conflict(tmp_path, config
 
     assert conflict.value.paths == ("doc.md",)
     assert world.refs() == before
+    assert (world.root / "doc.md").read_text(encoding="utf-8") == "main's words\n"
+
+
+@pytest.mark.parametrize("word", ["set", "unset", "unspecified"])
+def test_a_driver_named_like_one_of_git_s_own_states_cannot_resolve_a_conflict(
+        tmp_path, word):
+    """`check-attr` prints `set`, `unset` and `unspecified` for the attribute's
+    three states AND for the string values `merge=set`, `merge=unset` and
+    `merge=unspecified`, and git looks a string value up among the configured
+    drivers first. The driver check cannot tell them apart, so the landing
+    merge pins a driver by each of those names to one that fails, and the
+    conflict is shown (lane 3's review R2 of openDox-code#90, `6035652847`)."""
+    world = _conflicting_world(tmp_path)
+    info = Path(world.git("rev-parse", "--git-common-dir"))
+    info = (info if info.is_absolute() else world.root / info) / "info"
+    info.mkdir(parents=True, exist_ok=True)
+    (info / "attributes").write_text(f"doc.md merge={word}\n", encoding="utf-8")
+    world.git("config", f"merge.{word}.driver", "cp %B %A")
+    before = world.refs()
+    port, token = lander(world), mint(world)
+
+    with pytest.raises(MergeConflict) as conflict:
+        port.land(BRANCH, confirmation=token)
+
+    assert conflict.value.paths == ("doc.md",)
+    assert world.refs() == before
+    assert world.worktrees() == [world.root.resolve()]
     assert (world.root / "doc.md").read_text(encoding="utf-8") == "main's words\n"
 
 
@@ -1549,6 +1887,50 @@ def test_a_merge_that_fails_without_a_conflict_keeps_git_s_reason(world):
     assert world.refs() == before
 
 
+class GitWithoutAttrSource(session_git.SubprocessGitRunner):
+    """A git older than `landing.ATTR_SOURCE_FLOOR`: `--attr-source` is an
+    unknown option, answered as such a git answers it (exit 129, a usage
+    text)."""
+
+    def run(self, cwd, *args, **settings):
+        refused = [arg for arg in args if arg.startswith("--attr-source")]
+        if not refused:
+            return super().run(cwd, *args, **settings)
+        said = (f"unknown option: {refused[0]}\n"
+                "usage: git [-v | --version] [-h | --help] [-C <path>] "
+                "[-c <name>=<value>]\n")
+        if settings.get("binary"):
+            return subprocess.CompletedProcess(["git", *args], 129, b"",
+                                               said.encode())
+        return subprocess.CompletedProcess(["git", *args], 129, "", said)
+
+
+@pytest.mark.parametrize("shape", ["changes a file", "an empty commit"])
+def test_a_git_without_attr_source_is_refused_by_name(tmp_path, shape):
+    """data-model.md § Landed: an older git is "refused by name". Where the
+    branch changes a file, git stops at the driver check's `check-attr
+    --attr-source`; where it changes none, at the merge. Either way the refusal
+    is `merge-failed` naming the git `land` needs, never a raw `GitError`, and
+    nothing moved (lane 3's review R2 of openDox-code#90, `6035652847`)."""
+    world = World(tmp_path)
+    if shape == "changes a file":
+        world.branch_with(BRANCH, "notes/session.md", "work\n")
+    else:
+        world.git("checkout", "-q", "-b", BRANCH)
+        world.git("commit", "-q", "--allow-empty", "-m", "nothing changed")
+        world.git("checkout", "-q", "main")
+    before = world.refs()
+    port, token = lander(world, runner=GitWithoutAttrSource()), mint(world)
+
+    refused = refusal(port.land, BRANCH, confirmation=token)
+
+    assert refused.code == "merge-failed"
+    assert f"git {landing.ATTR_SOURCE_FLOOR} or later" in str(refused)
+    assert "usage:" not in str(refused)
+    assert world.refs() == before
+    assert world.worktrees() == [world.root.resolve()]
+
+
 # ==========================================================================
 # the governance reading's edges (fail closed)
 # ==========================================================================
@@ -1682,9 +2064,24 @@ def test_a_checkout_whose_path_ends_in_a_space_is_read(tmp_path):
     assert world.head("refs/heads/main") == landed.merge_commit
 
 
+def test_a_checkout_whose_path_ends_in_a_newline_is_read(tmp_path):
+    """The top is asked of git (inside a working tree, empty prefix), never
+    compared as a path, so a legal directory name ending in a newline reads
+    (Copilot's sixth review of openDox-code#90)."""
+    world = World(tmp_path)
+    world.branch_with(BRANCH, "notes/session.md", "work\n")
+    newline = tmp_path / "plain\n"
+    world.root.rename(newline)
+    world.root = newline
+
+    assert landing.repository_governance(newline, env=LOCAL) == STANDALONE
+
+
 def test_a_path_that_is_not_the_top_of_a_working_tree_is_unknown(world, tmp_path):
     (world.root / "notes").mkdir(exist_ok=True)
-    for path in (tmp_path / "nowhere", world.root / "notes", tmp_path):
+    bare = _bare_remote(tmp_path, "bare")
+    for path in (tmp_path / "nowhere", world.root / "notes", tmp_path, bare,
+                 world.root / ".git"):
         reading = landing.read_governance(path, env=LOCAL)
         assert (reading.governance, reading.code) == (UNKNOWN, "not-a-repository")
 
@@ -1706,6 +2103,48 @@ def test_the_view_issuer_is_single_use_and_bound_to_its_branch(world):
                                 third).code == "no-nonce"
     refused = confirmation_refusal(nonces.issue_nonce, BRANCH, "not-a-commit")
     assert refused.code == "bad-binding"
+
+
+def test_a_branch_name_cannot_reorder_a_refusal(tmp_path):
+    """A bidi override in a branch name is shown escaped in every message that
+    names the branch: the conflict, its remedy, and the already-landed
+    refusal (Copilot's sixth review of openDox-code#90)."""
+    world = World(tmp_path)
+    name = "sess\u202e1"
+    world.branch_with(name, "doc.md", "the branch's words\n")
+    world.on_main("doc.md", "main's words\n")
+    port = lander(world)
+
+    with pytest.raises(MergeConflict) as conflict:
+        port.land(name, confirmation=mint(world, name))
+
+    assert "\u202e" not in str(conflict.value)
+    assert repr(name) in conflict.value.remedy
+    world.git("checkout", "-q", "main")
+    world.git("merge", "-q", "-X", "ours", "--no-edit", name)
+    refused = refusal(port.land, name, confirmation=mint(world, name))
+    assert refused.code == "already-landed"
+    assert "\u202e" not in str(refused)
+
+
+@pytest.mark.parametrize("issuer", ["terminal", "view"])
+def test_a_branch_name_ending_in_a_no_break_space_can_be_confirmed(
+        world, monkeypatch, issuer):
+    """git takes `sess-1\u00a0` as a branch, so both issuers mint for it: the
+    binding refuses only an empty name, never one a strip would change
+    (Copilot's sixth review of openDox-code#90)."""
+    name = "sess-1\u00a0"
+    world.branch_with(name, "notes/nbsp.md", "work\n")
+    head = world.head(f"refs/heads/{name}")
+    if issuer == "terminal":
+        at_terminal(monkeypatch, name + "\n")
+        token = landing_confirm.confirm_at_terminal(name, head)
+    else:
+        nonces = landing_confirm.LandingNonces()
+        token = nonces.confirm_nonce(name, nonces.issue_nonce(name, head))
+    assert (token.branch, token.head) == (name, head)
+    landed = lander(world).land(name, confirmation=token)
+    assert world.head("refs/heads/main") == landed.merge_commit
 
 
 def test_the_prompt_shows_a_branch_name_escaped(world, monkeypatch):

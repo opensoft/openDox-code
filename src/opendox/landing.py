@@ -70,11 +70,14 @@ Its `land` (R2Q6 (a)):
   strategy and drivers only: `.gitattributes` and the global attributes file
   are taken out of the merge, a driver this machine's own attributes still
   select is refused before merging, the fallback driver and directory-rename
-  placement are pinned to git's defaults, and rerere is off, so nothing but a
-  human answers a conflict; a conflict raises `MergeConflict` with the paths
+  placement are pinned to git's defaults, the options git applies on a
+  detached HEAD (`branch.HEAD.mergeOptions`) are pinned empty, a driver named
+  like one of git's own attribute states fails, and rerere is off, so nothing
+  but a human answers a conflict; a conflict raises `MergeConflict` with the paths
   and the remedy, and nothing moves (OQ-038-1);
-* then moves `main`: where the served checkout holds it (and is still clean),
-  by `git merge --ff-only <merge commit>` there, the one move feature 007's
+* then moves `main`: where the served checkout holds it (and is still clean,
+  with no IGNORED file where the landing writes, which a fast-forward would
+  overwrite with no word), by `git merge --ff-only <merge commit>` there, the one move feature 007's
   guard admits at the served root (T013); where it holds another branch, the
   landing worktree takes `main` (git refuses that while any other working tree
   holds it, and refuses `main` to every other one meanwhile) and fast-forwards
@@ -173,12 +176,24 @@ _EMPTY_TREE = {
     "sha1": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
     "sha256": "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321",
 }
-#: The `merge` attribute's states that select git's OWN drivers WITHOUT a lookup
-#: by name. Any named value is looked up among the drivers configured by name
-#: FIRST, so even `text` or `binary` can name a configured driver (measured,
-#: git 2.43: `merge.text.driver` answered `merge.default=text`); a driver can
-#: resolve a conflict with no human.
+#: The words `check-attr` prints for the `merge` attribute's three STATES, which
+#: select git's own drivers without a lookup by name. Any named value is looked
+#: up among the drivers configured by name FIRST, so even `text` or `binary` can
+#: name a configured driver (measured, git 2.43: `merge.text.driver` answered
+#: `merge.default=text`); a driver can resolve a conflict with no human.
+#:
+#: THE SAME THREE WORDS ARE ALSO STRING VALUES: `check-attr` prints `set` for
+#: `merge` and for `merge=set` alike, and git looks the string up among the
+#: configured drivers (lane 3's review R2 of openDox-code#90, `6035652847`). So
+#: the landing merge pins a driver by each of these names to one that fails
+#: (`_STATE_NAMED_DRIVERS_FAIL`), and a path that names one stays a conflict.
 _GITS_OWN_MERGE_VALUES = frozenset({"unspecified", "set", "unset"})
+_STATE_NAMED_DRIVERS_FAIL = ("-c", "merge.set.driver=false",
+                             "-c", "merge.unset.driver=false",
+                             "-c", "merge.unspecified.driver=false")
+#: The first git with `--attr-source` (`_attribute_neutral`): an older git is
+#: refused by name (data-model.md § Landed).
+ATTR_SOURCE_FLOOR = "2.42"
 #: How many paths one `check-attr` call names.
 _PATHS_PER_CHECK = 200
 _GITLINK_OR_LINK = ("120000", "160000")
@@ -206,6 +221,65 @@ def _read(git: SessionGit, cwd: Path, *args: str) -> str | None:
 _NO_HOOKS = ("-c", f"core.hooksPath={os.devnull}")
 
 
+#: The transports git carries itself, as `submission_push._GIT_TRANSPORTS`
+#: holds them (a test keeps the two equal). Any other `<scheme>://`, and every
+#: `<name>::`, makes git resolve and run `git-remote-<name>` from `PATH`.
+_GIT_TRANSPORTS = frozenset({"file", "ftp", "ftps", "git", "git+ssh", "http",
+                             "https", "ssh", "ssh+git"})
+_URL_SCHEME = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*)://")
+_HELPER_FORM = re.compile(r"^([A-Za-z0-9][A-Za-z0-9+.\-]*)::")
+#: The lines of a failed probe's stderr a refusal keeps, as `submit` keeps a
+#: failed push's (`submission_push._KEPT_PUSH_STDERR`): git's own `fatal:` and
+#: `error:` lines, and the runner's timeout line. Under `GIT_TRACE_CURL=1` or
+#: `GIT_CURL_VERBOSE=1` the rest is curl's trace of every request header, an
+#: `http.extraheader` secret among them.
+_KEPT_STDERR = re.compile(r"(?:fatal|error): |timed out after ")
+
+
+def _what_git_said(stderr: str) -> str:
+    """Only git's own diagnostic lines of a failed probe's stderr (Copilot's
+    sixth review of openDox-code#90)."""
+    kept = [line.strip() for line in (stderr or "").splitlines()
+            if _KEPT_STDERR.match(line.strip())]
+    return " ".join(kept) or "git's other output is withheld"
+
+
+def _refuse_a_command_transport(name: str, url: str) -> None:
+    """Refuse a push URL whose transport is a program git would run:
+    `<name>::<address>` (`ext::` among them) and any `<scheme>://` git does
+    not carry itself. MEASURED by the submission path on git 2.43.0: either
+    makes git run `git-remote-<name>` from `PATH`. The probe's environment
+    refuses them too (`session_git.PROBE_ENVIRONMENT`); this names the case
+    before anything runs (Copilot's sixth review of openDox-code#90)."""
+    helper = _HELPER_FORM.match(url)
+    scheme = _URL_SCHEME.match(url)
+    transport = (helper.group(1) if helper else
+                 scheme.group(1) if scheme and scheme.group(1) not in _GIT_TRANSPORTS
+                 else None)
+    if transport is not None:
+        raise LandingRefused(
+            f"the remote {name!r}'s push URL names the transport "
+            f"`{shown(transport)}`, which git does not carry itself: reading it "
+            f"would run `git-remote-{shown(transport)}` from PATH, so `land` "
+            "refuses before anything runs. Use an ssh, https, git or file URL, "
+            "or a path", code="remote-transport")
+
+
+def _first_line(stderr: str | None) -> str:
+    """The first line git wrote, where the rest is a usage text."""
+    lines = (stderr or "").strip().splitlines()
+    return lines[0].strip() if lines else ""
+
+
+def _floor_note(stderr: str | None) -> str:
+    """Where git refused `--attr-source`, the git `land` needs, named."""
+    if "--attr-source" not in (stderr or ""):
+        return ""
+    return (f". `land` takes `.gitattributes` out of the merge with `git "
+            f"--attr-source`, which needs git {ATTR_SOURCE_FLOOR} or later, so "
+            "this git is refused by name")
+
+
 def _fresh_merge_driver_name() -> str:
     """A merge-driver name no configuration can have defined in advance: the
     landing merge's `merge.default`, so git's own three-way merge decides every
@@ -220,7 +294,7 @@ def _commit_at(git: SessionGit, ref: str) -> str | None:
     return sha if sha and _OBJECT_ID.match(sha) else None
 
 
-def _redact(text: str) -> str:
+def _redact(text: str, url: str | None = None) -> str:
     """A git message with any credential a remote URL carries removed: the
     userinfo of a URL and every query-string value (12.1a's rule).
 
@@ -229,10 +303,20 @@ def _redact(text: str) -> str:
     whitespace (`?token= secret`), and `git ls-remote` echoes a URL it could not
     read in exactly those shapes (Copilot's third review of openDox-code#90).
     Imported here rather than at the top, so this module keeps its light
-    import."""
-    from opendox.runtime.local_git_adapter import redact_credentials
+    import.
+
+    Where the caller HOLDS the URL, every value it carries in its userinfo,
+    query and fragment is removed by value first, whatever its parameter is
+    named (`#ticket=…`), as `submit` does (`submission_push._scrubbed`;
+    Copilot's sixth review of openDox-code#90)."""
+    if url:
+        from opendox import submission_push
+        scrubbed = submission_push._scrubbed(text or "", url)
+    else:
+        from opendox.runtime.local_git_adapter import redact_credentials
+        scrubbed = redact_credentials(text or "")
     redacted = _URL_QUERY_VALUE.sub(r"\1***", _URL_USERINFO.sub(
-        r"\1***@", redact_credentials(text or "")))
+        r"\1***@", scrubbed))
     # A byte git wrote that is not UTF-8 arrives as a surrogate; a message
     # spells it as an escape, so it can always be printed.
     return redacted.encode("utf-8", "backslashreplace").decode("utf-8")
@@ -246,9 +330,11 @@ class LandingRefused(Exception):
     `not-a-repository`, `no-main`, `no-declaration`, `invalid-declaration`,
     `install-mode-refused`, `install-mode-disagrees`, `host-failed-to-load`,
     `governed-without-an-instrument`, `instrument-failed`,
-    `confirmation:<case>`, `remote-unreadable`, `several-push-urls`,
+    `confirmation:<case>`, `remote-unreadable`, `remote-transport`,
+    `several-push-urls`,
     `remote-main-not-contained`,
-    `dirty-served-checkout`, `main-checked-out-elsewhere`, `merge-failed`,
+    `dirty-served-checkout`, `ignored-files-in-the-way`,
+    `main-checked-out-elsewhere`, `merge-failed`,
     `landing-worktree`, `merge-driver`, `not-a-merge-commit`,
     `fast-forward-no-longer-applies`, `main-moved`,
     `merge-conflict`, `governed` (a governed repository with an instrument
@@ -268,13 +354,13 @@ class MergeConflict(LandingRefused):
         self.branch = branch
         self.paths = tuple(paths)
         self.remedy = (
-            f"bring `main` into {branch} and resolve the conflict there, on the "
+            f"bring `main` into {shown(branch)} and resolve the conflict there, on the "
             "branch, with git (for example `git merge main` in a checkout of "
-            f"{branch}), then land again")
+            f"{shown(branch)}), then land again")
         listed = (", ".join(shown(path) for path in self.paths) if self.paths
                   else "(git named no path)")
         super().__init__(
-            f"{branch} conflicts with `main` in: {listed}. Nothing was merged and "
+            f"{shown(branch)} conflicts with `main` in: {listed}. Nothing was merged and "
             f"`main` is where it was. Remedy: {self.remedy}",
             code="merge-conflict")
 
@@ -512,18 +598,19 @@ def _registered_host() -> _HostReading | None:
 
 
 def _repository_reading(git: SessionGit, root: Path) -> GovernanceReading | str:
-    """`main`'s tip, or why the checkout cannot be read at all (step 1). The
-    top is read with only its trailing newline removed: a directory name may
-    end in a space (Copilot's fourth review of openDox-code#90)."""
+    """`main`'s tip, or why the checkout cannot be read at all (step 1).
+
+    The top is asked of git, never compared as a path: the checkout must be
+    inside a working tree, and its prefix within it must be empty. A path
+    read back from git and compared lost a trailing space, then a trailing
+    newline, both legal in a directory name (Copilot's fourth and sixth
+    reviews of openDox-code#90)."""
+    inside = _read(git, git.served_root, "rev-parse", "--is-inside-work-tree")
     try:
-        top = git.git_raw(git.served_root, "rev-parse", "--show-toplevel")
+        prefix = git.git_raw(git.served_root, "rev-parse", "--show-prefix")
     except GitError:
-        top = None
-    try:
-        is_top = bool(top) and Path(top).resolve() == git.served_root
-    except OSError:
-        is_top = False
-    if not is_top:
+        prefix = None
+    if inside != "true" or prefix != "":
         return _unknown("not-a-repository", (
             f"{root} is not the top of a git working tree, so openDox cannot "
             "read who governs it"))
@@ -716,24 +803,34 @@ class NeutralLander:
         differs (data-model.md § Landed, "The remote check"). A remote with
         several push URLs is refused by name, as `submit` refuses it."""
         try:
-            # `git_raw`: a URL is read as spelled, its trailing spaces included,
-            # since `/srv/remote.git ` and `/srv/remote.git` are two
-            # repositories (Copilot's fourth review of openDox-code#90).
-            listed = self.git.git_raw(self.checkout_root, "remote", "get-url",
+            # READ EXACTLY, as BYTES, git's one terminating newline aside: a URL
+            # keeps its spaces (`/srv/remote.git ` and `/srv/remote.git` are
+            # two repositories), and NO record is dropped, so a URL holding a
+            # newline reads as two and is refused rather than probed in part
+            # (Copilot's fourth and sixth reviews of openDox-code#90;
+            # `submission_push._the_one_push_url`).
+            fields = self.git.git_nul(self.checkout_root, "remote", "get-url",
                                       "--push", "--all", name)
         except GitError as failed:
             raise LandingRefused(
                 f"`land` could not read the remote {name!r}'s push URL "
                 f"({_redact(failed.stderr) or 'no reason given'}); fix or remove "
                 "the remote, then land again", code="remote-unreadable") from None
-        urls = [url for url in listed.split("\n") if url.strip()]
+        urls = "\0".join(fields).removesuffix("\n").split("\n")
         if len(urls) != 1:
             raise LandingRefused(
-                f"the remote {name!r} has {len(urls)} push URLs, and `land` "
-                f"checks the one repository a `git push` of `{DEFAULT_BRANCH}` "
-                "reaches before it merges. Give the remote one push URL "
-                "(`git remote set-url --push`), then land again",
+                f"the remote {name!r} has {len(urls)} push URLs (a URL holding a "
+                f"newline reads as more than one), and `land` checks the one "
+                f"repository a `git push` of `{DEFAULT_BRANCH}` reaches before "
+                "it merges. Give the remote one push URL (`git remote set-url "
+                "--push`), then land again; the URLs are not echoed",
                 code="several-push-urls")
+        if not urls[0]:
+            raise LandingRefused(
+                f"the remote {name!r} has an empty push URL, so `land` cannot "
+                f"read its `{DEFAULT_BRANCH}`; set one (`git remote set-url "
+                "--push`), then land again", code="remote-unreadable")
+        _refuse_a_command_transport(name, urls[0])
         return urls[0]
 
     def _check_remote(self, name: str, main: str) -> None:
@@ -752,7 +849,7 @@ class NeutralLander:
             raise LandingRefused(
                 f"`land` reads the remote {name!r}'s `{DEFAULT_BRANCH}` with "
                 f"`git ls-remote` before it merges, and could not "
-                f"({_redact(failed.stderr) or 'no reason given'}). It refuses "
+                f"({_redact(_what_git_said(failed.stderr), url)}). It refuses "
                 "rather than land a `main` that may not contain the remote's; "
                 "fix or remove the remote, then land again",
                 code="remote-unreadable") from None
@@ -869,12 +966,25 @@ class NeutralLander:
                 "`$GIT_DIR/info/attributes` or the system's gitattributes). Such "
                 "a driver can resolve a conflict with no human, and `land` never "
                 "lets one (#1144 12.6), so nothing was merged. Remove the "
-                f"attribute, or merge {branch} with git yourself",
+                f"attribute, or merge {shown(branch)} with git yourself",
                 code="merge-driver")
 
     def _merge(self, path: Path, branch: str, head: str, main: str) -> str:
-        neutral = self._attribute_neutral(path)
-        self._refuse_merge_drivers(path, neutral, branch, main, head)
+        try:
+            neutral = self._attribute_neutral(path)
+            self._refuse_merge_drivers(path, neutral, branch, main, head)
+        except GitError as failed:
+            # A git older than `ATTR_SOURCE_FLOOR` stops here, at `check-attr
+            # --attr-source`: refused by name, with a code T016's routes map,
+            # never a raw `GitError` (lane 3's review R2 of openDox-code#90).
+            raise LandingRefused(
+                f"git could not read the `merge` attribute of the paths "
+                f"{shown(branch)} and `{DEFAULT_BRANCH}` changed "
+                f"({_redact(_first_line(failed.stderr)) or 'no reason given'}). "
+                "`land` reads it, and merges, with `git --attr-source`, which "
+                f"needs git {ATTR_SOURCE_FLOOR} or later, so an older git is "
+                f"refused by name; nothing was merged and `{DEFAULT_BRANCH}` is "
+                "where it was", code="merge-failed") from None
         message = (f"Merge branch '{branch}'\n\n"
                    f"Landed with `opendox land`: a human confirmed {branch} at "
                    f"{head}.\n")
@@ -895,10 +1005,21 @@ class NeutralLander:
             #   `merge..driver`, and `text` by `merge.text.driver`);
             # - `merge.directoryRenames=true` places a file added under a
             #   directory the other side renamed, with no conflict, where git's
-            #   default stops and shows it.
+            #   default stops and shows it;
+            # - `branch.HEAD.mergeOptions`: the merge runs on a DETACHED HEAD,
+            #   and there git applies the options configured for a branch
+            #   named `HEAD`. `-X theirs` answered a conflict, and `-s ours`
+            #   (tried before `--strategy=ort`) dropped the branch's change
+            #   while the parents check passed (lane 3's review R2 of
+            #   openDox-code#90, `6035652847`);
+            # - a driver named `set`, `unset` or `unspecified`, which
+            #   `check-attr` cannot tell from git's own states, fails, so the
+            #   path stays a conflict (`_STATE_NAMED_DRIVERS_FAIL`).
             self.git.git_raw(path, *neutral, *_NO_HOOKS, "-c", "rerere.enabled=false",
                              "-c", f"merge.default={_fresh_merge_driver_name()}",
                              "-c", "merge.directoryRenames=conflict",
+                             "-c", "branch.HEAD.mergeOptions=",
+                             *_STATE_NAMED_DRIVERS_FAIL,
                              "merge", "--strategy=ort", "--no-ff", "--no-edit",
                              "-m", message, head)
         except GitError as failed:
@@ -907,8 +1028,12 @@ class NeutralLander:
             paths = tuple(dict.fromkeys(p for p in unmerged if p))
             if paths:
                 raise MergeConflict(branch, paths) from None
+            floor = _floor_note(failed.stderr)
+            # git's own words, but where it refused `--attr-source` only its
+            # first line: the rest is a usage text.
+            said = _first_line(failed.stderr) if floor else failed.stderr
             raise LandingRefused(
-                f"git could not merge {branch} ({_redact(failed.stderr)}); "
+                f"git could not merge {shown(branch)} ({_redact(said)}){floor}; "
                 "nothing was merged and `main` is where it was",
                 code="merge-failed") from None
         merged = self.git.git(path, "rev-parse", "HEAD")
@@ -916,12 +1041,43 @@ class NeutralLander:
                                merged).split()
         if parents != [merged, main, head]:
             raise LandingRefused(
-                f"the merge of {branch} did not make a merge commit of `main` "
-                f"and {branch} (git made {merged[:12]} with parents "
+                f"the merge of {shown(branch)} did not make a merge commit of `main` "
+                f"and {shown(branch)} (git made {merged[:12]} with parents "
                 f"{' '.join(p[:12] for p in parents[1:]) or 'none'}), so nothing "
                 "lands: a landing is a `--no-ff` merge commit that `git revert -m "
                 "1` undoes (#1144 12.6)", code="not-a-merge-commit")
         return merged
+
+    def _ignored_in_the_way(self, main: str, merged: str) -> tuple[str, ...]:
+        """The served checkout's IGNORED files that the fast-forward to `merged`
+        would write over: a path the merge writes, a file under one, or a file
+        where it needs a directory. "Clean" leaves ignored files out, and `git
+        merge --ff-only` overwrites them with no word (MEASURED, git 2.43: an
+        ignored `local.env`, `build/sub/out.bin` under an ignored `build/`, and
+        an ignored file `keep` where the branch adds `keep/x`). A path is the
+        branch author's to choose, so ADV-08's refusal covers them (lane 3's
+        review R2 of openDox-code#90, `6035652847`)."""
+        written = [name for name in self.git.git_nul(
+            self.checkout_root, "diff", "--no-ext-diff", "--no-textconv",
+            "--no-renames", "--name-only", "-z", main, merged) if name]
+        specs: set[str] = set(written)
+        for name in written:
+            parts = name.split("/")
+            for depth in range(1, len(parts)):
+                ancestor = "/".join(parts[:depth])
+                at = self.checkout_root / ancestor
+                if at.is_symlink() or (at.exists() and not at.is_dir()):
+                    specs.add(ancestor)
+        ordered = sorted(specs)
+        found: list[str] = []
+        for start in range(0, len(ordered), _PATHS_PER_CHECK):
+            # `:(literal)`: a name is a path, never a pattern; a pathspec names
+            # the path and everything under it.
+            found.extend(self.git.git_nul(
+                self.checkout_root, "ls-files", "-z", "--others", "--ignored",
+                "--exclude-standard", "--",
+                *(f":(literal){spec}" for spec in ordered[start:start + _PATHS_PER_CHECK])))
+        return tuple(dict.fromkeys(path for path in found if path))
 
     def _advance_main(self, path: Path, merged: str, main: str,
                       holds_main: bool) -> str:
@@ -934,6 +1090,18 @@ class NeutralLander:
                     f"`{DEFAULT_BRANCH}` is where it was. Land again",
                     code="fast-forward-no-longer-applies")
             self._check_served()
+            in_the_way = self._ignored_in_the_way(main, merged)
+            if in_the_way:
+                listed = ", ".join(shown(name) for name in in_the_way[:5])
+                more = (f" and {len(in_the_way) - 5} more" if len(in_the_way) > 5
+                        else "")
+                raise LandingRefused(
+                    f"the served checkout {self.checkout_root} holds IGNORED "
+                    f"files where the landing writes ({listed}{more}). `git merge "
+                    "--ff-only` would overwrite them with no word, so `main` is "
+                    "where it was and nothing landed. Remedy: move them out of "
+                    "the way (or commit them), then land again (ADV-08)",
+                    code="ignored-files-in-the-way")
             try:
                 self.git.fast_forward_served(merged)
             except (GitError, SessionGitRefused) as failed:
@@ -1009,7 +1177,7 @@ class NeutralLander:
                                  code=f"confirmation:{refused.code}") from None
         if self.git.is_ancestor(head, main):
             raise LandingRefused(
-                f"{branch} at {head[:12]} is already contained in "
+                f"{shown(branch)} at {head[:12]} is already contained in "
                 f"`{DEFAULT_BRANCH}`: there is nothing to land",
                 code="already-landed")
         self._check_remotes(main)
@@ -1096,6 +1264,6 @@ def request_landing(checkout_root: Path | str, branch: str, *,
     # limit (Copilot review of openDox-code#90).
     if _commit_at(git, f"refs/heads/{branch}") != head:
         raise LandingRefused(
-            f"{branch} moved after the human confirmed it at {head[:12]}, so "
+            f"{shown(branch)} moved after the human confirmed it at {head[:12]}, so "
             "nothing was submitted: confirm the new head", code="confirmation:another-head")
     return submit(branch)

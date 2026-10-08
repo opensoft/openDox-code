@@ -634,7 +634,8 @@ def test_the_served_root_admits_the_landings_fast_forward_on_a_clean_main(
     assert (*sg.SERVED_FAST_FORWARD_ARGV, ahead) in runner.calls
 
 
-@pytest.mark.parametrize("via", ["fast_forward_served", "the funnel"])
+@pytest.mark.parametrize("via", ["fast_forward_served", "the funnel",
+                                 "the bytes reader"])
 @pytest.mark.parametrize("setting", [("pull.twohead", "ours"),
                                      ("branch.main.mergeOptions", "-s ours"),
                                      ("branch.main.mergeOptions", "-s subtree"),
@@ -653,8 +654,10 @@ def test_no_merge_setting_turns_the_fast_forward_into_a_merge(git_and_repo,
 
     if via == "fast_forward_served":
         assert git.fast_forward_served(ahead) == ahead
-    else:
+    elif via == "the funnel":
         git.git(repo.root, "merge", "--ff-only", ahead)
+    else:
+        git.git_nul(repo.root, "merge", "--ff-only", ahead)
 
     assert repo.head("main") == ahead
     assert repo.head() == ahead
@@ -827,7 +830,8 @@ def test_a_branch_whose_name_only_looks_like_main_is_never_fast_forwarded(
         git.fast_forward_served(ahead)
 
     assert "merge" not in [sg.command_subcommand(c) for c in runner.calls[n:]]
-    assert (repo.head(lookalike), repo.head("main")) == before
+    after = (repo.head(lookalike), repo.head("main"))
+    assert after == before
     assert repr(lookalike) in str(refused.value)
 
 
