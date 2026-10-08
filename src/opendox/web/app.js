@@ -1691,8 +1691,12 @@ async function render() {
     // `actions.submit` and never on `session` (OQ-12-14): the key is present
     // only where openDox's default profile contributed the route. It proposes
     // the branch on screen, and a composed render offers no control (D10).
+    // The route submits from the SERVED checkout alone, so the control is
+    // offered only while the active repository is the one `/capabilities`
+    // declares (the view decides, `servesTheActiveRepository`).
     mountBranchActions(document.getElementById("branchactions"), {
       caps, composed, branch: safeKey(active)?.ref || null,
+      repository: safeKey(active)?.repository || null,
     });
     initAbout(signal);
     // global header search (#13): fan out to the active view's search hook.

@@ -1435,6 +1435,10 @@ def test_the_submit_route_is_addressed_by_the_branch_actions_view_alone() -> Non
     shell = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
     assert 'from "./views/branch-actions.js"' in shell
     assert 'getElementById("branchactions")' in shell
+    # the shell hands the view the ACTIVE repository, which the view holds
+    # to the served one before it offers the control (12.4a: the route
+    # submits from the served checkout alone)
+    assert "repository: safeKey(active)?.repository" in shell
     assert 'id="branchactions"' in (WEB_ROOT / "index.html").read_text(
         encoding="utf-8")
 

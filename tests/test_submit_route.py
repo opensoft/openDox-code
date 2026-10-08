@@ -580,7 +580,9 @@ const doc = { createElement: node };
 function host() { const h = node("span"); h.ownerDocument = doc; return h; }
 const m = await import("./branch-actions.js");
 const TOKEN = "Tk_" + "a".repeat(40);
-const live = { actions: { submit: true, session: true }, console_token: TOKEN };
+const SERVED = "served-repo";
+const live = { actions: { submit: true, session: true }, console_token: TOKEN,
+               repository: SERVED };
 const calls = [];
 const answering = (status, payload) => async (url, options) => {
   calls.push({ url, options });
@@ -598,6 +600,14 @@ out.capable = {
 };
 out.proposed = [m.proposedBranch("sess-1"), m.proposedBranch("main"),
                 m.proposedBranch(""), m.proposedBranch(undefined)];
+out.serves = {
+  served: m.servesTheActiveRepository(live, SERVED),
+  other: m.servesTheActiveRepository(live, "other-repo"),
+  noActive: m.servesTheActiveRepository(live, null),
+  undeclared: m.servesTheActiveRepository({ ...live, repository: undefined }, SERVED),
+  emptyDeclared: m.servesTheActiveRepository({ ...live, repository: "" }, ""),
+  nothing: m.servesTheActiveRepository(undefined, SERVED),
+};
 
 let h = host();
 h.textContent = "stale";
@@ -606,11 +616,20 @@ let c = m.mountBranchActions(h, { caps: { actions: { session: true },
 out.unoffered = { enabled: c.enabled, children: h.children.length,
                   text: h.textContent, submitted: await c.submit() };
 h = host();
-c = m.mountBranchActions(h, { caps: live, branch: "sess-1", composed: true });
+c = m.mountBranchActions(h, { caps: live, branch: "sess-1", repository: SERVED,
+                              composed: true });
 out.composed = { enabled: c.enabled, children: h.children.length };
-
 h = host();
 c = m.mountBranchActions(h, { caps: live, branch: "sess-1",
+                              repository: "other-repo" });
+out.otherRepository = { enabled: c.enabled, children: h.children.length };
+h = host();
+c = m.mountBranchActions(h, { caps: { ...live, repository: undefined },
+                              branch: "sess-1", repository: SERVED });
+out.undeclared = { enabled: c.enabled, children: h.children.length };
+
+h = host();
+c = m.mountBranchActions(h, { caps: live, branch: "sess-1", repository: SERVED,
   fetcher: answering(200, { remote: "origin", ref: "refs/heads/sess-1",
                             url: "/srv/remote", branch: "sess-1",
                             commit: "0123456789abcdef0123" }) });
@@ -625,7 +644,7 @@ out.request = { url: calls[0].url, method: calls[0].options.method,
 out.afterSuccess = { disabled: button.disabled, cls: message.className };
 
 h = host();
-c = m.mountBranchActions(h, { caps: live, branch: "main",
+c = m.mountBranchActions(h, { caps: live, branch: "main", repository: SERVED,
                               fetcher: answering(200, {}) });
 out.mainValue = h.children[0].value;
 calls.length = 0;
@@ -635,14 +654,14 @@ out.mainTyped = await c.submit();
 out.mainCalls = calls.length;
 
 h = host();
-c = m.mountBranchActions(h, { caps: live, branch: "sess-2",
+c = m.mountBranchActions(h, { caps: live, branch: "sess-2", repository: SERVED,
   fetcher: answering(409, { ok: false, error: "no_submission_target",
                             message: "no remote is attached" }) });
 out.refused = await c.submit();
 out.refusedCls = h.children[2].className;
 
 h = host();
-c = m.mountBranchActions(h, { caps: live, branch: "sess-3",
+c = m.mountBranchActions(h, { caps: live, branch: "sess-3", repository: SERVED,
   fetcher: async () => { throw new Error("offline"); } });
 out.thrown = await c.submit();
 out.thrownEnabled = !h.children[1].disabled;
@@ -684,6 +703,20 @@ def test_the_control_is_keyed_on_submit_and_the_token(control) -> None:
     assert control["nullHost"] is None
     # D10: a composed render is read-only, so no acting control is offered
     assert control["composed"] == {"enabled": False, "children": 0}
+
+
+def test_the_control_is_offered_only_for_the_served_repository(control) -> None:
+    """The route submits from the SERVED checkout alone and takes no
+    repository from the request (12.4a), so the control is offered only
+    while the active repository is the one `/capabilities` declares as
+    `repository`. With another repository active it would offer that
+    repository's branch name, and the push would go out from the served one
+    (Copilot's finding on #96 at `39a73a33`)."""
+    assert control["serves"] == {"served": True, "other": False,
+                                 "noActive": False, "undeclared": False,
+                                 "emptyDeclared": False, "nothing": False}
+    assert control["otherRepository"] == {"enabled": False, "children": 0}
+    assert control["undeclared"] == {"enabled": False, "children": 0}
 
 
 def test_the_control_posts_the_branch_and_shows_where_it_went(control) -> None:
