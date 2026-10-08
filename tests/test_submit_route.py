@@ -750,3 +750,43 @@ def test_the_control_states_a_refusal_in_the_servers_words(control) -> None:
     assert control["thrownEnabled"] is True
     assert control["describe"] == ["not submitted: HTTP 500",
                                    "not submitted: loopback_only"]
+
+
+# --------------------------------------------------------------------------
+# The account menu names the verb `actions.submit` grants (Codex's P2 on #96;
+# `views/account-menu.js` admitted for its one word by #656 `6069024568`).
+# --------------------------------------------------------------------------
+
+_ACCESS_PROBE = r"""
+const am = await import("./account-menu.js");
+process.stdout.write(JSON.stringify({
+  standalone: am.accessLevel({ actions: { gate: true, edit: true,
+                                          session: true, submit: true } }),
+  offeredAlone: am.accessLevel({ actions: { submit: true } }),
+  notGranted: am.accessLevel({ actions: { session: true, submit: false } }),
+  hostPlane: am.accessLevel({ actions: { session: true } }),
+}));
+"""
+
+
+def test_the_account_menu_names_submit_where_it_is_granted(tmp_path) -> None:
+    """`submit` is a write-class verb of its own, split from `session`
+    (OQ-12-14), so the menu's access line names it where `actions.submit` is
+    true, and only there: a host's plane, which carries no key, reads as it
+    did."""
+    if NODE is None:
+        pytest.skip("node not available for the account menu's probe")
+    for name in ("account-menu.js", "helpers.js"):
+        shutil.copy(WEB / "views" / name, tmp_path / name)
+    (tmp_path / "package.json").write_text('{"type": "module"}', encoding="utf-8")
+    probe = tmp_path / "probe.mjs"
+    probe.write_text(_ACCESS_PROBE, encoding="utf-8")
+    done = subprocess.run([NODE, str(probe)], capture_output=True, text=True,
+                          timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout) == {
+        "standalone": "gate, edit, session, submit",
+        "offeredAlone": "submit",
+        "notGranted": "session",
+        "hostPlane": "session",
+    }
