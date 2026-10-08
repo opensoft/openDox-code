@@ -252,7 +252,8 @@ def test_the_corpus_holds_exactly_the_declared_files() -> None:
 @pytest.mark.parametrize("old_id", sorted(PLANTED))
 def test_each_planted_document_exists_under_its_old_id(old_id: str) -> None:
     document = CORPUS / PLANTED[old_id]
-    assert document.is_file() and not document.is_symlink(), PLANTED[old_id]
+    assert document.is_file(), PLANTED[old_id]
+    assert not document.is_symlink(), PLANTED[old_id]
     assert document.stem == old_id, (
         f"{PLANTED[old_id]} must be named after its old id {old_id!r}")
 
@@ -294,7 +295,8 @@ def test_the_empty_stub_is_empty() -> None:
     text = _text(EMPTY_STUB)
     header, body = _header_and_body(text)
     assert text.strip(), "a zero-byte stub would also lack its neutral fields"
-    assert header.get("title") and header.get("summary")
+    assert header.get("title"), f"{EMPTY_STUB} keeps its title"
+    assert header.get("summary"), f"{EMPTY_STUB} keeps its summary"
     assert body.strip() == "", f"{EMPTY_STUB} must carry no body at all"
     assert _content_lines(body) == []
 
@@ -360,7 +362,7 @@ def test_the_near_duplicate_pair_ties_and_path_order_picks_the_document() -> Non
     first, last = NEAR_DUPLICATE_PAIR
     assert sorted(NEAR_DUPLICATE_PAIR) == [first, last]
     assert max(NEAR_DUPLICATE_PAIR) == NEAR_DUPLICATE_REPORTED
-    assert NEAR_DUPLICATE_REPORTED == PLANTED["near-duplicate"]
+    assert PLANTED["near-duplicate"] == NEAR_DUPLICATE_REPORTED
     assert first not in {*PLANTED.values(), EMPTY_STUB}
     assert "near-duplicate" not in first, "no substring match may find both"
     similarity = _jaccard(_text(first), _text(last))
@@ -396,7 +398,8 @@ def test_only_the_entry_documents_and_the_planted_orphan_have_no_inbound_link(
     for entry in ENTRY_DOCUMENTS:
         stem = posixpath.splitext(posixpath.basename(entry))[0].lower()
         assert stem in ("readme", "index"), f"{entry} is not an entry document"
-        assert entry not in PLANTED.values() and entry != EMPTY_STUB
+        assert entry not in PLANTED.values(), entry
+        assert entry != EMPTY_STUB, entry
 
 
 def test_the_plain_documents_measurement_is_why_it_is_not_the_base() -> None:
