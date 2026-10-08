@@ -15,12 +15,15 @@ The CLI half of F12.2's submission block, case by case:
     verb;
   * the default branch is refused by name, and never reaches the port, a
     host's included (R2Q5 (a));
-  * the install mode is not read; `--local` is refused only where the selector
-    refuses it, beside `OPENDOX_INSTALL_MODE=hosted`, naming both (N-17;
-    R2Q9 (a) item 7);
+  * the install mode is not read; `--local` is refused only where it
+    disagrees with `OPENDOX_INSTALL_MODE=hosted`, naming both, and beside any
+    other value it is accepted (N-17; R2Q9 (a) item 7);
   * no actor gate (OQ-12-9);
   * under `governed`, the verb goes through the host's contributed port and
     reports where the work went (R2Q4 (a));
+  * a failure the port did not name, from the binding or the port, is
+    refused with a fixed sentence naming its type alone, never its text and
+    never a traceback (12.1a), as the route answers it;
   * the verb is the default profile's contribution, and a host profile that
     replaces the default has no `submit` (N-2; R2Q3 (a)).
 
@@ -255,31 +258,35 @@ def test_local_is_accepted_where_it_agrees(
     assert _tip(origin, "sess-1") == _tip(checkout, "sess-1")
 
 
+@pytest.mark.parametrize("mode", ["hosted", " hosted "])
 def test_local_beside_hosted_is_refused_naming_both(
-        checkout: Path, origin: Path, standalone_profile,
+        checkout: Path, origin: Path, standalone_profile, mode,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture) -> None:
     """R2Q9 (a) item 7: a flag and a setting that disagree are refused, naming
-    both, before anything is pushed."""
-    monkeypatch.setenv("OPENDOX_INSTALL_MODE", "hosted")
+    both, before anything is pushed. The setting is read as the selector
+    reads it, stripped."""
+    monkeypatch.setenv("OPENDOX_INSTALL_MODE", mode)
     status, out, err = _submit(capsys, checkout, "--local")
     assert (status, out) == (1, "")
-    assert err.startswith("submit refused: --local selects the LOCAL install")
-    assert "OPENDOX_INSTALL_MODE=hosted" in err, err
+    assert err == f"submit refused: {cli_branch_actions.LOCAL_BESIDE_HOSTED}\n"
+    assert "--local" in err and "OPENDOX_INSTALL_MODE=hosted" in err, err
     assert _heads(origin) == ""
 
 
-def test_local_beside_an_unreadable_selector_is_refused_naming_it(
-        checkout: Path, origin: Path, standalone_profile,
+@pytest.mark.parametrize("mode", ["Hosted", "Local", "single-user"])
+def test_local_beside_any_other_value_is_accepted(
+        checkout: Path, origin: Path, standalone_profile, mode,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture) -> None:
-    """With `--local`, the selector is asked as `generate-and-open` asks it,
-    so a value it cannot read is refused by name rather than guessed at."""
-    monkeypatch.setenv("OPENDOX_INSTALL_MODE", "Local")
+    """The contract refuses `--local` ONLY where it disagrees with
+    `OPENDOX_INSTALL_MODE=hosted` (N-17). A value the selector matches as
+    neither shape, case included, is not this verb's to judge: the verb does
+    not depend on the mode, so it pushes."""
+    monkeypatch.setenv("OPENDOX_INSTALL_MODE", mode)
     status, _out, err = _submit(capsys, checkout, "--local")
-    assert status == 1
-    assert "OPENDOX_INSTALL_MODE is 'Local'" in err, err
-    assert _heads(origin) == ""
+    assert (status, err) == (0, ""), err
+    assert _tip(origin, "sess-1") == _tip(checkout, "sess-1")
 
 
 # --------------------------------------------------------------------------
@@ -317,12 +324,15 @@ class _ContributedPort:
     """A governed host's own `SubmissionPort`, contributed through the CLI's
     `_submission_port` binding."""
 
-    def __init__(self, answer=None):
+    def __init__(self, answer=None, raises=None):
         self.asked: list[str] = []
         self.answer = answer
+        self.raises = raises
 
     def submit(self, branch: str):
         self.asked.append(branch)
+        if self.raises is not None:
+            raise self.raises
         if self.answer is not None:
             return self.answer
         return session_pr.Submission(
@@ -359,6 +369,36 @@ def test_the_default_branch_never_reaches_a_contributed_port(
     status, _out, err = _submit(capsys, checkout, branch="main")
     assert status == 1 and "`main` is the default branch" in err, err
     assert port.asked == []
+
+
+@pytest.mark.parametrize("raised_by", ["binding", "port"])
+def test_a_port_failure_it_did_not_name_is_refused_without_its_text(
+        checkout: Path, origin: Path, standalone_profile, raised_by: str,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture) -> None:
+    """Lane 3's review R1 of T015 (#656 `6064547745`), the route's
+    `test_a_port_failure_it_did_not_name_is_reported_without_its_text` for
+    the verb. A host's binding that cannot build its port, or a host's port
+    whose `submit` raises something other than a `SubmissionError`: a fixed
+    refusal naming the TYPE alone and exit 1, never the exception's text (here
+    a credential in a remote URL, 12.1a) and never a traceback."""
+    secret = "S3CRET-from-a-host-port"
+    failure = RuntimeError(f"push to https://user:{secret}@forge.example/x failed")
+    port = _ContributedPort(raises=failure)
+
+    def binding(_root: Path) -> _ContributedPort:
+        if raised_by == "binding":
+            raise failure
+        return port
+
+    monkeypatch.setattr(cli, "_submission_port", binding)
+    status, out, err = _submit(capsys, checkout)
+    assert (status, out) == (1, "")
+    assert err == ("submit refused: " + cli_branch_actions.UNNAMED_FAILURE.format(
+        kind="RuntimeError") + "\n"), err
+    assert secret not in err and "Traceback" not in err
+    assert port.asked == ([] if raised_by == "binding" else ["sess-1"])
+    assert _heads(origin) == ""
 
 
 @pytest.mark.parametrize("missing", cli_branch_actions.SUBMISSION_FIELDS)

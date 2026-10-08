@@ -39,8 +39,12 @@ checkout, and nothing is pushed.
 
 WHAT IT ANSWERS: the `Submission` object (data-model.md) with 200, or a named
 refusal, `{"ok": false, "error": <name>, "message": <sentence>}`. A refusal's
-message is the port's own, which is redacted by 12.1a's rule, or a fixed
-sentence of this module's; nothing else a request carried is echoed.
+message is either a fixed sentence of this module's, which echoes nothing a
+request carried, or the act's own (`submit_branch`, then the port's), which
+is redacted by 12.1a's rule and may name the requested `branch` back to the
+console that sent it, as JSON the view renders as text. Nothing else a request
+carried is echoed. A failure the port did not name is answered with a fixed
+sentence, and only the exception's type reaches the server log.
 
 IMPORT WEIGHT. The standard library alone at import, because
 `opendox.default_profile` imports this module and must import with nothing

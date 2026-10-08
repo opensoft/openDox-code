@@ -29,10 +29,12 @@ THE INSTALL MODE IS NOT READ (decision N-17; ADV-04). The verb pushes the
 invoking user's own checkout with that user's own git, which a hosted plane
 never holds, so it does not depend on the mode, and F12.2 runs it with neither
 `--local` nor `OPENDOX_INSTALL_MODE`. `--local` is accepted, as
-`generate-and-open` accepts it (R2Q9 (a) item 7), and is refused only where
-the selector refuses it: beside `OPENDOX_INSTALL_MODE=hosted`, naming both, or
-beside a value that is neither `local` nor `hosted`, naming it
-(`runtime.config.install_mode`, the one reading of the selector).
+`generate-and-open` accepts it (R2Q9 (a) item 7), and is refused ONLY where it
+disagrees with `OPENDOX_INSTALL_MODE=hosted`, naming both (the contract's
+words). That value is read as `runtime.config.install_mode` reads it, stripped
+and matched case included; any other value, one the selector itself would
+refuse included, is not this verb's to judge, since the verb does not depend
+on the mode.
 
 NO ACTOR GATE (OQ-12-9). The verb runs as the invoking user, in that user's
 checkout. F12.2 runs it non-interactively, with no actor.
@@ -41,7 +43,11 @@ REFUSALS: a named sentence on stderr and exit 1, with nothing pushed and no
 traceback (requirement 11's fourth scenario): `main`; no remote, or several
 and none named `origin` (`NoSubmissionTarget`); a remote with several push
 URLs, a rejected push or a failed transport (`SubmissionRefused`). Every
-message is the port's own, which 12.1a redacts.
+such message is the port's own, which 12.1a redacts. A failure the port did
+NOT name (any other exception, from the binding or from the port) is refused
+with a fixed sentence naming its TYPE alone, as the route answers it: its text
+is a host's port's, which this verb cannot vet, and it may carry a remote
+URL's credential (12.1a).
 
 IMPORT WEIGHT. The standard library and `opendox.session_pr` (itself
 standard-library only) at import, because `opendox.default_profile` imports
@@ -60,13 +66,28 @@ from pathlib import Path
 from opendox.session_pr import SubmissionError, SubmissionRefused
 
 __all__ = [
-    "SUBMISSION_FIELDS", "BranchActionSubcommands", "cmd_submit",
-    "submission_object", "submit_branch",
+    "LOCAL_BESIDE_HOSTED", "SUBMISSION_FIELDS", "UNNAMED_FAILURE",
+    "BranchActionSubcommands", "cmd_submit", "submission_object",
+    "submit_branch",
 ]
 
 #: The `Submission` report's fields, in the order the verb prints them
 #: (data-model.md § Submission; 12.1a).
 SUBMISSION_FIELDS = ("remote", "ref", "url", "branch", "commit")
+
+#: The refusal of `--local` beside `OPENDOX_INSTALL_MODE=hosted` (N-17).
+LOCAL_BESIDE_HOSTED = (
+    "--local selects the LOCAL install and OPENDOX_INSTALL_MODE=hosted selects "
+    "the HOSTED one. Both are explicit selections and they disagree, so "
+    "neither overrides the other. submit does not depend on the install mode: "
+    "drop the flag, or unset OPENDOX_INSTALL_MODE (or set it to `local`)")
+
+#: The refusal of a failure the port did not name. `{kind}` is the
+#: exception's type, and nothing else of it is printed (12.1a).
+UNNAMED_FAILURE = (
+    "the submission port raised {kind}, a failure it did not name, so nothing "
+    "is reported as submitted. Its text is not printed: it is a host's port's, "
+    "which this verb cannot vet")
 
 
 def _core():
@@ -120,17 +141,18 @@ def submit_branch(port, branch: str) -> dict[str, str]:
 def _install_mode_refusal(args: argparse.Namespace) -> str | None:
     """Why `--local` is refused here, or None (decision N-17).
 
-    Without `--local` nothing is read. With it, the selector is asked as
-    `generate-and-open` asks it, and its refusal is this verb's.
+    Without `--local` nothing is read. With it, the one selection the flag can
+    disagree with is `OPENDOX_INSTALL_MODE=hosted`, read as the selector reads
+    it (stripped, case included); every other value is accepted, since the
+    verb does not depend on the mode.
     """
     if not args.local:
         return None
     from opendox.runtime import config as runtime_config
 
-    try:
-        runtime_config.install_mode(os.environ, local_flag=True)
-    except runtime_config.ConfigurationError as exc:
-        return str(exc)
+    selected = os.environ.get(runtime_config.PREFIX + "INSTALL_MODE", "")
+    if selected.strip() == runtime_config.INSTALL_MODE_HOSTED:
+        return LOCAL_BESIDE_HOSTED
     return None
 
 
@@ -153,6 +175,11 @@ def cmd_submit(args: argparse.Namespace) -> int:
                                args.branch)
     except SubmissionError as exc:
         print(f"submit refused: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - a host's binding or port, unvetted
+        print("submit refused: "
+              + UNNAMED_FAILURE.format(kind=type(exc).__name__),
+              file=sys.stderr)
         return 1
     if args.json:
         print(json.dumps(report))
