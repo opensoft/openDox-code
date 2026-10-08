@@ -176,7 +176,8 @@ def cmd_submit(args: argparse.Namespace) -> int:
     except SubmissionError as exc:
         print(f"submit refused: {exc}", file=sys.stderr)
         return 1
-    except Exception as exc:  # noqa: BLE001 - a host's binding or port, unvetted
+    # A host's binding or port, unvetted: its type is all this verb prints.
+    except Exception as exc:  # noqa: BLE001
         print("submit refused: "
               + UNNAMED_FAILURE.format(kind=type(exc).__name__),
               file=sys.stderr)

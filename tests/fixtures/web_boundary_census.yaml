@@ -191,7 +191,7 @@ measured_at: "opensoft/openDox-code main a99eba03e31a0aee1cc15a061fdf718cc88a2c4
 # shape and `test_the_declared_totals_are_re_derived_from_the_rows` can refuse a
 # drift between the two. Measured at slice S4 (see the S4 block above).
 totals:
-  A: {files: 27, loc: 18884}
+  A: {files: 27, loc: 18886}
   B: {files: 1, loc: 73}
   C: {files: 14, loc: 12792}
   "?": {files: 1, loc: 1586}
@@ -233,7 +233,7 @@ files:
 
   - path: views/branch-actions.js
     class: A
-    loc: 117
+    loc: 119
     note: "plan 038 T015 ADDITION (created, no manifest row -- RULED OQ-C): openDox's OWN submit control (#1144 12.4a). Its one route, ACTIONS_SESSION_SUBMIT_ROUTE (`/actions/session/submit`), is answered by openDox's own `serve_branch_actions.py`, contributed by openDox's default profile, so it addresses no route another column declares. Keyed on `actions.submit` and never on `session` (OQ-12-14, refined by ADV-14); never in the `doxbench-*.js` files; a composed render offers no control (D10). Import-free, no governance word."
 
   - path: views/bullseye.js

@@ -62,7 +62,7 @@ from test_submission_default import (  # noqa: F401 - fixtures, by name
 OPENDOX = Path(sys.executable).with_name("opendox")
 
 
-@pytest.fixture()
+@pytest.fixture
 def standalone_profile():
     """openDox's OWN default profile for one case, and the suite's host
     profile put back afterwards exactly as it was."""
@@ -218,9 +218,11 @@ def test_a_credential_in_the_remote_url_reaches_neither_report_nor_refusal(
     assert _tip(remote, "sess-1") == _tip(checkout, "sess-1")
     report = json.loads(json_out)
     for text in (out, json_out, report["url"]):
-        assert host in text and "/remote.git" in text, text
+        assert host in text, text
+        assert "/remote.git" in text, text
     status, refused_out, refused = _submit(capsys, checkout)
-    assert status == 1 and host in refused, refused
+    assert status == 1, refused
+    assert host in refused, refused
     for text in (out, json_out, refused_out, refused):
         for secret in (USERINFO_SECRET, TOKEN, TICKET):
             assert secret not in text, text
@@ -270,7 +272,8 @@ def test_local_beside_hosted_is_refused_naming_both(
     status, out, err = _submit(capsys, checkout, "--local")
     assert (status, out) == (1, "")
     assert err == f"submit refused: {cli_branch_actions.LOCAL_BESIDE_HOSTED}\n"
-    assert "--local" in err and "OPENDOX_INSTALL_MODE=hosted" in err, err
+    assert "--local" in err, err
+    assert "OPENDOX_INSTALL_MODE=hosted" in err, err
     assert _heads(origin) == ""
 
 
@@ -310,8 +313,9 @@ def test_submit_needs_no_actor(
     status, _out, err = _submit(capsys, checkout)
     assert (status, err) == (0, ""), err
     assert _tip(origin, "sess-1") == _tip(checkout, "sess-1")
+    parser = cli.build_parser()
     with pytest.raises(SystemExit):
-        cli.build_parser().parse_args(
+        parser.parse_args(
             ["submit", "--repo-root", str(checkout), "--branch", "sess-1",
              "--actor", "tester"])
 
@@ -355,7 +359,8 @@ def test_a_contributed_port_is_what_the_verb_submits_through(
     monkeypatch.setattr(cli, "_submission_port", contributed)
     status, out, err = _submit(capsys, checkout)
     assert (status, err) == (0, ""), err
-    assert port.asked == ["sess-1"] and handed == [checkout]
+    assert port.asked == ["sess-1"]
+    assert handed == [checkout]
     assert "  url:    https://forge.example/team/repo" in out.splitlines()
     assert "submitted `sess-1` to `review`" in out
     assert _heads(origin) == "", "the neutral default pushed beside the host's"
@@ -367,7 +372,8 @@ def test_the_default_branch_never_reaches_a_contributed_port(
     port = _ContributedPort()
     monkeypatch.setattr(cli, "_submission_port", lambda _root: port)
     status, _out, err = _submit(capsys, checkout, branch="main")
-    assert status == 1 and "`main` is the default branch" in err, err
+    assert status == 1, err
+    assert "`main` is the default branch" in err, err
     assert port.asked == []
 
 
@@ -396,7 +402,8 @@ def test_a_port_failure_it_did_not_name_is_refused_without_its_text(
     assert (status, out) == (1, "")
     assert err == ("submit refused: " + cli_branch_actions.UNNAMED_FAILURE.format(
         kind="RuntimeError") + "\n"), err
-    assert secret not in err and "Traceback" not in err
+    assert secret not in err
+    assert "Traceback" not in err
     assert port.asked == ([] if raised_by == "binding" else ["sess-1"])
     assert _heads(origin) == ""
 
@@ -426,8 +433,9 @@ def test_submission_object_reads_the_five_fields_by_name() -> None:
     with pytest.raises(session_pr.SubmissionRefused, match="no `remote`"):
         cli_branch_actions.submission_object(None)
     _Report.url = 7
+    report = _Report()
     with pytest.raises(session_pr.SubmissionRefused, match="no `url`"):
-        cli_branch_actions.submission_object(_Report())
+        cli_branch_actions.submission_object(report)
 
 
 # --------------------------------------------------------------------------
@@ -461,6 +469,7 @@ def test_a_host_profile_replacing_the_default_has_no_submit() -> None:
 
     assert domain_profile.current() is not default_profile
     assert "submit" not in _verbs(cli.build_parser())
+    parser = cli.build_parser()
     with pytest.raises(SystemExit):
-        cli.build_parser().parse_args(
+        parser.parse_args(
             ["submit", "--repo-root", "r", "--branch", "b"])

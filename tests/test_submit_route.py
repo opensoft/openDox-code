@@ -63,7 +63,7 @@ NODE = shutil.which("node")
 SESS_1 = json.dumps({"branch": "sess-1"}).encode()
 
 
-@pytest.fixture()
+@pytest.fixture
 def standalone_profile():
     """openDox's OWN default profile for one case, and the suite's host
     profile put back afterwards exactly as it was."""
@@ -293,7 +293,8 @@ def test_a_plane_whose_verdict_says_no_session_refuses_whatever_its_actor(
     by that clause's own sentence, and never reaches the port."""
     with _serving(checkout, tmp_path) as httpd:
         bound = _bound(httpd)
-        assert bound.actor and httpd.console_token
+        assert bound.actor
+        assert httpd.console_token
         bound.capabilities = {**bound.capabilities, "actions": {
             **bound.capabilities["actions"], "session": False}}
         status, body = _submit(httpd, token=httpd.console_token)
@@ -461,7 +462,8 @@ def test_a_port_failure_it_did_not_name_is_reported_without_its_text(
                                     "message": serve_branch_actions.FAILED})
     logged = capsys.readouterr().err
     assert "raised RuntimeError" in logged
-    assert secret not in logged and secret not in json.dumps(body)
+    assert secret not in logged
+    assert secret not in json.dumps(body)
 
 
 # --------------------------------------------------------------------------

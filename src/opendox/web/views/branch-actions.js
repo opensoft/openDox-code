@@ -112,6 +112,8 @@ export function mountBranchActions(host, { caps, branch, composed, fetcher } = {
     }
     return message.textContent;
   }
-  button.addEventListener("click", () => { submit(); });
+  // `submit()` settles every outcome itself (its own try/catch), so the click
+  // handler has nothing to await and marks the promise as handled.
+  button.addEventListener("click", () => { void submit(); });
   return { enabled: true, submit };
 }

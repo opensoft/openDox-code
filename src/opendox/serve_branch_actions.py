@@ -156,7 +156,8 @@ class BranchActionRoutes:
             self._send_json(409, {"ok": False, "error": "submission_refused",
                                   "message": str(exc)})
             return
-        except Exception as exc:  # noqa: BLE001 - a host's port, unvetted
+        # A host's port, unvetted: its type is all this route logs.
+        except Exception as exc:  # noqa: BLE001
             # THE TYPE ALONE reaches the log: the exception's own text is a
             # port's this module cannot vet, and 12.1a keeps a remote URL's
             # credential out of every message.
