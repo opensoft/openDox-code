@@ -147,10 +147,13 @@ ABSENT_LINK = ("accepted-finding.md", "archive/shed-plans-2019.md")
 
 #: The word-shingle Jaccard of the near-duplicate pair, over each document's
 #: whole text, is MEASURED at 0.953 (0.943 over the bodies alone), and no other
-#: pair of the twelve reaches 0.06. The bounds sit between, so any reasonable
-#: similarity threshold a family sets separates the pair from the rest.
+#: pair of the twelve reaches 0.06 (the maximum is 0.0585). The bounds sit
+#: between, so any reasonable similarity threshold a family sets separates the
+#: pair from the rest. The ceiling is 0.1, not 0.06: the measured maximum leaves
+#: 0.0015 under 0.06, and a prose edit to any document would trip a bound that
+#: tight, while 0.1 is still far below every near-duplicate threshold.
 NEAR_DUPLICATE_FLOOR = 0.9
-OTHER_PAIRS_CEILING = 0.2
+OTHER_PAIRS_CEILING = 0.1
 
 #: A body of this many lines or fewer, in a file old enough, is a stale stub
 #: (data-model.md § Families). Every document that is not the planted empty
@@ -174,6 +177,7 @@ _VOCABULARY = re.compile(
 _INLINE_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 _LINK_MARKUP = re.compile(r"\]\(|\[\[")      # the measurement's own pattern
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+\S")
+_H1 = re.compile(r"^#\s+\S")                 # the heading a title derives from
 _EXTERNAL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
 
@@ -286,8 +290,8 @@ def test_derivable_front_matter_has_no_title_key_and_a_heading() -> None:
     assert not [line for line in text.splitlines()[:len(header) + 1]
                 if line.partition(":")[0].strip() == "title"]
     assert header.get("summary"), "only the title is missing here"
-    assert any(_HEADING.match(line) for line in body.splitlines()), (
-        "the title must be derivable from a heading")
+    assert any(_H1.match(line) for line in body.splitlines()), (
+        "the title must be derivable from a `# ` heading (level 1)")
     assert header.get("stage") is None, "a document with no stage is a source"
 
 
@@ -406,13 +410,14 @@ def test_the_plain_documents_measurement_is_why_it_is_not_the_base() -> None:
     """MEASURED: 8 files, 0 links. Under "nothing links to it" they would be
     eight orphans, and OQ-H-16 exempts only README and index documents. So the
     corpus does not take them as its base, and reuses none of their files."""
-    files = sorted(PLAIN.glob("*.md"))
-    links = {p.name: len(_LINK_MARKUP.findall(p.read_text(encoding="utf-8")))
-             for p in files}
+    files = _files(PLAIN)
+    links = {name: len(_LINK_MARKUP.findall(
+        (PLAIN / name).read_text(encoding="utf-8"))) for name in files}
     assert (len(files), sum(links.values())) == (8, 0), (
         f"plain-documents was measured at 8 files and 0 links; now {links}. "
         "Re-measure, and re-declare why health-corpus does not reuse it")
-    assert not {p.name for p in files} & {Path(r).name for r in EXPECTED_FILES}
+    assert not {Path(n).name for n in files} & {Path(r).name
+                                                for r in EXPECTED_FILES}
 
 
 @pytest.mark.parametrize("relative", EXPECTED_FILES)
