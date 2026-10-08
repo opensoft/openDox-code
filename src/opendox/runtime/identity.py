@@ -6,8 +6,11 @@ projects, the project-to-repository mapping, sessions and unsaved drafts live
 in the openDox database. Specs, changes, ideation documents and contracts stay
 in git, read from repositories and written back only through the apply lane."
 
-So this module has exactly six record types and one store, and `TABLES` below
-is the closed list a test reads against `migrations/0001_…sql`. There is no
+So this module has exactly six record types and one store. `TABLES` below is
+the DOMAIN's closed table list: those six, and the two health tables
+`migrations/0003_health.sql` declares and `opendox.runtime.health_store` reads
+and writes, which R2Q13 (a) adds (opensoft/openxFactory#656 comment
+6003486656). A test reads it against `0001` with `0003_`. There is no
 `documents` table, no `specs` table and no `content` column outside
 `drafts.body` — the one Q1 rules IN, because an unsaved draft is by definition
 the text that has not entered the corpus yet.
@@ -51,9 +54,14 @@ from typing import Any
 
 from .config import credential_in_a_remote_url, redacted_remote_url
 
-#: The closed table list, in RULING Q1's own order. Read by
-#: `tests_runtime/test_schema_shape.py` against the canonical migration: a
-#: seventh table here or there is a claim about what the database owns.
+#: The closed DOMAIN table list: RULING Q1's six in the ruling's own order, then
+#: the two health tables. R2Q13 (a) (Brett Heap, opensoft/openxFactory#656
+#: comment 6003486656) puts them here: "The results table joins Q1's list in
+#: `identity.TABLES`, and the closure test reads `0001` together with `0003_`,
+#: in the same change". Read by `tests_runtime/test_schema_shape.py` against
+#: `0001` with `0003_`, and through this tuple by `runtime reset`, the init
+#: scripts' grants and `MigrationRunner.verify_runtime_access`: a table here or
+#: there is a claim about what the database owns.
 TABLES: tuple[str, ...] = (
     "users",
     "memberships",
@@ -61,6 +69,8 @@ TABLES: tuple[str, ...] = (
     "project_repositories",
     "sessions",
     "drafts",
+    "health_runs",
+    "health_findings",
 )
 
 #: The closed role vocabulary, matching `memberships_role_check` in

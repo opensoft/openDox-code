@@ -305,7 +305,7 @@ def test_every_not_null_finding_column_refuses_a_null(database: Any,
                                                       column: str) -> None:
     run = _record(database)
     refused = _raw(database, _RAW_FINDING,
-                   _raw_finding(run.run_id, **{column: None}))
+                   _raw_finding(run.run_id) | {column: None})
     assert refused is not None, f"health_findings.{column} admitted a null"
     assert refused.sqlstate == "23502", refused
     assert refused.diag.column_name == column

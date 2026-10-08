@@ -24,7 +24,11 @@
 ## 1. What this runtime is, and what it is not
 
 It is identity and coordination: six tables, six collections, one bearer token
-verified against the Keycloak broker.
+verified against the Keycloak broker. Beside the six, `0003_` adds the health
+store's two tables (`health_runs`, `health_findings`; R2Q13 (a) makes them
+DOMAIN tables, so `runtime reset` and the served role's grants reach them). They
+serve no collection: the hosted plane refuses `health` by name (R2Q15 (a)), and
+they hold findings that address documents, never the documents themselves.
 
 It is **not** a document store and it is not a second dashboard. It does not
 import `opendox.serve` — the stdlib document surface a student runs from a
@@ -307,7 +311,7 @@ can remove a base resource, which is why the instruction ships with one.
 suggestion.** The bundled Postgres creates and grants that role on its first
 start (`deploy/compose/init-runtime-role.sh`, mounted by the StatefulSet); a
 managed database runs no init script, so nothing else will. Without it the
-migration owner creates the six tables and the served role has no privilege on
+migration owner creates the domain's tables and the served role has no privilege on
 any of them: the Job succeeds, `/readyz` reports a database that answers and an
 applied schema, and every API request then fails with `permission denied for
 table …` (Copilot review of openDox-code#25, round 10). Run this once, on the
@@ -424,19 +428,20 @@ select format('grant usage on schema %I to %I', :'schema', :'runtime_role')
 -- THE COORDINATION TABLES THAT ALREADY EXIST, and only those. A database
 -- migrated before this prerequisite ran already holds them, and a `grant … on
 -- table` for one that is absent is an error — so the list is a JOIN against
--- the catalogue rather than seven statements, and it emits NOTHING on a fresh
--- database. It used to read `on all tables in schema public`, which on a
+-- the catalogue rather than one statement per table, and it emits NOTHING on a
+-- fresh database. It used to read `on all tables in schema public`, which on a
 -- REUSED database handed the served role another application's data (Copilot
--- review of openDox-code#25, round 30). The names are Q1's six plus the
--- ledger; `tests_runtime/test_deploy_shape.py` derives them from
--- `identity.TABLES` and `migrations.LEDGER_TABLE` so this list cannot drift.
+-- review of openDox-code#25, round 30). The names are Q1's six, the two health
+-- tables `0003_` adds (R2Q13 (a): DOMAIN) and the ledger;
+-- `tests_runtime/test_deploy_shape.py` derives them from `identity.TABLES` and
+-- `migrations.LEDGER_TABLE` so this list cannot drift.
 select format('grant select, insert, update, delete on table %I to %I',
               c.relname, :'runtime_role')
   from pg_class c
   join pg_namespace n on n.oid = c.relnamespace
  where n.nspname = :'schema' and c.relkind = 'r'
-   and c.relname = any (array['drafts', 'memberships',
-                              'opendox_schema_migrations',
+   and c.relname = any (array['drafts', 'health_findings', 'health_runs',
+                              'memberships', 'opendox_schema_migrations',
                               'project_repositories', 'projects', 'sessions',
                               'users'])
 \gexec
@@ -451,7 +456,8 @@ select format('grant select, insert, update, delete on table %I to %I',
 -- where a reused owner is plausible, so the grant is refused when the owner
 -- already owns a table this runtime did not create. MEASURED on postgres
 -- 16.15: the query returns no row for a schema with no tables and for one
--- holding only the seven, and exactly one for an owner that also owns
+-- holding only this runtime's nine (re-measured with `0003_`'s two health
+-- tables, plan 038 T042), and exactly one for an owner that also owns
 -- `invoices` — and `\gexec` runs nothing when there is no row, so the
 -- `having` is the whole conditional.
 select format('do $refuse$ begin raise exception %L; end $refuse$',
@@ -466,8 +472,8 @@ select format('do $refuse$ begin raise exception %L; end $refuse$',
   join pg_roles r on r.oid = c.relowner
  where n.nspname = :'schema' and c.relkind = 'r'
    and r.rolname = :'migration_owner'
-   and c.relname <> all (array['drafts', 'memberships',
-                               'opendox_schema_migrations',
+   and c.relname <> all (array['drafts', 'health_findings', 'health_runs',
+                               'memberships', 'opendox_schema_migrations',
                                'project_repositories', 'projects', 'sessions',
                                'users'])
 having count(*) > 0
@@ -617,7 +623,8 @@ a superseded revision loses its dispatch rather than overwriting the other one.
 ## 7. `reset`, and what "disposable" does and does not cover
 
 `opendox-runtime runtime reset --confirm yes-drop-the-coordination-database`
-drops the six coordination tables and the ledger. It exists because of RULING
+drops the six coordination tables, the two health tables and the ledger (the
+token is unchanged: #1144's F14.1 spells it). It exists because of RULING
 Q1's last sentence — "the database is disposable relative to the corpus"; lose
 it and you lose coordination state, not a governed artifact.
 
@@ -693,18 +700,20 @@ because nothing is prepending anything to it.
 ## 8a. The lifecycle, run end to end (2026-09-16, measured)
 
 Not a test: the installed console script, a real Postgres and a real socket.
-Every figure below is that run's own output.
+Every figure below is that run's own output, except the migration lists and
+`dropped`, which were re-measured on 2026-10-08 against postgres 16.15 when
+`0003_health.sql` joined the set (plan 038 T042), with the same verbs.
 
 ```
 $ opendox-runtime runtime init
 { "ok": true, "canonical_sha256": "6db4710578b012a3318…", "directories_created": ["/tmp/smoke-projects"],
-  "migrations_on_disk": ["0001","0002"], "next": "opendox-runtime runtime migrate" }
+  "migrations_on_disk": ["0001","0002","0003"], "next": "opendox-runtime runtime migrate" }
 
 $ opendox-runtime runtime migrate
-{ "ok": true, "applied": ["0001","0002"], "planned": [] }
+{ "ok": true, "applied": ["0001","0002","0003"], "planned": [] }
 
 $ opendox-runtime runtime status --probe-timeout 5
-{ "ok": false, "database": "reachable", "applied_migrations": ["0001","0002"],
+{ "ok": false, "database": "reachable", "applied_migrations": ["0001","0002","0003"],
   "pending_migrations": [], "migration_drift": [],
   "broker_keys": "unreachable: IdentityUnavailableError" }
 
@@ -716,8 +725,8 @@ GET /docs              404                 # off unless OPENDOX_PUBLISH_OPENAPI
 GET /api/v1/projects   401                 # no bearer token
 
 $ opendox-runtime runtime reset --confirm yes-drop-the-coordination-database
-{ "ok": true, "dropped": ["drafts","sessions","project_repositories","memberships","projects","users",
-                          "opendox_schema_migrations"] }
+{ "ok": true, "dropped": ["health_findings","health_runs","drafts","sessions","project_repositories",
+                          "memberships","projects","users","opendox_schema_migrations"] }
 ```
 
 **`status` and `/readyz` are `ok: false` / `not-ready` on purpose here**: there

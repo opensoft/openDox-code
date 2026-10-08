@@ -537,7 +537,7 @@ def test_a_second_entry_point_on_the_same_state_dir_is_refused(
             bundle_mod.BundledServer(settings).start()
         assert str(first.report()["pid"]) in str(caught.value)
         # and a restart of the one that owns it re-migrates nothing
-        assert first.applied == ["0001", "0002"]
+        assert first.applied == ["0001", "0002", "0003"]
     finally:
         first.stop()
     again = bundle_mod.BundledServer(settings).start()
@@ -921,4 +921,4 @@ with bundle.BundledServer(settings) as server:
                           env=env, capture_output=True, text=True, timeout=120)
     assert done.returncode == 0, done.stderr[-3000:]
     result = json.loads(done.stdout.strip().splitlines()[-1])
-    assert result["applied"] == ["0001", "0002"], result
+    assert result["applied"] == ["0001", "0002", "0003"], result

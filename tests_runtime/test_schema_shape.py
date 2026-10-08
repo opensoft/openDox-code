@@ -30,11 +30,20 @@ from opendox.runtime import identity, migrations
 
 ROOT = Path(__file__).resolve().parents[1]
 CANONICAL = ROOT / "migrations" / "0001_identity_and_coordination.sql"
+#: The health store's tables, declared additively (#1144 box 14.1). R2Q13 (a)
+#: (opensoft/openxFactory#656 comment 6003486656): "the closure test reads
+#: `0001` together with `0003_`, in the same change". `0002` is not read: it
+#: declares the ledger, which is infrastructure and not a table the domain
+#: owns (`test_the_ledger_is_not_declared_in_the_canonical_migration`).
+HEALTH = ROOT / "migrations" / "0003_health.sql"
 
-#: Everything outside a `--` comment. Every assertion below reads THIS, so a
-#: word in a comment can neither create a table nor hide one.
+#: Everything outside a `--` comment, in `0001` and `0003_` together. Every
+#: assertion below reads THIS, so a word in a comment can neither create a
+#: table nor hide one.
 def _statements() -> str:
-    return "\n".join(line for line in CANONICAL.read_text(encoding="utf-8").splitlines()
+    return "\n".join(line
+                     for declaring in (CANONICAL, HEALTH)
+                     for line in declaring.read_text(encoding="utf-8").splitlines()
                      if not line.lstrip().startswith("--"))
 
 
@@ -62,21 +71,35 @@ def _columns_of(table: str) -> list[tuple[str, str]]:
 #: RULING Q1's list, transcribed from the comment and in the ruling's own
 #: order, so this file does not read the closure off the very module it is
 #: checking. "Users, memberships, projects, the project-to-repository mapping,
-#: sessions and unsaved drafts live in the openDox database."
+#: sessions and unsaved drafts live in the openDox database." THEN THE TWO
+#: HEALTH TABLES, transcribed from R2Q13 (a) (Brett Heap, opensoft/
+#: openxFactory#656 comment 6003486656): "DOMAIN. The results table joins Q1's
+#: list in `identity.TABLES`, and the closure test reads `0001` together with
+#: `0003_`, in the same change, as the ruling's words have it" — ruling
+#: `5784155201` item 4's "health results become a seventh table … with the
+#: closure test moved in the SAME change". Q1's principle stands: no document,
+#: and a disposable store (#1144 box 14.3).
 RULED_TABLES: tuple[str, ...] = (
     "users", "memberships", "projects", "project_repositories", "sessions",
     "drafts",
+    "health_runs", "health_findings",
 )
 
 
 def test_the_store_declares_exactly_the_tables_the_ruling_names() -> None:
     assert identity.TABLES == RULED_TABLES, (
-        "`identity.TABLES` and RULING Q1's own list disagree; the ruling is "
-        "#656 comment 5542694957 and this tuple is transcribed from it")
+        "`identity.TABLES` and the ruled list disagree; RULING Q1 is #656 "
+        "comment 5542694957, R2Q13 (a) is #656 comment 6003486656, and this "
+        "tuple is transcribed from them")
 
 
 def test_the_canonical_schema_declares_exactly_rulings_six_tables() -> None:
     """The list is CLOSED. Compared as a SET, deliberately.
+
+    The NAME keeps #1144 box 14.2's citation of it. What it reads is `0001`
+    and `0003_` together, held to RULING Q1's six and R2Q13 (a)'s two: the
+    seventh-table claim box 14.2 asks to see made in the open is made in
+    `RULED_TABLES`, in `identity.TABLES` and in `0003_`'s header, in one change.
 
     The SQL's declaration order is fixed by the foreign keys — `projects` has
     to exist before `memberships` references it — so it is not free to be the
@@ -88,10 +111,11 @@ def test_the_canonical_schema_declares_exactly_rulings_six_tables() -> None:
     declared = _declared_tables()
     assert len(declared) == len(set(declared)) == len(RULED_TABLES)
     assert set(declared) == set(RULED_TABLES), (
-        "the canonical migration's tables and RULING Q1's list disagree. "
-        "RULING Q1 names six things the database owns; a seventh table is a "
-        "claim about that boundary and has to be made in the open — in the "
-        "ruling, then in this file, then in `identity.TABLES`.")
+        "the tables `0001` and `0003_` declare and the ruled list disagree. "
+        "RULING Q1 names six things the database owns and R2Q13 (a) adds the "
+        "two health tables; another table is a claim about that boundary and "
+        "has to be made in the open — in a ruling, then in this file, then in "
+        "`identity.TABLES`.")
 
 
 def test_no_table_is_a_document_store() -> None:
