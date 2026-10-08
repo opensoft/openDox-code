@@ -25,7 +25,9 @@
 --
 -- PROVENANCE IS NOT NULL FROM THE FIRST LANDING (box 15.7): `pack_id` and
 -- `pack_version` are `not null`, and not empty, so no path can store a finding
--- without them. That is enforced HERE, at the store, and not only in the
+-- without them. "Not empty" is spelled `length(…) > 0` rather than `<> ''`,
+-- which means the same in PostgreSQL but reads as a null comparison to
+-- analyzers that apply Oracle's rule that `''` is null. That is enforced HERE, at the store, and not only in the
 -- engine that stamps them.
 --
 -- NO FOREIGN KEY TO `projects` (OQ-H-22): a run is keyed by the corpus's
@@ -113,8 +115,8 @@ create table health_findings (
   message           text not null,
   evidence          jsonb not null,
   constraint health_findings_pkey primary key (run_id, id),
-  constraint health_findings_pack_id_check check (pack_id <> ''),
-  constraint health_findings_pack_version_check check (pack_version <> ''),
+  constraint health_findings_pack_id_check check (length(pack_id) > 0),
+  constraint health_findings_pack_version_check check (length(pack_version) > 0),
   constraint health_findings_identity_check check (jsonb_typeof(identity::jsonb) = 'object'),
   constraint health_findings_locator_check check (locator is null or jsonb_typeof(locator) = 'object'),
   constraint health_findings_severity_check check (severity in ('error', 'warning', 'info')),

@@ -161,6 +161,22 @@ def _uuid_text(run_id: str) -> str:
             "no health run with that run_id (it is not a uuid)") from exc
 
 
+#: What a UNIQUE violation means, by the constraint that raised it: two keys,
+#: two different causes, and a caller acts on each differently (Copilot's and
+#: Codex's reviews of openDox-code#99 at `56d95d4f`).
+_UNIQUE_CONFLICTS: dict[str, str] = {
+    "health_findings_pkey": (
+        "two findings of this run share one id. The engine records such a "
+        "collision as ONE finding against their producer and stores neither "
+        "(contracts/health-finding.md, the id rule); the run is not recorded"),
+    "health_runs_run_seq_key": (
+        "the run sequence handed out a run_seq that a recorded run already "
+        "holds: the identity sequence is behind the recorded runs (a restore "
+        "or a restart). Move it past the highest recorded run_seq; the run is "
+        "not recorded"),
+}
+
+
 def _refused_by_the_schema(call: Any, what: str) -> Any:
     """Run `call`, turning the schema's refusals into this store's errors.
 
@@ -173,11 +189,12 @@ def _refused_by_the_schema(call: Any, what: str) -> Any:
     except Exception as exc:  # noqa: BLE001
         sqlstate = getattr(exc, "sqlstate", None)
         if sqlstate == UNIQUE_VIOLATION:
-            raise ConflictError(
-                f"{what}: two rows share one key. Two findings of one run with "
-                "one id are a collision the engine records as ONE finding "
-                "against their producer and stores neither "
-                "(contracts/health-finding.md, the id rule)") from exc
+            constraint = getattr(getattr(exc, "diag", None),
+                                 "constraint_name", None)
+            raise ConflictError(_UNIQUE_CONFLICTS.get(
+                constraint,
+                f"{what}: a row with this key is already recorded "
+                f"({constraint or 'a unique key'})")) from exc
         if sqlstate == FOREIGN_KEY_VIOLATION:
             raise NotFoundError(
                 f"{what}: the run it names does not exist") from exc

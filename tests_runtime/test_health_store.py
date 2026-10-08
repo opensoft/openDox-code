@@ -192,8 +192,10 @@ def test_the_store_refuses_a_finding_without_provenance(
         finding.update(missing)
         field = next(iter(missing))
 
+    no_statement = HealthStore(_NoStatement())
+    kwargs = _run_kwargs(findings=[finding])
     with pytest.raises(RefusedError) as caught:
-        HealthStore(_NoStatement()).record_run(**_run_kwargs(findings=[finding]))
+        no_statement.record_run(**kwargs)
     assert f"has no {field}" in str(caught.value)
     assert "15.7" in str(caught.value)
 
@@ -338,6 +340,11 @@ _RUN_CHECKS = [
     ({"sandbox": '{"live": true, "pids_max": "512"}'},
      "health_runs_sandbox_check"),
     ({"sandbox": "[true]"}, "health_runs_sandbox_check"),
+    # JSON `null` is a jsonb VALUE, not SQL NULL: `jsonb_typeof` answers the
+    # text 'null', so the object checks refuse it (measured on postgres 16.15
+    # for Copilot's review of openDox-code#99 at `56d95d4f`).
+    ({"pack_pins": "null"}, "health_runs_pack_pins_check"),
+    ({"sandbox": "null"}, "health_runs_sandbox_check"),
 ]
 
 _FINDING_CHECKS = [
@@ -349,6 +356,9 @@ _FINDING_CHECKS = [
      "health_findings_resolution_class_check"),
     ({"baseline_class": "unclassed"}, "health_findings_baseline_class_check"),
     ({"evidence": "[]"}, "health_findings_evidence_check"),
+    ({"identity": "null"}, "health_findings_identity_check"),
+    ({"locator": "null"}, "health_findings_locator_check"),
+    ({"evidence": "null"}, "health_findings_evidence_check"),
 ]
 
 
@@ -416,9 +426,10 @@ def test_a_finding_must_name_a_recorded_run(database: Any) -> None:
 def test_the_store_keeps_no_patch_and_no_document(field: str) -> None:
     """14.3 and R2Q25 (a), at the API: a field outside the columns is refused
     by NAME, before any statement — never silently dropped."""
+    no_statement = HealthStore(_NoStatement())
+    kwargs = _run_kwargs(findings=[_finding(**{field: "the text of a document"})])
     with pytest.raises(RefusedError) as caught:
-        HealthStore(_NoStatement()).record_run(**_run_kwargs(
-            findings=[_finding(**{field: "the text of a document"})]))
+        no_statement.record_run(**kwargs)
     assert repr(field) in str(caught.value)
     assert "the text of a document" not in str(caught.value)
 
@@ -450,15 +461,17 @@ def test_two_findings_with_one_id_in_one_run_store_nothing(database: Any) -> Non
     (contracts/health-finding.md); a run that reaches the store with two is a
     CONFLICT, and the caller's transaction takes the run row with it."""
     twice = [_finding(), _finding(path="other.md")]
-    with pytest.raises(ConflictError):
+    with pytest.raises(ConflictError) as caught:
         _record(database, findings=twice)
+    assert "two findings of this run share one id" in str(caught.value)
     assert _count(database, "health_runs") == 0
     assert _count(database, "health_findings") == 0
 
 
 def test_a_vocabulary_the_schema_refuses_is_a_named_refusal(database: Any) -> None:
+    critical = [_finding(severity="critical")]
     with pytest.raises(RefusedError) as caught:
-        _record(database, findings=[_finding(severity="critical")])
+        _record(database, findings=critical)
     assert "health_findings_severity_check" in str(caught.value)
     with pytest.raises(RefusedError) as caught:
         _record(database, kind="nightly")
@@ -485,8 +498,10 @@ def test_a_vocabulary_the_schema_refuses_is_a_named_refusal(database: Any) -> No
         "evidence-none", "locator-list", "kind-int", "no-message"])
 def test_malformed_input_is_refused_before_any_statement(over: dict,
                                                          says: str) -> None:
+    no_statement = HealthStore(_NoStatement())
+    kwargs = _run_kwargs(**over)
     with pytest.raises(RefusedError) as caught:
-        HealthStore(_NoStatement()).record_run(**_run_kwargs(**over))
+        no_statement.record_run(**kwargs)
     assert says in str(caught.value)
 
 
@@ -578,8 +593,9 @@ def test_an_unknown_run_or_finding_is_not_found(database: Any) -> None:
     run = _record(database)
     with database.connection() as conn:
         store = HealthStore(conn)
+        unknown = str(uuid.uuid4())
         with pytest.raises(NotFoundError):
-            store.get_run(str(uuid.uuid4()))
+            store.get_run(unknown)
         with pytest.raises(NotFoundError):
             store.get_run("not-a-run")
         with pytest.raises(NotFoundError):
@@ -660,8 +676,10 @@ def test_a_restarted_sequence_cannot_record_a_second_run_at_one_position(
     with database.transaction() as conn:
         conn.execute("alter table health_runs alter column run_seq restart with "
                      f"{first.run_seq}")
-    with pytest.raises(ConflictError):
+    with pytest.raises(ConflictError) as caught:
         _record(database)
+    assert "a run_seq that a recorded run already holds" in str(caught.value)
+    assert "finding" not in str(caught.value)
     refused = _raw(database,
                    _RAW_RUN.replace("(run_id, ", "(run_seq, run_id, ")
                    .replace(" values (", " overriding system value values "
