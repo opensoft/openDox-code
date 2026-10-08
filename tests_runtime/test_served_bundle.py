@@ -95,7 +95,8 @@ WEB = ROOT / "src" / "opendox" / "web"
 PLAIN_DOCUMENTS = ROOT / "tests" / "fixtures" / "plain-documents"
 
 #: #1144 10.2's count of the bundle openDox-code carries.
-BUNDLE_FILES = 42
+#: Plan 038 T015 adds `views/branch-actions.js` (the submit control): 42 -> 43.
+BUNDLE_FILES = 43
 
 #: 10.2a: not owed to openDox, and not counted as a missing file.
 NOT_OWED = "views/intent-feed.js"
