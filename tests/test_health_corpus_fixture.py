@@ -50,7 +50,11 @@ SIX DECISIONS THIS FIXTURE MAKES, each one a pin T044 and T065 must honor.
    family would flag the same document, and the stub would not be a document
    with ONE finding. Its body is blank, which meets data-model.md's criterion
    ("after front matter, the body holds no line that is neither blank nor a
-   heading") on any reading of it.
+   heading") under `leading_header`'s convention
+   (`src/opendox/runtime/local_git_adapter.py`): the header is the leading run
+   of `Name: value` lines up to the first blank line, and nothing follows it.
+   A reader that took `---` fences for front matter would see this file's two
+   lines as body; this corpus has none, as no document in it uses a fence.
 4. THE HUMAN-ONLY FINDING IS AN ORPHAN, and the accepted finding is a link to a
    file that exists nowhere (an "unmovable" broken link). OQ-H-8 leaves both
    unplaced; both are `human-only` by that ruling. `broken-link` therefore
