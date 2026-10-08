@@ -644,3 +644,30 @@ def test_runtime_reset_drops_a_populated_health_store(
             "select table_name from information_schema.tables "
             "where table_schema = current_schema()").fetchall()
     assert left == [], f"the reset left {[row[0] for row in left]}"
+
+
+def test_a_restarted_sequence_cannot_record_a_second_run_at_one_position(
+        database: Any) -> None:
+    """`run_seq` is the order of record, so it is UNIQUE and not only generated.
+
+    An identity column is not unique by itself: a sequence restarted after a
+    restore, or an insert `overriding system value`, hands out a number that
+    is already taken, and "the latest earlier run" would then have two
+    answers. The unique constraint refuses the second, and the store reports
+    it as the conflict it is.
+    """
+    first = _record(database)
+    with database.transaction() as conn:
+        conn.execute("alter table health_runs alter column run_seq restart with "
+                     f"{first.run_seq}")
+    with pytest.raises(ConflictError):
+        _record(database)
+    refused = _raw(database,
+                   _RAW_RUN.replace("(run_id, ", "(run_seq, run_id, ")
+                   .replace(" values (", " overriding system value values "
+                            "(%(run_seq)s, "),
+                   _raw_run(run_seq=first.run_seq))
+    assert refused is not None, "a second run was recorded at one run_seq"
+    assert refused.sqlstate == "23505", refused        # unique_violation
+    assert refused.diag.constraint_name == "health_runs_run_seq_key"
+    assert _count(database, "health_runs") == 1
