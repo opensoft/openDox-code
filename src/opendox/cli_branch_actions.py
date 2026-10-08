@@ -49,10 +49,13 @@ with a fixed sentence naming its TYPE alone, as the route answers it: its text
 is a host's port's, which this verb cannot vet, and it may carry a remote
 URL's credential (12.1a).
 
-IMPORT WEIGHT. The standard library and `opendox.session_pr` (itself
-standard-library only) at import, because `opendox.default_profile` imports
-this module. `opendox.cli`, the runtime's configuration and the git adapter
-are imported where they are used.
+IMPORT WEIGHT. The standard library alone at import, because
+`opendox.default_profile` imports this module and must import with nothing
+beyond the standard library (`tests/test_default_profile.py`).
+`opendox.session_pr` is imported where it is used, since it re-exports the
+landing seam (plan 038 T012), whose modules reach beyond the standard
+library; so are `opendox.cli`, the runtime's configuration and the git
+adapter.
 """
 
 from __future__ import annotations
@@ -63,7 +66,6 @@ import os
 import sys
 from pathlib import Path
 
-from opendox.session_pr import SubmissionError, SubmissionRefused
 
 __all__ = [
     "LOCAL_BESIDE_HOSTED", "SUBMISSION_FIELDS", "UNNAMED_FAILURE",
@@ -108,6 +110,8 @@ def submission_object(report) -> dict[str, str]:
     field, or carrying one that is not a non-empty string. A host's port is
     the case this guards; `LocalGitSubmissions` always answers all five.
     """
+    from opendox.session_pr import SubmissionRefused
+
     fields: dict[str, str] = {}
     for name in SUBMISSION_FIELDS:
         value = getattr(report, name, None)
@@ -129,6 +133,7 @@ def submit_branch(port, branch: str) -> dict[str, str]:
     returns only the report of a submission that happened.
     """
     from opendox.runtime.local_git_adapter import DEFAULT_BRANCH
+    from opendox.session_pr import SubmissionRefused
 
     if branch == DEFAULT_BRANCH:
         raise SubmissionRefused(
@@ -170,6 +175,8 @@ def cmd_submit(args: argparse.Namespace) -> int:
     if refusal is not None:
         print(f"submit refused: {refusal}", file=sys.stderr)
         return 1
+    from opendox.session_pr import SubmissionError
+
     try:
         report = submit_branch(_core()._submission_port(Path(args.repo_root)),
                                args.branch)
