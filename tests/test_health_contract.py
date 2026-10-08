@@ -517,6 +517,26 @@ def test_the_order_of_an_identitys_keys_does_not_move_the_id() -> None:
     assert len(ids) == 1
 
 
+def test_finding_id_is_the_one_hash_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The module-level `finding_id()` is the SINGLE hash path (the holder's
+    `6069507373`, T046 item 2): a test that patches it patches both the id
+    `make_finding()` sets and the id the reference rule checks."""
+    real = hc.finding_id
+    seen: list[dict[str, Any]] = []
+
+    def patched(**key: Any) -> str:
+        seen.append(key)
+        return real(**key)[:-16] + "0" * 16
+
+    monkeypatch.setattr(hc, "finding_id", patched)
+    built = hc.make_finding(**_fields(_example("broken-link")))
+    assert built["id"] == "opendox.broken-link.0000000000000000"
+    assert len(seen) == 2, "the id it set, and the id its own check recomputed"
+    assert hc.violations(built) == []
+    assert _rules(_example("broken-link")) == ["id-is-the-hash-of-its-key"]
+    assert len(seen) == 4
+
+
 def test_a_pack_cannot_set_the_engines_fields() -> None:
     """The id, and nothing a family supplies, is the engine's: `make_finding()`
     takes no id."""
