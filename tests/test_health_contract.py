@@ -1379,14 +1379,51 @@ def test_a_refusal_quotes_nothing_of_the_finding(change: dict[str, Any]) -> None
 
 
 def test_where_names_an_admitted_key_and_detail_names_none() -> None:
-    """Lane 3's REVIEW-W1 MINOR, as the docstrings now state it: `where` is a
-    pointer built from keys the module ADMITTED, and names them verbatim, so
-    an engine bounds it before it records it; `detail` names no key."""
+    """`where` is a pointer built from keys the module ADMITTED, and names them
+    verbatim within its bound (below); `detail` names no key."""
     key = "ADMITTED-HEADING-KEY"
     violation = hc.violations({**_example("broken-link"), "identity": {key: 5}})[0]
     assert violation.rule == "identity-holds-no-number"
     assert violation.where == f"/identity/{key}"
     assert key not in violation.detail
+
+
+def _nested_keys(levels: int, key: str, leaf: Any) -> dict[str, Any]:
+    """`levels` objects, each holding the next under `key`, and `leaf` last."""
+    value: Any = leaf
+    for _ in range(levels):
+        value = {key: value}
+    return value
+
+
+@pytest.mark.parametrize("identity, where", [
+    ({"k" * 171: 5}, "/identity/" + "k" * 171),
+    ({"k" * 190: 5}, "/identity/" + "k" * 190),
+    ({"k" * 191: 5}, "/identity"),
+    (_nested_keys(15, "/" * 200, 5), "/identity"),
+    ({"a": {"b" * 195: {"c": 5}}}, "/identity/a"),
+    ({"~" * 95: 5}, "/identity/" + "~0" * 95),
+    ({"~" * 96: 5}, "/identity"),
+    ({"a": [["x"], [True, 1]]}, "/identity/a/1/1"),
+], ids=["a 171-character key, named", "the bound, 200 characters",
+        "one past it, the ancestor", "lane 3's fifteen nested 200-character keys",
+        "a stopped pointer stays stopped", "escapes count, at the bound",
+        "escapes count, one past it", "array indices"])
+def test_where_is_bounded_at_the_nearest_ancestor_that_fits(identity: Any, where: str) -> None:
+    """Lane 3's REVIEW-W1 MINOR, bounded as the holder preferred: `where` is at
+    most 200 characters, the place's own pointer or its nearest ancestor's that
+    fits, so an engine may carry it as evidence. Unbounded, fifteen nested
+    200-character keys of `/` made a 6026-character pointer. A pointer that
+    stops stays stopped, so it never names a path that is not there."""
+    found = hc.violations({**_example("broken-link"), "identity": identity})
+    assert [(v.rule, v.where) for v in found] == [("identity-holds-no-number", where)]
+    assert len(where) <= STRING_MAX
+
+
+def test_where_is_bounded_in_evidence_too() -> None:
+    evidence = {"a": {"b" * 195: {"text": "c"}}}
+    found = hc.violations({**_example("broken-link"), "evidence": evidence})
+    assert [(v.rule, v.where) for v in found] == [("evidence-names-no-text", "/evidence/a")]
 
 
 def test_a_violation_reads_as_its_rule_its_place_and_its_detail() -> None:

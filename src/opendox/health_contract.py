@@ -35,7 +35,8 @@ written, a pair of paths, a heading key), never a line number. `locator` is
 display only and outside the hash, so an edit above a finding moves its locator
 and keeps its id, and an exception keyed by that id keeps suppressing it. The
 ENGINE sets the id: `make_finding()` takes none, so a pack's own value never
-reaches a finding.
+reaches a finding. `finding_id()` is the module's ONE hash path: every id it
+sets or checks is computed there.
 
 `identity` IS STORED AND EMITTED (the holder, `openxFactory#656` `6018624750`):
 the engine hashes it into the id, T042 stores it as canonical sorted-key JSON
@@ -71,16 +72,17 @@ refuses a copy whose catalog names reference rules it does not implement
 `locator-span-is-ordered`. As in openDox-spec's own test, a reference rule
 judges only parts whose own rules hold, so one cause is reported once.
 
-A REFUSAL QUOTES NOTHING IT REFUSED. A finding may carry document text where
-it must not, which is why it is refused. So no refused string, key or value
-reaches a violation: its `detail` names a size, a type or the admitted set,
-never a value of the finding, and a finding's names and hashes are named only
-once admitted. Its `where` is a JSON pointer built only from keys this module
-ADMITTED, so it does name those keys, verbatim: each is at most 200
-characters and no forbidden word, but a key may still be document text (a
-heading key is), and `NESTING_MAX` of them make a pointer far longer than any
-finding field. So `rule` is what an engine records about a refusal; one that
-records `where` too bounds it as it bounds any string it stores.
+A REFUSAL QUOTES NOTHING IT REFUSED, AND ITS POINTER IS BOUNDED. A finding may
+carry document text where it must not, which is why it is refused. So no
+refused string, key or value reaches a violation: its `detail` names a size, a
+type or the admitted set, never a value of the finding, and a finding's names
+and hashes are named only once admitted. Its `where` is a JSON pointer built
+only from keys this module ADMITTED, so it names those verbatim (each within
+the contract's own bound on a key) and never a refused one, and it is at most
+`STRING_MAX` characters: the place's own pointer, or, when that is longer, its
+nearest ancestor's that fits. So an engine may record a refusal's `rule` and
+`where` as `evidence` of the finding against the pack, whose every string is
+bounded at 200 characters.
 
 THE ENGINE'S OWN FINDINGS (contracts/health-finding.md § The id rule; the
 holder's rulings `openxFactory#656` `6069024023`, items 1 and 2).
@@ -319,8 +321,10 @@ _NOT_ONE_LINE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")
 
 class Violation(NamedTuple):
     """One rule a finding breaks: the rule's id, where (a JSON pointer into the
-    finding, built from keys this module admitted, which it names verbatim),
-    and what was found. No part quotes a string, key or value it refused."""
+    finding of at most `STRING_MAX` characters, built from keys this module
+    admitted, which it names verbatim; past the bound, the nearest ancestor's
+    pointer that fits), and what was found. No part quotes a string, key or
+    value it refused."""
 
     rule: str
     where: str
@@ -332,9 +336,9 @@ class Violation(NamedTuple):
 
 class FindingRefused(ValueError):
     """A finding, or a part of one, breaks a rule of the contract. `rule` and
-    `where` are the first violation's. An engine records `rule`, and never the
-    refused value; `where` names admitted keys verbatim and is unbounded in
-    length, so an engine that records it bounds it first."""
+    `where` are the first violation's, and an engine records those, never the
+    refused value: `where` is at most `STRING_MAX` characters and names only
+    admitted keys."""
 
     def __init__(self, violation: Violation, more: int = 0) -> None:
         self.violation = violation
@@ -365,7 +369,11 @@ def id_key(*, identity: Any, kind: str, pack_id: str, path: str) -> bytes:
 def finding_id(*, identity: Any, kind: str, pack_id: str, path: str) -> str:
     """The id the engine sets: `pack_id.kind.h16`. Refuses, with
     `FindingRefused`, a key whose parts break their rules, so no id is ever
-    computed over a part the contract does not admit."""
+    computed over a part the contract does not admit.
+
+    THE ONE HASH PATH (the holder's `6069507373`, T046 item 2). Every id this
+    module sets or checks is computed here, and its callers look it up at call
+    time, so a test that patches `health_contract.finding_id` patches them all."""
     found = (list(_name(kind, "/kind", "kind-is-a-family-name"))
              + list(_name(pack_id, "/pack_id", "pack-id-is-a-name"))
              + list(_path(path))
@@ -513,33 +521,51 @@ def _path(value: Any) -> Iterator[Violation]:
     yield Violation("path-is-corpus-relative", "/path", problem)
 
 
+#: One place in a walk: the value, its bounded pointer, whether that pointer
+#: has stopped at an ancestor, and the value's nesting level.
+_Place = tuple[Any, str, bool, int]
+
+
+def _child(at: str, stopped: bool, token: str) -> tuple[str, bool]:
+    """A child's pointer, bounded: `at` extended by `token` while the result
+    is at most `STRING_MAX` characters, and otherwise `at` itself, marked as
+    STOPPED. A stopped pointer stays stopped for every descendant, so `where`
+    names the nearest ancestor that fits and never a path that is not there."""
+    if not stopped:
+        child = f"{at}/{_escape(token)}"
+        if len(child) <= STRING_MAX:
+            return child, False
+    return at, True
+
+
 def _walk(root: dict[Any, Any], where: str, field: str) -> Iterator[Violation]:
     """Every rule `identity`'s or `evidence`'s content breaks, at any depth,
     by an explicit stack and never by recursion. A refused key's value is not
-    entered, so no pointer carries a key this module refused."""
-    stack: list[tuple[Any, str, int]] = [(root, where, 1)]
+    entered, so no pointer carries a key this module refused, and every
+    pointer is bounded (`_child`)."""
+    stack: list[_Place] = [(root, where, False, 1)]
     while stack:
-        value, at, level = stack.pop()
+        value, at, stopped, level = stack.pop()
         if not isinstance(value, (dict, list)):
             yield from _scalar(value, at, field)
         elif level > NESTING_MAX:
             yield Violation(NESTING_CAP, at, f"nests deeper than the engine's {NESTING_MAX} "
                             "levels of objects and arrays")
         elif isinstance(value, dict):
-            refused, inner = _members(value, at, level, field)
+            refused, inner = _members(value, at, stopped, level, field)
             yield from refused
             stack.extend(reversed(inner))
         else:
-            stack.extend(reversed([(item, f"{at}/{index}", level + 1)
+            stack.extend(reversed([(item, *_child(at, stopped, str(index)), level + 1)
                                    for index, item in enumerate(value)]))
 
 
-def _members(value: dict[Any, Any], at: str, level: int, field: str
-             ) -> tuple[list[Violation], list[tuple[Any, str, int]]]:
+def _members(value: dict[Any, Any], at: str, stopped: bool, level: int, field: str
+             ) -> tuple[list[Violation], list[_Place]]:
     """An object's refused keys, and the members to enter: those whose keys
     every rule admits."""
     refused: list[Violation] = []
-    inner: list[tuple[Any, str, int]] = []
+    inner: list[_Place] = []
     for key, item in value.items():
         if not isinstance(key, str):
             refused.append(Violation(NOT_JSON, at, f"has a key that is not text ({_type(key)})"))
@@ -550,7 +576,7 @@ def _members(value: dict[Any, Any], at: str, level: int, field: str
             refused.append(Violation(f"{field}-strings-are-short-text", at,
                                      f"has a key that {problem}"))
         else:
-            inner.append((item, f"{at}/{_escape(key)}", level + 1))
+            inner.append((item, *_child(at, stopped, key), level + 1))
     return refused, inner
 
 
@@ -763,9 +789,11 @@ def _references(finding: Mapping[str, Any], broken: set[str]) -> Iterator[Violat
                             f"names {named_pack} and {named_kind}, and the finding is "
                             f"{finding['pack_id']}'s {finding['kind']}")
     if admitted("id", "kind", "pack_id", "path", "identity"):
-        want = hashlib.sha256(id_key(identity=finding["identity"], kind=finding["kind"],
-                                     pack_id=finding["pack_id"], path=finding["path"])
-                              ).hexdigest()[:HASH_DIGITS]
+        # finding_id() is the ONE hash path (the holder's `6069507373`, T046
+        # item 2), looked up at call time: a test that patches
+        # `health_contract.finding_id` patches this check and make_finding() alike.
+        want = finding_id(identity=finding["identity"], kind=finding["kind"],
+                          pack_id=finding["pack_id"], path=finding["path"]).rsplit(".", 1)[1]
         have = finding["id"].rsplit(".", 1)[1]
         if have != want:
             yield Violation("id-is-the-hash-of-its-key", "/id",
