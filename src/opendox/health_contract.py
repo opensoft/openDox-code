@@ -78,10 +78,14 @@ only from keys this module admitted) and a size, a type or the admitted set.
 A finding's names and hashes, once admitted, may be named.
 
 THE ENGINE'S OWN IDENTITIES (contracts/health-finding.md § The id rule).
-`pathless_identity()`, `collision_identity()` and `disappearance_identity()`
-build the three keys the engine uses for its own findings, and `CATEGORIES`
-fixes the failure categories of an install-level or pre-run finding, so each
-such finding keeps one id across runs.
+`pathless_identity()` and `collision_identity()` build the two keys T041's
+task names for the engine's own findings, and `CATEGORIES` fixes the failure
+categories of an install-level or pre-run finding, so each such finding keeps
+one id across runs. The third engine key, `{disappeared_id}` for the re-raise
+of an uncited disappearance, is the baseline's (T046), and is not built here:
+for a pathless original, the finding schema's
+`pathless-identity-is-category-and-entry` rule refuses it, which is the
+holder's to rule (openDox-code#97, "For the holder", item 2).
 
 T045 APPENDS the pack protocol to this module (the static declaration, the
 stdout document and the patch type) at T041's landing, a cross-lane hand-off
@@ -126,12 +130,10 @@ __all__ = [
     "SEVERITIES",
     "SHAPE_RULES",
     "STRING_MAX",
-    "UNCITED_DISAPPEARANCE",
     "Violation",
     "canonical_json",
     "check_finding",
     "collision_identity",
-    "disappearance_identity",
     "finding_id",
     "id_key",
     "identity_json",
@@ -167,10 +169,6 @@ OPENDOX = "opendox"
 #: The kind of the engine's finding against a producer two of whose findings
 #: in one run shared one id.
 IDENTITY_COLLISION = "identity-collision"
-
-#: The kind of the engine's once-only re-raise of an uncited disappearance
-#: (data-model.md § Baseline classes).
-UNCITED_DISAPPEARANCE = "uncited-disappearance"
 
 #: A finding's fields, in the schema's order.
 REQUIRED_FIELDS: tuple[str, ...] = (
@@ -364,15 +362,6 @@ def collision_identity(collided_id: str) -> dict[str, str]:
     return {"collided_id": collided_id}
 
 
-def disappearance_identity(disappeared_id: str) -> dict[str, str]:
-    """The identity of the engine's re-raise of an uncited disappearance: the
-    original's id. The re-raise has its own id, never the original's."""
-    found = list(_id(disappeared_id, "/identity/disappeared_id", "id-is-well-formed"))
-    if found:
-        raise FindingRefused(found[0])
-    return {"disappeared_id": disappeared_id}
-
-
 # ---------------------------------------------------------------------------
 # the rules
 # ---------------------------------------------------------------------------
@@ -489,11 +478,8 @@ def _walk(root: dict[Any, Any], where: str, field: str) -> Iterator[Violation]:
                                 "is a number, which an identity never holds")
             elif isinstance(value, float) and not math.isfinite(value):
                 yield Violation(NOT_JSON, at, "is a number JSON cannot write")
-            elif isinstance(value, int) and value.bit_length() > 64:
-                try:
-                    str(value)
-                except ValueError:
-                    yield Violation(NOT_JSON, at, "is an integer too long to write as text")
+            elif isinstance(value, int) and not _writable(value):
+                yield Violation(NOT_JSON, at, "is an integer too long to write as text")
         else:
             yield Violation(NOT_JSON, at, f"is {_type(value)}")
 
@@ -542,6 +528,19 @@ def _collision_form(identity: dict[Any, Any]) -> Iterator[Violation]:
     yield from _id(identity["collided_id"], "/identity/collided_id", rule)
 
 
+def _writable(value: int) -> bool:
+    """Whether `json.dumps` can write this integer: Python refuses one longer
+    than its integer-string conversion limit (4300 digits by default), with a
+    `ValueError`. So a checked finding always serializes."""
+    if value.bit_length() <= 64:
+        return True
+    try:
+        str(value)
+    except ValueError:
+        return False
+    return True
+
+
 def _line(value: Any) -> bool:
     """A whole number no less than 1: JSON's integer, which 12.0 is too."""
     if isinstance(value, bool):
@@ -563,9 +562,15 @@ def _locator(value: Any) -> Iterator[Violation]:
         yield Violation("locator-keys", "/locator", "carries line_start and line_end "
                         "together or neither")
     for key in ("line_start", "line_end"):
-        if key in value and not _line(value[key]):
+        if key not in value:
+            continue
+        line = value[key]
+        if isinstance(line, int) and not isinstance(line, bool) and not _writable(line):
+            yield Violation(NOT_JSON, f"/locator/{key}", "is an integer too long to write "
+                            "as text")
+        elif not _line(line):
             yield Violation("locator-line-is-a-line-number", f"/locator/{key}",
-                            f"is not a whole number no less than 1 ({_type(value[key])})")
+                            f"is not a whole number no less than 1 ({_type(line)})")
     if "target" in value:
         target = value["target"]
         if not isinstance(target, str) or not target or _text_problem(target):
@@ -681,8 +686,11 @@ def _references(finding: Mapping[str, Any], broken: set[str]) -> Iterator[Violat
     if isinstance(locator, dict) and "line_start" in locator and "line_end" in locator:
         start, end = locator["line_start"], locator["line_end"]
         if end < start:
+            # The lines are not quoted: a refusal names no value of the finding,
+            # and a line may be any integer JSON can write.
             yield Violation("locator-span-is-ordered", "/locator/line_end",
-                            f"the span ends at {end:g}, before it starts at {start:g}")
+                            "line_end is less than line_start, so the span ends before "
+                            "it starts")
 
 
 def check_finding(finding: Any) -> None:

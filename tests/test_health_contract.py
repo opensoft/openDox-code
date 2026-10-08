@@ -243,9 +243,6 @@ _IDENTITIES: dict[str, tuple[str, str, Any, str]] = {
     "a pathless collision": ("", "identity-collision",
                              hc.collision_identity("opendox.no-sandbox.5ccbb79891acb2e8"),
                              "human-only"),
-    "an uncited disappearance": (
-        "notes/plan.md", "uncited-disappearance",
-        hc.disappearance_identity("opendox.broken-link.546cd2aacb1a6738"), "human-only"),
 }
 
 
@@ -390,7 +387,6 @@ def test_the_vocabulary_is_the_packaged_copys() -> None:
     assert props["locator"]["properties"]["target"]["maxLength"] == STRING_MAX
     assert hc.OPENDOX == "opendox"
     assert hc.IDENTITY_COLLISION == "identity-collision"
-    assert hc.UNCITED_DISAPPEARANCE == "uncited-disappearance"
 
 
 def test_the_rule_catalog_is_the_copys_plus_the_engines_own() -> None:
@@ -568,11 +564,10 @@ def test_a_name_outside_the_alphabet_is_refused(field: str, rule: str, value: An
     assert rule in _rules(finding)
 
 
-@pytest.mark.parametrize("make", [hc.collision_identity, hc.disappearance_identity])
-def test_an_engine_identity_naming_a_41_character_part_is_refused(make) -> None:
-    assert make("p" * 40 + "." + "k" * 40 + "." + "0" * 16)
+def test_a_collision_naming_a_41_character_part_is_refused() -> None:
+    assert hc.collision_identity("p" * 40 + "." + "k" * 40 + "." + "0" * 16)
     with pytest.raises(hc.FindingRefused) as refused:
-        make("p" * 41 + ".k." + "0" * 16)
+        hc.collision_identity("p" * 41 + ".k." + "0" * 16)
     assert refused.value.rule == "name-is-at-most-40-characters"
 
 
@@ -783,6 +778,47 @@ def test_an_identity_that_is_not_text_utf8_can_encode_is_refused(identity: Any,
 def test_the_locator_is_display_only_and_bounded(locator: Any, rules: list[str]) -> None:
     finding = {**_example("broken-link"), "locator": locator}
     assert _rules(finding) == rules
+
+
+#: Integers JSON admits that Python's encoder cannot write: past the
+#: integer-string conversion limit (4300 digits by default).
+_UNWRITABLE = 10 ** 5000
+
+
+@pytest.mark.parametrize("locator, rules", [
+    ({"line_start": _UNWRITABLE, "line_end": _UNWRITABLE},
+     ["finding-is-json", "finding-is-json"]),
+    ({"line_start": 1, "line_end": _UNWRITABLE}, ["finding-is-json"]),
+    # openDox-code#97, Codex r4223401860: a 401-digit line is writable, and an
+    # out-of-order span of it is refused by its rule, never an OverflowError
+    ({"line_start": 10 ** 400, "line_end": 1}, ["locator-span-is-ordered"]),
+    ({"line_start": 1, "line_end": 10 ** 400}, []),
+    ({"line_start": 1e308, "line_end": 1}, ["locator-span-is-ordered"]),
+    ({"line_start": 1, "line_end": 1e308}, []),
+], ids=["both unwritable", "line_end unwritable", "401 digits out of order",
+        "401 digits in order", "1e308 out of order", "1e308 in order"])
+def test_a_locator_of_any_size_is_judged_never_raised(locator: Any, rules: list[str]) -> None:
+    """Copilot r4223399258 and Codex r4223401860 on openDox-code#97: a checked
+    finding always serializes, and judging one never raises."""
+    finding = {**_example("broken-link"), "locator": locator}
+    assert _rules(finding) == rules
+    if rules:
+        with pytest.raises(hc.FindingRefused):
+            hc.to_json(finding)
+        with pytest.raises(hc.FindingRefused):
+            hc.make_finding(**{**_fields(_example("broken-link")), "locator": locator})
+    else:
+        assert json.loads(hc.to_json(finding))["locator"] == locator
+
+
+def test_evidence_of_any_size_is_judged_never_raised() -> None:
+    finding = {**_example("broken-link"), "evidence": {"a": [_UNWRITABLE], "b": 10 ** 400}}
+    assert [(v.rule, v.where) for v in hc.violations(finding)] == [
+        ("finding-is-json", "/evidence/a/0")]
+    with pytest.raises(hc.FindingRefused):
+        hc.to_json(finding)
+    finding["evidence"] = {"b": 10 ** 400}
+    assert json.loads(hc.to_json(finding))["evidence"] == {"b": 10 ** 400}
 
 
 @pytest.mark.parametrize("path, admitted", [
@@ -1025,22 +1061,18 @@ def test_the_pathless_identity_refuses_what_is_not_the_engines(category: Any,
     assert refused.value.rule == "pathless-identity-is-category-and-entry"
 
 
-@pytest.mark.parametrize("make, rule", [
-    (hc.collision_identity, "collision-identity-is-the-collided-id"),
-    (hc.disappearance_identity, "id-is-well-formed")])
 @pytest.mark.parametrize("value", ["", "opendox.broken-link", "opendox.broken-link.XYZ",
                                    "opendox.broken-link.546cd2aacb1a673",
                                    "opendox.broken-link.546cd2aacb1a6738\n", None])
-def test_an_engine_identity_names_a_well_formed_id(make, rule: str, value: Any) -> None:
+def test_a_collision_names_a_well_formed_id(value: Any) -> None:
     with pytest.raises(hc.FindingRefused) as refused:
-        make(value)
-    assert refused.value.rule == rule
+        hc.collision_identity(value)
+    assert refused.value.rule == "collision-identity-is-the-collided-id"
 
 
 def test_the_engines_identities_are_their_keys() -> None:
     fid = "opendox.broken-link.546cd2aacb1a6738"
     assert hc.collision_identity(fid) == {"collided_id": fid}
-    assert hc.disappearance_identity(fid) == {"disappeared_id": fid}
     assert hc.pathless_identity("no-sandbox") == {"category": "no-sandbox", "entry": ""}
 
 
@@ -1175,7 +1207,8 @@ def test_a_violation_reads_as_its_rule_its_place_and_its_detail() -> None:
     assert violation.rule == "locator-span-is-ordered"
     assert violation.where == "/locator/line_end"
     assert violation.line() == f"[locator-span-is-ordered] /locator/line_end: {violation.detail}"
-    assert "12" in violation.detail and "14" in violation.detail
+    # it names no value of the finding, the lines included
+    assert "12" not in violation.detail and "14" not in violation.detail
     refused = hc.FindingRefused(violation)
     assert isinstance(refused, ValueError)
     assert (refused.rule, refused.where) == (violation.rule, violation.where)
