@@ -253,6 +253,11 @@ NESTING_CAP = "nesting-is-within-the-cap"
 NOT_JSON = "finding-is-json"
 ENGINE_RULES: tuple[str, ...] = (NAME_CAP, SIZE_CAP, NESTING_CAP, NOT_JSON)
 
+# The pointers of the fields more than one rule reports at.
+_AT_IDENTITY = "/identity"
+_AT_LOCATOR = "/locator"
+_AT_RESOLUTION_CLASS = "/resolution_class"
+
 # The schema's patterns, read as Python's `fullmatch`, which admits no trailing
 # newline (the schema's `$(?!\n)`).
 _NAME = re.compile(r"[a-z0-9-]+")
@@ -443,45 +448,59 @@ def _walk(root: dict[Any, Any], where: str, field: str) -> Iterator[Violation]:
     """Every rule `identity`'s or `evidence`'s content breaks, at any depth,
     by an explicit stack and never by recursion. A refused key's value is not
     entered, so no pointer carries a key this module refused."""
-    names_rule = f"{field}-names-no-text"
-    strings_rule = f"{field}-strings-are-short-text"
     stack: list[tuple[Any, str, int]] = [(root, where, 1)]
     while stack:
         value, at, level = stack.pop()
-        if isinstance(value, (dict, list)) and level > NESTING_MAX:
+        if not isinstance(value, (dict, list)):
+            yield from _scalar(value, at, field)
+        elif level > NESTING_MAX:
             yield Violation(NESTING_CAP, at, f"nests deeper than the engine's {NESTING_MAX} "
                             "levels of objects and arrays")
         elif isinstance(value, dict):
-            inner: list[tuple[Any, str, int]] = []
-            for key, item in value.items():
-                if not isinstance(key, str):
-                    yield Violation(NOT_JSON, at, f"has a key that is not text ({_type(key)})")
-                elif key in FORBIDDEN_KEYS:
-                    yield Violation(names_rule, at, f"has a key named {key}, which names "
-                                    "document text")
-                elif (problem := _text_problem(key)) is not None:
-                    yield Violation(strings_rule, at, f"has a key that {problem}")
-                else:
-                    inner.append((item, f"{at}/{_escape(key)}", level + 1))
+            refused, inner = _members(value, at, level, field)
+            yield from refused
             stack.extend(reversed(inner))
-        elif isinstance(value, list):
+        else:
             stack.extend(reversed([(item, f"{at}/{index}", level + 1)
                                    for index, item in enumerate(value)]))
-        elif isinstance(value, str):
-            if (problem := _text_problem(value)) is not None:
-                yield Violation(strings_rule, at, f"is a string that {problem}")
-        elif value is None or isinstance(value, bool):
-            continue
-        elif isinstance(value, (int, float)):
-            if field == "identity":
-                yield Violation("identity-holds-no-number", at,
-                                "is a number, which an identity never holds")
-            elif isinstance(value, float) and not math.isfinite(value):
-                yield Violation(NOT_JSON, at, "is a number JSON cannot write")
-            elif isinstance(value, int) and not _writable(value):
-                yield Violation(NOT_JSON, at, "is an integer too long to write as text")
+
+
+def _members(value: dict[Any, Any], at: str, level: int, field: str
+             ) -> tuple[list[Violation], list[tuple[Any, str, int]]]:
+    """An object's refused keys, and the members to enter: those whose keys
+    every rule admits."""
+    refused: list[Violation] = []
+    inner: list[tuple[Any, str, int]] = []
+    for key, item in value.items():
+        if not isinstance(key, str):
+            refused.append(Violation(NOT_JSON, at, f"has a key that is not text ({_type(key)})"))
+        elif key in FORBIDDEN_KEYS:
+            refused.append(Violation(f"{field}-names-no-text", at,
+                                     f"has a key named {key}, which names document text"))
+        elif (problem := _text_problem(key)) is not None:
+            refused.append(Violation(f"{field}-strings-are-short-text", at,
+                                     f"has a key that {problem}"))
         else:
-            yield Violation(NOT_JSON, at, f"is {_type(value)}")
+            inner.append((item, f"{at}/{_escape(key)}", level + 1))
+    return refused, inner
+
+
+def _scalar(value: Any, at: str, field: str) -> Iterator[Violation]:
+    """The rules a value that is no object or array breaks."""
+    if isinstance(value, str):
+        if (problem := _text_problem(value)) is not None:
+            yield Violation(f"{field}-strings-are-short-text", at, f"is a string that {problem}")
+    elif value is None or isinstance(value, bool):
+        return
+    elif not isinstance(value, (int, float)):
+        yield Violation(NOT_JSON, at, f"is {_type(value)}")
+    elif field == "identity":
+        yield Violation("identity-holds-no-number", at,
+                        "is a number, which an identity never holds")
+    elif isinstance(value, float) and not math.isfinite(value):
+        yield Violation(NOT_JSON, at, "is a number JSON cannot write")
+    elif isinstance(value, int) and not _writable(value):
+        yield Violation(NOT_JSON, at, "is an integer too long to write as text")
 
 
 def _identity(value: Any, *, path: Any = None, kind: Any = None) -> Iterator[Violation]:
@@ -489,10 +508,10 @@ def _identity(value: Any, *, path: Any = None, kind: Any = None) -> Iterator[Vio
     its finding's path and kind call for (when given), and the engine's size
     cap, judged last and only over an identity every other rule admits."""
     if not isinstance(value, dict):
-        yield Violation("identity-is-an-object", "/identity", f"is {_type(value)}, not an "
+        yield Violation("identity-is-an-object", _AT_IDENTITY, f"is {_type(value)}, not an "
                         "object")
         return
-    found = list(_walk(value, "/identity", "identity"))
+    found = list(_walk(value, _AT_IDENTITY, "identity"))
     if kind == IDENTITY_COLLISION:
         found += _collision_form(value)
     elif path == "":
@@ -501,14 +520,14 @@ def _identity(value: Any, *, path: Any = None, kind: Any = None) -> Iterator[Vio
     if not found:
         size = len(canonical_json(value))
         if size > IDENTITY_MAX_BYTES:
-            yield Violation(SIZE_CAP, "/identity", f"its canonical JSON is {size} bytes; the "
+            yield Violation(SIZE_CAP, _AT_IDENTITY, f"its canonical JSON is {size} bytes; the "
                             f"engine's cap is {IDENTITY_MAX_BYTES}")
 
 
 def _pathless_form(identity: dict[Any, Any]) -> Iterator[Violation]:
     rule = "pathless-identity-is-category-and-entry"
     if set(identity) != {"category", "entry"}:
-        yield Violation(rule, "/identity", "a pathless finding's identity is exactly "
+        yield Violation(rule, _AT_IDENTITY, "a pathless finding's identity is exactly "
                         "{category, entry}, the engine's own")
         return
     if not isinstance(identity["category"], str) or not _NAME.fullmatch(identity["category"]):
@@ -522,7 +541,7 @@ def _pathless_form(identity: dict[Any, Any]) -> Iterator[Violation]:
 def _collision_form(identity: dict[Any, Any]) -> Iterator[Violation]:
     rule = "collision-identity-is-the-collided-id"
     if set(identity) != {"collided_id"}:
-        yield Violation(rule, "/identity", "a collision's identity is exactly "
+        yield Violation(rule, _AT_IDENTITY, "a collision's identity is exactly "
                         "{collided_id}, the engine's own")
         return
     yield from _id(identity["collided_id"], "/identity/collided_id", rule)
@@ -552,14 +571,14 @@ def _line(value: Any) -> bool:
 
 def _locator(value: Any) -> Iterator[Violation]:
     if not isinstance(value, dict):
-        yield Violation("locator-keys", "/locator", f"is {_type(value)}, not an object")
+        yield Violation("locator-keys", _AT_LOCATOR, f"is {_type(value)}, not an object")
         return
     keys = set(value)
     if not keys or keys - {"line_start", "line_end", "target"}:
-        yield Violation("locator-keys", "/locator", "carries line_start and line_end "
+        yield Violation("locator-keys", _AT_LOCATOR, "carries line_start and line_end "
                         "together, target, or both, and no other key")
     elif ("line_start" in keys) != ("line_end" in keys):
-        yield Violation("locator-keys", "/locator", "carries line_start and line_end "
+        yield Violation("locator-keys", _AT_LOCATOR, "carries line_start and line_end "
                         "together or neither")
     for key in ("line_start", "line_end"):
         if key not in value:
@@ -627,7 +646,7 @@ def violations(finding: Any) -> list[Violation]:
                                         kind=finding.get("kind")),
         "locator": _locator,
         "severity": lambda v: _one_of(v, SEVERITIES, "/severity", "severity-is-known"),
-        "resolution_class": lambda v: _one_of(v, RESOLUTION_CLASSES, "/resolution_class",
+        "resolution_class": lambda v: _one_of(v, RESOLUTION_CLASSES, _AT_RESOLUTION_CLASS,
                                               "resolution-class-is-one-of-three"),
         "message": _message,
         "evidence": _evidence,
@@ -654,11 +673,11 @@ def _conditional(finding: Mapping[str, Any], broken: set[str]) -> Iterator[Viola
     if not known or finding["resolution_class"] == HUMAN_ONLY:
         return
     if finding.get("path") == "":
-        yield Violation("pathless-finding-is-human-only", "/resolution_class",
+        yield Violation("pathless-finding-is-human-only", _AT_RESOLUTION_CLASS,
                         "a pathless finding names no document a repair could edit, so it "
                         "is human-only")
     if finding.get("kind") == IDENTITY_COLLISION:
-        yield Violation("identity-collision-is-human-only", "/resolution_class",
+        yield Violation("identity-collision-is-human-only", _AT_RESOLUTION_CLASS,
                         "an identity collision is human-only")
 
 

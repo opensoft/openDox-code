@@ -271,7 +271,7 @@ def test_the_serialized_identity_holds_the_schemas_bound(name: str) -> None:
                 if isinstance(v, (int, float)) and not isinstance(v, bool)], values
     # every string, key or value, at most 200 characters
     strings = keys + [v for v in values if isinstance(v, str)]
-    assert strings == [] or max(len(s) for s in strings) <= STRING_MAX
+    assert all(len(s) <= STRING_MAX for s in strings), [len(s) for s in strings]
     # the engine's own keys
     if emitted["kind"] == "identity-collision":
         assert sorted(identity) == ["collided_id"]
@@ -654,8 +654,9 @@ def test_the_nesting_bound_admits_its_bound_and_refuses_one_level_over(field: st
     assert hc.NESTING_MAX == 16
     fields = _fields(_example("orphan"))
     hc.make_finding(**{**fields, field: _nested(16)})
+    over = {**fields, field: _nested(17)}
     with pytest.raises(hc.FindingRefused) as refused:
-        hc.make_finding(**{**fields, field: _nested(17)})
+        hc.make_finding(**over)
     assert refused.value.rule == "nesting-is-within-the-cap"
 
 
@@ -669,8 +670,9 @@ def test_a_deep_value_is_refused_never_a_recursion_error(field: str) -> None:
     assert "nesting-is-within-the-cap" in _rules(finding)
     with pytest.raises(hc.FindingRefused):
         hc.to_json(finding)
+    fields = {**_fields(_example("orphan")), field: deep}
     with pytest.raises(hc.FindingRefused):
-        hc.make_finding(**{**_fields(_example("orphan")), field: deep})
+        hc.make_finding(**fields)
 
 
 # ---------------------------------------------------------------------------
@@ -805,8 +807,9 @@ def test_a_locator_of_any_size_is_judged_never_raised(locator: Any, rules: list[
     if rules:
         with pytest.raises(hc.FindingRefused):
             hc.to_json(finding)
+        fields = {**_fields(_example("broken-link")), "locator": locator}
         with pytest.raises(hc.FindingRefused):
-            hc.make_finding(**{**_fields(_example("broken-link")), "locator": locator})
+            hc.make_finding(**fields)
     else:
         assert json.loads(hc.to_json(finding))["locator"] == locator
 
@@ -1161,7 +1164,8 @@ def test_the_module_runs_alone_with_no_site_packages(tmp_path: Path) -> None:
         env={"PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8"})
     assert done.returncode == 0, done.stderr
     found = json.loads(done.stdout.strip().splitlines()[-1])
-    assert found["site"] is False and found["paths"] == []
+    assert found["site"] is False
+    assert found["paths"] == []
     assert Path(found["file"]).parent == package
     here = hc.make_finding(kind="broken-link", pack_id="opendox", pack_version="0.2.0",
                            path="notes/plan.md", identity={"target": "../old/brief.md"},
@@ -1208,7 +1212,8 @@ def test_a_violation_reads_as_its_rule_its_place_and_its_detail() -> None:
     assert violation.where == "/locator/line_end"
     assert violation.line() == f"[locator-span-is-ordered] /locator/line_end: {violation.detail}"
     # it names no value of the finding, the lines included
-    assert "12" not in violation.detail and "14" not in violation.detail
+    assert "12" not in violation.detail
+    assert "14" not in violation.detail
     refused = hc.FindingRefused(violation)
     assert isinstance(refused, ValueError)
     assert (refused.rule, refused.where) == (violation.rule, violation.where)
