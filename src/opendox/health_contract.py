@@ -71,25 +71,40 @@ refuses a copy whose catalog names reference rules it does not implement
 `locator-span-is-ordered`. As in openDox-spec's own test, a reference rule
 judges only parts whose own rules hold, so one cause is reported once.
 
-A REFUSAL QUOTES NOTHING OF THE FINDING. A finding may carry document text where
-it must not, which is why it is refused. So no violation's text holds any of
-the finding's own strings: it names the rule, the place (a JSON pointer built
-only from keys this module admitted) and a size, a type or the admitted set.
-A finding's names and hashes, once admitted, may be named.
+A REFUSAL QUOTES NOTHING IT REFUSED. A finding may carry document text where
+it must not, which is why it is refused. So no refused string, key or value
+reaches a violation: its `detail` names a size, a type or the admitted set,
+never a value of the finding, and a finding's names and hashes are named only
+once admitted. Its `where` is a JSON pointer built only from keys this module
+ADMITTED, so it does name those keys, verbatim: each is at most 200
+characters and no forbidden word, but a key may still be document text (a
+heading key is), and `NESTING_MAX` of them make a pointer far longer than any
+finding field. So `rule` is what an engine records about a refusal; one that
+records `where` too bounds it as it bounds any string it stores.
 
-THE ENGINE'S OWN IDENTITIES (contracts/health-finding.md § The id rule).
-`pathless_identity()` and `collision_identity()` build the two keys T041's
-task names for the engine's own findings, and `CATEGORIES` fixes the failure
-categories of an install-level or pre-run finding, so each such finding keeps
-one id across runs. The third engine key, `{disappeared_id}` for the re-raise
-of an uncited disappearance, is the baseline's (T046), and is not built here:
-for a pathless original, the finding schema's
-`pathless-identity-is-category-and-entry` rule refuses it, which is the
-holder's to rule (openDox-code#97, "For the holder", item 2).
+THE ENGINE'S OWN FINDINGS (contracts/health-finding.md § The id rule; the
+holder's rulings `openxFactory#656` `6069024023`, items 1 and 2).
+
+* `CATEGORIES` fixes the failure categories of an install-level or pre-run
+  finding. A category is also that finding's `kind`, its `pack_id` is fixed
+  per category (`ENTRY_CATEGORIES`), and its identity is `{category, entry}`,
+  so the engine raises ONE such finding per category and entry in a run,
+  with the reasons in `evidence`, and it keeps one id across runs.
+  `pathless_identity()` builds the identity and `engine_finding()` the whole
+  finding.
+* `collision_identity()` builds a collision's `{collided_id}`.
+* `disappearance_identity()` builds the identity of the re-raise of an
+  uncited disappearance, in the form its original's path calls for: a pathed
+  original's `{disappeared_id}`, and for a pathless original the pathless form
+  the schema requires, `{category: <the original's kind>, entry: <its entry,
+  or "">}` (option (D)). T046 raises it.
+* `ENGINE_KINDS` are the kinds only the engine raises, which T045 refuses in a
+  pack's declaration.
 
 T045 APPENDS the pack protocol to this module (the static declaration, the
 stdout document and the patch type) at T041's landing, a cross-lane hand-off
-(plan.md § single-writer files).
+(plan.md:458, § "Parallel slices, and the files only one writer may touch at
+a time").
 
 A CREATED FILE: it has no row in openxFactory's
 `docs/opendox-carve-manifest.yaml`, because the manifest declares what LEAVES
@@ -111,7 +126,9 @@ __all__ = [
     "BASELINE_CLASSES",
     "CATEGORIES",
     "ENGINE_FIELDS",
+    "ENGINE_KINDS",
     "ENGINE_RULES",
+    "ENTRY_CATEGORIES",
     "FIELDS",
     "FORBIDDEN_KEYS",
     "FindingRefused",
@@ -130,10 +147,13 @@ __all__ = [
     "SEVERITIES",
     "SHAPE_RULES",
     "STRING_MAX",
+    "UNCITED_DISAPPEARANCE",
     "Violation",
     "canonical_json",
     "check_finding",
     "collision_identity",
+    "disappearance_identity",
+    "engine_finding",
     "finding_id",
     "id_key",
     "identity_json",
@@ -169,6 +189,10 @@ OPENDOX = "opendox"
 #: The kind of the engine's finding against a producer two of whose findings
 #: in one run shared one id.
 IDENTITY_COLLISION = "identity-collision"
+
+#: The kind of the engine's once-only re-raise of an uncited disappearance
+#: (data-model.md § Baseline classes; T046 raises it).
+UNCITED_DISAPPEARANCE = "uncited-disappearance"
 
 #: A finding's fields, in the schema's order.
 REQUIRED_FIELDS: tuple[str, ...] = (
@@ -215,7 +239,9 @@ NESTING_MAX = 16
 #: The failure categories of an install-level or pre-run finding, whose
 #: identity is the engine's own `{category, entry}` (contracts/health-finding.md
 #: § The id rule; T041 fixes them with the id rule). `entry` is the manifest
-#: entry's id, or "" for none.
+#: entry's id, or "" for none. The nine T041 drafted are ACCEPTED as written,
+#: and the last two are ADDED, by the holder's `6069024023` item 1. A category
+#: is also its finding's `kind`.
 CATEGORIES: tuple[str, ...] = (
     "no-sandbox",            # no live sandbox, so no pack ran (R2Q16 (a))
     "entry-refused",         # a manifest entry refused by name (15.1a)
@@ -224,9 +250,31 @@ CATEGORIES: tuple[str, ...] = (
     "declaration-refused",   # a pack's `opendox-pack.yaml` refused (15.2; OQ-H15-10)
     "pack-crashed",          # a pack that exited non-zero or on a signal (15.6)
     "pack-timed-out",        # a pack that ran past its time budget (15.6)
-    "pack-bound-hit",        # a pack that hit one of the engine's bounds (15.6)
-    "pack-output-refused",   # a pack's stdout the engine refused (15.5, 15.6)
+    "pack-bound-hit",        # a pack that hit one of the engine's bounds, its
+                             # stdout cap included (15.6)
+    "pack-output-refused",   # a pack's stdout that is not one JSON document, or
+                             # breaks the contract; refused whole (15.5, 15.6)
+    "manifest-refused",      # `health/packs.yaml` refused as a whole; entry "" (15.1a)
+    "dispositions-refused",  # `health/dispositions.yaml` refused; entry ""
+                             # (contracts/health-exceptions.md; T054 raises it)
 )
+
+#: The categories whose finding is against the PACK its manifest entry
+#: launched: the finding's `pack_id` is the entry's id, which is its pack's id
+#: (15.7), so `entry` is never empty for them. Every other category's finding is
+#: against the product itself, `opendox`: no live sandbox, a refused manifest or
+#: dispositions file, and a refused entry, whose id may be malformed, reserved
+#: or repeated and so is no pack id to attribute a finding to. One `pack_id`
+#: per category (the holder's `6069024023` item 1).
+ENTRY_CATEGORIES: frozenset[str] = frozenset({
+    "fetch-failed", "digest-mismatch", "declaration-refused", "pack-crashed",
+    "pack-timed-out", "pack-bound-hit", "pack-output-refused"})
+
+#: The kinds only the ENGINE raises: its categories, a collision and the
+#: re-raise of a disappearance. A pack declares none of them (T045 refuses
+#: one; the holder's `6069024023` item 1).
+ENGINE_KINDS: frozenset[str] = frozenset(CATEGORIES) | {IDENTITY_COLLISION,
+                                                       UNCITED_DISAPPEARANCE}
 
 #: The copy's catalog: the rules its own keywords state, and the three
 #: cross-field rules no JSON Schema keyword can state.
@@ -271,7 +319,8 @@ _NOT_ONE_LINE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")
 
 class Violation(NamedTuple):
     """One rule a finding breaks: the rule's id, where (a JSON pointer into the
-    finding), and what was found. No part quotes the finding's own text."""
+    finding, built from keys this module admitted, which it names verbatim),
+    and what was found. No part quotes a string, key or value it refused."""
 
     rule: str
     where: str
@@ -283,8 +332,9 @@ class Violation(NamedTuple):
 
 class FindingRefused(ValueError):
     """A finding, or a part of one, breaks a rule of the contract. `rule` and
-    `where` are the first violation's; an engine records those, and never the
-    refused value."""
+    `where` are the first violation's. An engine records `rule`, and never the
+    refused value; `where` names admitted keys verbatim and is unbounded in
+    length, so an engine that records it bounds it first."""
 
     def __init__(self, violation: Violation, more: int = 0) -> None:
         self.violation = violation
@@ -365,6 +415,25 @@ def collision_identity(collided_id: str) -> dict[str, str]:
     if found:
         raise FindingRefused(found[0])
     return {"collided_id": collided_id}
+
+
+def disappearance_identity(original: dict[str, Any]) -> dict[str, str]:
+    """The identity of the engine's re-raise of an uncited disappearance, in
+    the form the ORIGINAL's path calls for (option (D), the holder's
+    `6069024023` item 2). T046 raises the re-raise: kind
+    `uncited-disappearance`, the original's path, human-only, and the
+    original's id and the baseline run in `evidence`.
+
+    * A pathed original's: `{"disappeared_id": <its id>}`.
+    * A pathless original's: the pathless form the schema requires,
+      `{"category": <its kind>, "entry": <its identity's entry, or "">}`. A
+      pathless collision has no entry, so its entry is "".
+
+    `original` is the finding as stored, checked whole first."""
+    check_finding(original)
+    if original["path"] != "":
+        return {"disappeared_id": original["id"]}
+    return {"category": original["kind"], "entry": original["identity"].get("entry", "")}
 
 
 # ---------------------------------------------------------------------------
@@ -750,6 +819,32 @@ def make_finding(*, kind: str, pack_id: str, pack_version: str, path: str,
     check_finding(finding)
     # Copied after the check, which bounds the nesting the copy recurses into.
     return copy.deepcopy(finding)
+
+
+def engine_finding(category: str, entry: str = "", *, pack_version: str, severity: str,
+                   message: str, evidence: dict[str, Any] | None = None) -> dict[str, Any]:
+    """An install-level or pre-run finding, as the engine raises it (the
+    holder's `6069024023` item 1). Its `kind` is its category, its `path` is
+    empty, its identity is `{category, entry}`, and it is human-only. Its
+    `pack_id` is the one its category fixes: for `ENTRY_CATEGORIES`, `entry`,
+    the manifest entry's id, which is never empty and never `opendox`; for
+    every other category, `opendox`. `pack_version` is that pack's: the
+    entry's version, or the installed version for `opendox`. The reasons ride
+    in `evidence`, so a run raises one such finding per category and entry,
+    and it keeps one id across runs."""
+    identity = pathless_identity(category, entry)
+    pack_id = OPENDOX
+    if category in ENTRY_CATEGORIES:
+        if entry in ("", OPENDOX):
+            raise FindingRefused(Violation(
+                "pathless-identity-is-category-and-entry", "/identity/entry",
+                f"a {category} finding is against the pack its manifest entry "
+                f"launched, so its entry is that pack's id, never empty and never "
+                f"{OPENDOX}"))
+        pack_id = entry
+    return make_finding(kind=category, pack_id=pack_id, pack_version=pack_version, path="",
+                        identity=identity, severity=severity, resolution_class=HUMAN_ONLY,
+                        message=message, evidence=evidence)
 
 
 def to_json(finding: dict[str, Any]) -> str:

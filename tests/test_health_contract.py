@@ -44,8 +44,11 @@ WHAT ELSE IT HOLDS.
 7. EVERY RULE THE COPY CATALOGUES IS ENFORCED. Each of its 27 rules has one
    negative case, openDox-spec's own negative example rebuilt, refused for
    that rule and no other; so are the module's four engine rules.
-8. THE ENGINE'S OWN IDENTITIES AND CATEGORIES, and openDox-spec's five
-   examples rebuilt through `make_finding()`, id included.
+8. THE ENGINE'S OWN FINDINGS (the holder's `6069024023`): the eleven ruled
+   categories, each one finding per category and entry with one id across
+   runs and one `pack_id` per category (`engine_finding()`); the disappearance
+   re-raise in both forms, option (D); and openDox-spec's five examples
+   rebuilt through `make_finding()` and `engine_finding()`, id included.
 9. THE CLOSURE: the module imports the standard library and nothing else. Its
    imports are read from its source, it is imported in a fresh interpreter
    that blocks openXdox and openxFactory, and it runs from a directory that
@@ -240,6 +243,16 @@ _IDENTITIES: dict[str, tuple[str, str, Any, str]] = {
     "a collision": ("notes/plan.md", "identity-collision",
                     hc.collision_identity("house-style.heading-case.0f1e2d3c4b5a6978"),
                     "human-only"),
+    "a refused manifest, the whole file": (
+        "", "manifest-refused", hc.pathless_identity("manifest-refused"), "human-only"),
+    "a refused dispositions file": (
+        "", "dispositions-refused", hc.pathless_identity("dispositions-refused"), "human-only"),
+    "the disappearance of a pathed finding": (
+        "notes/plan.md", "uncited-disappearance",
+        hc.disappearance_identity(EXAMPLES["broken-link"]), "human-only"),
+    "the disappearance of a pathless finding": (
+        "", "uncited-disappearance",
+        hc.disappearance_identity(EXAMPLES["no-sandbox"]), "human-only"),
     "a pathless collision": ("", "identity-collision",
                              hc.collision_identity("opendox.no-sandbox.5ccbb79891acb2e8"),
                              "human-only"),
@@ -387,6 +400,7 @@ def test_the_vocabulary_is_the_packaged_copys() -> None:
     assert props["locator"]["properties"]["target"]["maxLength"] == STRING_MAX
     assert hc.OPENDOX == "opendox"
     assert hc.IDENTITY_COLLISION == "identity-collision"
+    assert hc.UNCITED_DISAPPEARANCE == "uncited-disappearance"
 
 
 def test_the_rule_catalog_is_the_copys_plus_the_engines_own() -> None:
@@ -794,11 +808,14 @@ _UNWRITABLE = 10 ** 5000
     # openDox-code#97, Codex r4223401860: a 401-digit line is writable, and an
     # out-of-order span of it is refused by its rule, never an OverflowError
     ({"line_start": 10 ** 400, "line_end": 1}, ["locator-span-is-ordered"]),
+    # lane 3's REVIEW-W1 MAJOR probe: a reversed span of 401-digit integers
+    ({"line_start": 10 ** 400, "line_end": 10 ** 399}, ["locator-span-is-ordered"]),
     ({"line_start": 1, "line_end": 10 ** 400}, []),
     ({"line_start": 1e308, "line_end": 1}, ["locator-span-is-ordered"]),
     ({"line_start": 1, "line_end": 1e308}, []),
 ], ids=["both unwritable", "line_end unwritable", "401 digits out of order",
-        "401 digits in order", "1e308 out of order", "1e308 in order"])
+        "lane 3's reversed 401-digit span", "401 digits in order", "1e308 out of order",
+        "1e308 in order"])
 def test_a_locator_of_any_size_is_judged_never_raised(locator: Any, rules: list[str]) -> None:
     """Copilot r4223399258 and Codex r4223401860 on openDox-code#97: a checked
     finding always serializes, and judging one never raises."""
@@ -955,6 +972,15 @@ def test_a_finding_without_a_required_field_is_refused(missing: str) -> None:
     assert "finding-keys" in _rules(finding)
 
 
+def test_a_field_name_that_is_not_text_is_refused() -> None:
+    """Lane 3's REVIEW-W1 MINOR: with this refusal gone, the finding was
+    admitted and `to_json()` raised `TypeError`."""
+    finding = {**_example("broken-link"), 1: "x"}
+    assert [(v.rule, v.where) for v in hc.violations(finding)] == [("finding-is-json", "")]
+    with pytest.raises(hc.FindingRefused):
+        hc.to_json(finding)
+
+
 @pytest.mark.parametrize("finding", [[], "a finding", None, 3])
 def test_a_finding_that_is_not_an_object_is_refused(finding: Any) -> None:
     assert [(v.rule, v.where) for v in hc.violations(finding)] == [("finding-keys", "")]
@@ -1034,24 +1060,88 @@ def test_to_json_is_the_canonical_serialization() -> None:
     assert "caf\u00e9" in text
 
 
-def test_the_categories_are_names_and_the_copys_example_is_one() -> None:
-    assert "no-sandbox" in hc.CATEGORIES
-    assert len(set(hc.CATEGORIES)) == len(hc.CATEGORIES)
+#: The categories as the holder ruled them (`6069024023` item 1): the nine
+#: T041 drafted, accepted as written, and the two added.
+RULED_CATEGORIES = ("no-sandbox", "entry-refused", "fetch-failed", "digest-mismatch",
+                    "declaration-refused", "pack-crashed", "pack-timed-out",
+                    "pack-bound-hit", "pack-output-refused", "manifest-refused",
+                    "dispositions-refused")
+
+#: The categories whose finding is against the product itself; the rest are
+#: against the pack their manifest entry launched.
+AGAINST_OPENDOX = {"no-sandbox", "entry-refused", "manifest-refused", "dispositions-refused"}
+
+
+def test_the_categories_are_the_ruled_ones_and_names() -> None:
+    assert hc.CATEGORIES == RULED_CATEGORIES
+    assert "no-sandbox" in hc.CATEGORIES  # openDox-spec's own released example
     for category in hc.CATEGORIES:
         assert re.fullmatch(r"[a-z0-9-]{1,40}", category), category
+    assert set(hc.CATEGORIES) - hc.ENTRY_CATEGORIES == AGAINST_OPENDOX
+    assert hc.ENTRY_CATEGORIES < set(hc.CATEGORIES)
+    assert hc.ENGINE_KINDS == set(RULED_CATEGORIES) | {"identity-collision",
+                                                      "uncited-disappearance"}
 
 
-@pytest.mark.parametrize("category", hc.CATEGORIES)
-def test_each_category_makes_a_pathless_finding_with_one_id_across_runs(
-        category: str) -> None:
-    def build() -> dict[str, Any]:
-        return hc.make_finding(
-            kind=category, pack_id="opendox", pack_version="0.2.0", path="",
-            identity=hc.pathless_identity(category, "house-style"), severity="warning",
-            resolution_class="human-only", message="the pack did not run")
-    first, second = build(), build()
-    assert first["id"] == second["id"]
-    assert first["identity"] == {"category": category, "entry": "house-style"}
+@pytest.mark.parametrize("category", RULED_CATEGORIES)
+def test_each_category_makes_one_engine_finding_per_entry_with_one_id(category: str) -> None:
+    """A category is its finding's kind, the path is empty, it is human-only,
+    one `pack_id` per category, and one id per category and entry across runs
+    (the holder's `6069024023` item 1)."""
+    entry = "house-style"
+
+    def build(entry: str = entry, message: str = "the pack did not run") -> dict[str, Any]:
+        return hc.engine_finding(category, entry, pack_version="1.4.0", severity="warning",
+                                 message=message, evidence={"reasons": ["one", "two"]})
+
+    first = build()
+    assert first["id"] == build(message="another run, other words")["id"]
+    assert first["id"] != build(entry="other-pack")["id"]
+    assert (first["kind"], first["path"], first["resolution_class"]) == (
+        category, "", "human-only")
+    assert first["identity"] == {"category": category, "entry": entry}
+    assert first["pack_id"] == ("opendox" if category in AGAINST_OPENDOX else entry)
+    assert first["evidence"] == {"reasons": ["one", "two"]}
+    assert hc.violations(first) == []
+
+
+@pytest.mark.parametrize("category", sorted(AGAINST_OPENDOX))
+def test_a_finding_against_the_product_may_name_no_entry(category: str) -> None:
+    built = hc.engine_finding(category, pack_version="0.2.0", severity="warning",
+                              message="the run could not use it")
+    assert (built["pack_id"], built["identity"]) == ("opendox", {"category": category,
+                                                                 "entry": ""})
+
+
+@pytest.mark.parametrize("entry", ["", "opendox"])
+@pytest.mark.parametrize("category", sorted(set(RULED_CATEGORIES) - AGAINST_OPENDOX))
+def test_a_finding_against_a_pack_names_that_packs_entry(category: str, entry: str) -> None:
+    with pytest.raises(hc.FindingRefused) as refused:
+        hc.engine_finding(category, entry, pack_version="0.2.0", severity="warning",
+                          message="the pack did not run")
+    assert refused.value.rule == "pathless-identity-is-category-and-entry"
+
+
+def test_an_engine_finding_against_a_41_character_pack_is_refused() -> None:
+    hc.engine_finding("pack-crashed", "p" * 40, pack_version="1", severity="error",
+                      message="the pack crashed")
+    with pytest.raises(hc.FindingRefused) as refused:
+        hc.engine_finding("pack-crashed", "p" * 41, pack_version="1", severity="error",
+                          message="the pack crashed")
+    assert refused.value.rule == "name-is-at-most-40-characters"
+
+
+def test_engine_finding_rebuilds_openDox_specs_no_sandbox_example() -> None:
+    example = _example("no-sandbox")
+    built = hc.engine_finding("no-sandbox", pack_version=example["pack_version"],
+                              severity=example["severity"], message=example["message"],
+                              evidence=example["evidence"])
+    assert built == example
+
+
+@pytest.mark.parametrize("category", ["manifest-refused", "dispositions-refused"])
+def test_the_two_added_categories_are_admitted(category: str) -> None:
+    assert hc.pathless_identity(category) == {"category": category, "entry": ""}
 
 
 @pytest.mark.parametrize("category, entry", [
@@ -1077,6 +1167,68 @@ def test_the_engines_identities_are_their_keys() -> None:
     fid = "opendox.broken-link.546cd2aacb1a6738"
     assert hc.collision_identity(fid) == {"collided_id": fid}
     assert hc.pathless_identity("no-sandbox") == {"category": "no-sandbox", "entry": ""}
+
+
+def _pathless_collision() -> dict[str, Any]:
+    return hc.make_finding(kind="identity-collision", pack_id="house-style",
+                           pack_version="1.4.0", path="",
+                           identity=hc.collision_identity(
+                               "house-style.pack-crashed.0f1e2d3c4b5a6978"),
+                           severity="error", resolution_class="human-only",
+                           message="two findings of one run share one id")
+
+
+#: Each original, and the identity its re-raise takes (option (D)).
+_DISAPPEARED = {
+    "a pathed finding": (lambda: _example("broken-link"),
+                         {"disappeared_id": "opendox.broken-link.546cd2aacb1a6738"}),
+    "a pathless finding": (lambda: _example("no-sandbox"),
+                           {"category": "no-sandbox", "entry": ""}),
+    "a pathless finding about an entry": (
+        lambda: hc.engine_finding("pack-crashed", "house-style", pack_version="1.4.0",
+                                  severity="error", message="the pack crashed"),
+        {"category": "pack-crashed", "entry": "house-style"}),
+    "a pathless collision": (_pathless_collision,
+                             {"category": "identity-collision", "entry": ""}),
+}
+
+
+@pytest.mark.parametrize("name", list(_DISAPPEARED))
+def test_the_disappearance_takes_the_form_its_originals_path_calls_for(name: str) -> None:
+    """Option (D) (the holder's `6069024023` item 2): a pathed original's
+    re-raise keeps `{disappeared_id}` and the original's path; a pathless
+    original's takes the pathless form the schema requires. Either re-raise
+    is a finding the contract admits, under its own id."""
+    make_original, identity = _DISAPPEARED[name]
+    original = make_original()
+    assert hc.disappearance_identity(original) == identity
+    reraise = hc.make_finding(
+        kind="uncited-disappearance", pack_id="opendox", pack_version="0.2.0",
+        path=original["path"], identity=hc.disappearance_identity(original),
+        severity="warning", resolution_class="human-only",
+        message="a finding disappeared with no landed repair citing it",
+        evidence={"disappeared_id": original["id"], "baseline_run": "run-1"})
+    assert hc.violations(reraise) == []
+    assert reraise["id"] != original["id"]
+    assert reraise["path"] == original["path"]
+
+
+def test_the_disappeared_id_alone_is_refused_for_a_pathless_original() -> None:
+    """Why the pathless form exists: `{disappeared_id}` on an empty path breaks
+    the schema's `pathless-identity-is-category-and-entry`."""
+    with pytest.raises(hc.FindingRefused) as refused:
+        hc.make_finding(kind="uncited-disappearance", pack_id="opendox",
+                        pack_version="0.2.0", path="",
+                        identity={"disappeared_id": EXAMPLES["no-sandbox"]["id"]},
+                        severity="warning", resolution_class="human-only", message="m")
+    assert refused.value.rule == "pathless-identity-is-category-and-entry"
+
+
+def test_the_disappearance_of_a_malformed_original_is_refused() -> None:
+    original = _with("broken-link", id="opendox.broken-link.0000000000000000")
+    with pytest.raises(hc.FindingRefused) as refused:
+        hc.disappearance_identity(original)
+    assert refused.value.rule == "id-is-the-hash-of-its-key"
 
 
 # ---------------------------------------------------------------------------
@@ -1204,6 +1356,17 @@ def test_a_refusal_quotes_nothing_of_the_finding(change: dict[str, Any]) -> None
     with pytest.raises(hc.FindingRefused) as refused:
         hc.check_finding(finding)
     assert "SECRET" not in str(refused.value)
+
+
+def test_where_names_an_admitted_key_and_detail_names_none() -> None:
+    """Lane 3's REVIEW-W1 MINOR, as the docstrings now state it: `where` is a
+    pointer built from keys the module ADMITTED, and names them verbatim, so
+    an engine bounds it before it records it; `detail` names no key."""
+    key = "ADMITTED-HEADING-KEY"
+    violation = hc.violations({**_example("broken-link"), "identity": {key: 5}})[0]
+    assert violation.rule == "identity-holds-no-number"
+    assert violation.where == f"/identity/{key}"
+    assert key not in violation.detail
 
 
 def test_a_violation_reads_as_its_rule_its_place_and_its_detail() -> None:
