@@ -19,7 +19,9 @@ Two assertions here carry more weight than the rest:
 
 from __future__ import annotations
 
+import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -37,9 +39,9 @@ class RecordingRunner:
         self.real = sg.SubprocessGitRunner()
         self.calls: list[tuple[str, ...]] = []
 
-    def run(self, cwd, *args):
+    def run(self, cwd, *args, **settings):
         self.calls.append(tuple(args))
-        return self.real.run(cwd, *args)
+        return self.real.run(cwd, *args, **settings)
 
     def subcommands(self) -> list[str]:
         return [next((a for a in call if not a.startswith("-")), "")
@@ -504,6 +506,23 @@ def test_git_routing_options_are_refused_from_any_cwd(git_and_repo, routing):
     assert repo.branch() == before.branch
 
 
+def test_routing_in_the_environment_never_reaches_git(git_and_repo, tmp_path,
+                                                       monkeypatch):
+    """`GIT_DIR` and `GIT_WORK_TREE` are the routing options' twins in the
+    ENVIRONMENT, and they outrank `cwd`: a guard that inspected the served
+    checkout would have approved a command git then ran in another repository.
+    The runner drops them (Copilot review of openDox-code#90)."""
+    git, repo, _runner = git_and_repo
+    decoy = tmp_path / "decoy"
+    repo.git("clone", "-q", "--no-local", str(repo.root), str(decoy))
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+
+    top = git.git(repo.root, "rev-parse", "--show-toplevel")
+
+    assert Path(top).resolve() == Path(repo.root).resolve()
+
+
 def test_a_served_subdirectory_cannot_move_the_served_checkout(git_and_repo):
     """`<served>/ideation` IS the served checkout's working tree, and a `git
     checkout` run there moves it identically — measured. The guard now resolves the
@@ -560,8 +579,283 @@ def test_the_allowlist_still_admits_every_operation_the_contract_names(git_and_r
         assert allowed in sg.SERVED_ALLOWED_SUBCOMMANDS, allowed
     for refused in sg.FORBIDDEN_SERVED_SUBCOMMANDS:
         assert refused not in sg.SERVED_ALLOWED_SUBCOMMANDS
-    for refused in ("add", "commit", "merge", "clean", "update-ref", "rm", "mv"):
+    for refused in ("add", "commit", "clean", "update-ref", "rm", "mv"):
         assert refused not in sg.SERVED_ALLOWED_SUBCOMMANDS
+    # `merge`'s pin MOVES TO THE ADMITTED FORM (R2Q6 (a); feature 007's exception
+    # 1). It is still absent from the NAME-ONLY allowlist; what the served root
+    # admits is one ARGUMENT-checked form, `merge --ff-only <commit>`, for a clean
+    # checkout on `main`, and only by the guard's argument check below.
+    assert "merge" not in sg.SERVED_ALLOWED_SUBCOMMANDS
+    assert sg.SERVED_FAST_FORWARD_ARGV == ("merge", "--ff-only")
+    assert sg.SERVED_FAST_FORWARD_SETTINGS == (("pull.twohead", "ort"),
+                                               ("branch.main.mergeOptions", ""),
+                                               ("core.hooksPath", os.devnull))
+    assert sg.SERVED_FAST_FORWARD_BRANCH == "main"
+    commit = "0" * 40
+    admitted = (*sg.SERVED_FAST_FORWARD_ARGV, commit)
+    root = git_and_repo[0].served_root
+    assert sg.guard_served_command(root, root, admitted,
+                                   served_on_clean_main=True) is True
+    assert sg.guard_served_command(root, root, admitted) is False
+    assert sg.guard_served_command(root, root / "ideation", admitted,
+                                   served_on_clean_main=True) is False
+    assert sg.guard_served_command(root, root, ("merge", "other-branch"),
+                                   served_on_clean_main=True) is False
+
+
+# --------------------------------------------------------------------------
+# the landing's fast-forward: the ONE admitted move of the served checkout
+# (R2Q6 (a), openxFactory#656 6003486656; feature 007's four exceptions)
+# --------------------------------------------------------------------------
+
+def _a_commit_ahead_of_main(git, repo) -> str:
+    """A commit whose parent is `main`'s tip, made in a session worktree, so the
+    served checkout is untouched by the making of it."""
+    path = _session_dir(repo, "draft/ahead")
+    git.worktree_add("draft/ahead", path, "main")
+    repo.write("ahead.md", "ahead\n", cwd=path)
+    git.stage(path, ["ahead.md"])
+    return git.commit(path, "ahead\n\nGate-Action: ahead")
+
+
+def test_the_served_root_admits_the_landings_fast_forward_on_a_clean_main(
+        git_and_repo):
+    git, repo, runner = git_and_repo
+    ahead = _a_commit_ahead_of_main(git, repo)
+    assert repo.branch() == "main"
+    assert repo.served_fingerprint().porcelain == ()
+
+    assert git.fast_forward_served(ahead) == ahead
+
+    assert repo.head("main") == ahead
+    assert repo.head() == ahead
+    assert repo.branch() == "main"
+    assert (repo.root / "ahead.md").read_text(encoding="utf-8") == "ahead\n"
+    assert (*sg.SERVED_FAST_FORWARD_ARGV, ahead) in runner.calls
+
+
+@pytest.mark.parametrize("via", ["fast_forward_served", "the funnel",
+                                 "the bytes reader"])
+@pytest.mark.parametrize("setting", [("pull.twohead", "ours"),
+                                     ("branch.main.mergeOptions", "-s ours"),
+                                     ("branch.main.mergeOptions", "-s subtree"),
+                                     ("branch.main.mergeOptions", "--squash")])
+def test_no_merge_setting_turns_the_fast_forward_into_a_merge(git_and_repo,
+                                                               setting, via):
+    """MEASURED on git 2.43: under each of these settings a bare `git merge
+    --ff-only <descendant>` exits 0 having made a NEW merge commit (or, with
+    `--squash`, having changed the index and moved nothing). The funnel pins
+    them in the command's ENVIRONMENT, whichever method issues the admitted
+    argv, so the served checkout lands exactly on the commit while the argv
+    stays the three arguments FR-004a exception 1 admits."""
+    git, repo, runner = git_and_repo
+    ahead = _a_commit_ahead_of_main(git, repo)
+    repo.git("config", *setting)
+
+    if via == "fast_forward_served":
+        assert git.fast_forward_served(ahead) == ahead
+    elif via == "the funnel":
+        git.git(repo.root, "merge", "--ff-only", ahead)
+    else:
+        git.git_nul(repo.root, "merge", "--ff-only", ahead)
+
+    assert repo.head("main") == ahead
+    assert repo.head() == ahead
+    assert repo.served_fingerprint().porcelain == ()
+    assert ("merge", "--ff-only", ahead) in runner.calls
+
+
+def test_a_fast_forward_that_lands_elsewhere_is_never_reported(git_and_repo):
+    """The guard's reads and the merge are separate processes; a checkout
+    switched between them has ANOTHER branch fast-forwarded. That cannot be
+    prevented from here, and it is refused, never returned as `main` landing."""
+    _git, repo, _ = git_and_repo
+
+    class SwitchesFirst(RecordingRunner):
+        def run(self, cwd, *args, **settings):
+            if "--ff-only" in args:
+                repo.git("checkout", "-q", "-b", "racer")
+            return super().run(cwd, *args, **settings)
+
+    git = sg.SessionGit(repo.root, runner=SwitchesFirst())
+    ahead = _a_commit_ahead_of_main(git, repo)
+    main = repo.head("main")
+
+    with pytest.raises(sg.SessionGitRefused) as refused:
+        git.fast_forward_served(ahead)
+
+    assert "refs/heads/racer" in str(refused.value)
+    assert repo.head("main") == main
+
+
+@pytest.mark.parametrize("dirt", ["tracked", "untracked"])
+def test_the_fast_forward_is_refused_on_a_served_checkout_that_is_not_clean(
+        git_and_repo, dirt):
+    git, repo, runner = git_and_repo
+    ahead = _a_commit_ahead_of_main(git, repo)
+    if dirt == "tracked":
+        repo.write(f"ideation/staging/{repo.topic_id}/README.md", "an edit\n")
+    else:
+        repo.write("scratch.txt", "untracked\n")
+    before = repo.served_fingerprint()
+    n = len(runner.calls)
+
+    with pytest.raises(sg.ServedCheckoutImmovable) as refused:
+        git.fast_forward_served(ahead)
+
+    assert "not clean" in str(refused.value)
+    assert "merge" not in [sg.command_subcommand(c) for c in runner.calls[n:]]
+    assert repo.served_fingerprint() == before
+
+
+def test_the_fast_forward_is_refused_when_the_served_checkout_holds_another_branch(
+        git_and_repo):
+    git, repo, runner = git_and_repo
+    ahead = _a_commit_ahead_of_main(git, repo)
+    repo.git("checkout", "-q", "-b", "elsewhere")
+    before = repo.served_fingerprint()
+    n = len(runner.calls)
+
+    with pytest.raises(sg.ServedCheckoutImmovable) as refused:
+        git.fast_forward_served(ahead)
+
+    assert "it holds elsewhere" in str(refused.value)
+    assert "merge" not in [sg.command_subcommand(c) for c in runner.calls[n:]]
+    assert repo.served_fingerprint() == before
+    assert repo.head("main") != ahead
+
+
+@pytest.mark.parametrize("argv", [
+    ("merge", "other-branch"),
+    ("-c", "pull.twohead=ort", "-c", "branch.main.mergeOptions=", "merge",
+     "--ff-only", "{ahead}"),
+    ("merge", "--ff-only", "other-branch"),
+    ("merge", "--ff-only", "main"),
+    ("merge", "--ff-only", "{short}"),
+    ("merge", "--ff-only", "{ahead}", "other-branch"),
+    ("merge", "--ff-only", "--", "{ahead}"),
+    ("merge", "--no-ff", "{ahead}"),
+    ("merge", "{ahead}"),
+    ("-c", "core.hooksPath=/tmp", "merge", "--ff-only", "{ahead}"),
+    ("merge", "--ff-only", "--no-verify", "{ahead}"),
+])
+def test_no_other_merge_spelling_is_admitted_even_on_a_clean_main(git_and_repo,
+                                                                   argv):
+    """The argument check admits EXACTLY `merge --ff-only <full commit id>`,
+    three arguments (FR-004a exception 1). A branch name, a short id, a second
+    argument, an option before or after it (a `-c` included), and every other
+    merge are refused before git is invoked, on a checkout that is clean and on
+    `main`, so only the argv decides."""
+    git, repo, runner = git_and_repo
+    ahead = _a_commit_ahead_of_main(git, repo)
+    args = tuple(a.format(ahead=ahead, short=ahead[:12]) for a in argv)
+    before = repo.served_fingerprint()
+    n = len(runner.calls)
+
+    with pytest.raises(sg.ServedCheckoutImmovable):
+        git.git(repo.root, *args)
+
+    assert "merge" not in [sg.command_subcommand(c) for c in runner.calls[n:]]
+    assert repo.served_fingerprint() == before
+
+
+def test_the_fast_forward_is_refused_from_a_served_subdirectory(git_and_repo):
+    """AT THE SERVED ROOT and nowhere under it: a subdirectory is the served
+    working tree too, and the admission is for the root's exact cwd."""
+    git, repo, runner = git_and_repo
+    ahead = _a_commit_ahead_of_main(git, repo)
+    before = repo.served_fingerprint()
+    n = len(runner.calls)
+
+    with pytest.raises(sg.ServedCheckoutImmovable):
+        git.git(repo.root / "ideation", *sg.SERVED_FAST_FORWARD_ARGV, ahead)
+
+    assert runner.calls[n:] == []
+    assert repo.served_fingerprint() == before
+
+
+def test_the_fast_forward_refusal_cannot_be_reordered_by_a_file_name(
+        git_and_repo):
+    """With `core.quotePath=false` a bidi override in a file name reaches the
+    porcelain status as it is; the refusal shows it escaped (Copilot's fourth
+    review of openDox-code#90)."""
+    git, repo, _ = git_and_repo
+    ahead = _a_commit_ahead_of_main(git, repo)
+    repo.git("config", "core.quotePath", "false")
+    (repo.root / "a\u202ebc.md").write_text("untracked\n", encoding="utf-8")
+
+    with pytest.raises(sg.ServedCheckoutImmovable) as refused:
+        git.fast_forward_served(ahead)
+
+    assert "\u202e" not in str(refused.value)
+    assert "\\u202e" in str(refused.value)
+
+
+def test_nul_delimited_fields_are_read_as_git_wrote_them(git_and_repo):
+    """`git_nul` reads BYTES and decodes with `surrogateescape`: a carriage
+    return stays one, and a name that is not UTF-8 is read rather than raising
+    (Copilot 4195681954; openxFactory#656 `6026275158`)."""
+    git, repo, runner = git_and_repo
+    names = {"car\rriage.md", "line\nfeed.md", "dök.md"}
+    raw = b"bad\xffname.md"
+    for name in names:
+        (repo.root / name).write_text("x\n", encoding="utf-8")
+    try:
+        with open(os.path.join(os.fsencode(str(repo.root)), raw), "wb") as made:
+            made.write(b"x\n")
+        names.add(os.fsdecode(raw))
+    except OSError:
+        pass                                     # a filesystem that refuses it
+
+    listed = git.git_nul(repo.root, "ls-files", "-z", "--others",
+                         "--exclude-standard")
+
+    assert names <= set(listed)
+    assert runner.calls[-1] == ("ls-files", "-z", "--others", "--exclude-standard")
+
+
+def test_a_branch_whose_name_only_looks_like_main_is_never_fast_forwarded(
+        git_and_repo):
+    """`main\u00a0` (a no-break space ends it) is a legal branch, and a
+    stripped read of `HEAD` took it for `main`: the guard must refuse it before
+    any merge runs (Copilot's fifth review of openDox-code#90)."""
+    git, repo, runner = git_and_repo
+    ahead = _a_commit_ahead_of_main(git, repo)
+    lookalike = "main\u00a0"
+    repo.git("checkout", "-q", "-b", lookalike)
+    before = (repo.head(lookalike), repo.head("main"))
+    n = len(runner.calls)
+
+    with pytest.raises(sg.ServedCheckoutImmovable) as refused:
+        git.fast_forward_served(ahead)
+
+    assert "merge" not in [sg.command_subcommand(c) for c in runner.calls[n:]]
+    after = (repo.head(lookalike), repo.head("main"))
+    assert after == before
+    assert repr(lookalike) in str(refused.value)
+
+
+def test_branch_sha_reads_the_exact_ref(git_and_repo):
+    """`show-ref` without `--verify` matches every ref that ENDS in the name, so
+    a tag `backup/refs/heads/main` made a second line and a fast-forward that
+    landed was refused (Copilot's fourth review of openDox-code#90)."""
+    git, repo, _ = git_and_repo
+    main = repo.head("main")
+    ahead = _a_commit_ahead_of_main(git, repo)
+    repo.git("tag", "backup/refs/heads/main", ahead)
+
+    assert git.branch_sha("main") == main
+    assert git.fast_forward_served(ahead) == ahead
+    assert git.branch_sha("main") == ahead
+
+
+def test_the_fast_forward_takes_only_a_full_commit_id(git_and_repo):
+    git, repo, runner = git_and_repo
+    n = len(runner.calls)
+    for bad in ("main", "HEAD", "0" * 12, "-x", ""):
+        with pytest.raises(sg.SessionGitRefused):
+            git.fast_forward_served(bad)
+    assert runner.calls[n:] == []
 
 
 def test_stage_and_commit_cannot_advance_the_served_head(git_and_repo):

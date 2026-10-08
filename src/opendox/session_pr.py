@@ -523,6 +523,20 @@ class LocalGitSubmissions:
 # ======================== end of the submission port ======================
 
 
+# --------------------------------------------------------------------------
+# THE LANDING SEAM, declared here (#1144 12.6a; spec FR-007; plan 038 T012)
+# --------------------------------------------------------------------------
+#
+# 12.6a declares `session_pr.LandingPort` and
+# `session_pr.repository_governance(checkout_root)`, and this module is where a
+# caller reaches the ports. They are DEFINED in `opendox.landing` and re-exported
+# here, so the protocol above keeps its three operations and nothing that lands
+# lives beside it: `PullRequestPort` still has no merge (FR-030), and landing is
+# a separate protocol with ONE operation, `land(branch, *, confirmation)`.
+# Imported last, because `landing` reaches `session_git` and nothing here.
+from .landing import LandingPort, repository_governance  # noqa: E402
+
+
 __all__ = [
     "AMBIENT_TARGET_OVERRIDES", "DEFAULT_BASE", "DEFAULT_REMOTE",
     "PORT_OPERATIONS", "STATE_OPEN",
@@ -532,4 +546,6 @@ __all__ = [
     # the submission port (plan 038 T011)
     "SUBMISSION_OPERATIONS", "LocalGitSubmissions", "NoSubmissionTarget",
     "Submission", "SubmissionError", "SubmissionPort", "SubmissionRefused",
+    # the landing seam, re-exported from `opendox.landing` (plan 038 T012)
+    "LandingPort", "repository_governance",
 ]

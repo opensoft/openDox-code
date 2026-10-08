@@ -319,7 +319,10 @@ def transpose(shipped: Path, destination: Path) -> Path:
     # --- the populated state: a git repository holding exactly its files ----
     target = destination / POPULATED
     target.mkdir()
-    _git(target, "init", "-q")
+    # `--initial-branch=main`, so git's ambient `init.defaultBranch` never names
+    # the branch: `main` is the branch openDox lands on (plan 038 T012's audit of
+    # every place openDox creates a repository; R2Q7 (a)).
+    _git(target, "init", "-q", "--initial-branch=main")
     for source in sorted(populated.rglob("*")):
         if not source.is_file():
             continue
@@ -428,7 +431,7 @@ def transpose(shipped: Path, destination: Path) -> Path:
     # whose whole point is that it holds none.
     empty = destination / EMPTY
     empty.mkdir()
-    _git(empty, "init", "-q")
+    _git(empty, "init", "-q", "--initial-branch=main")    # as above (T012's audit)
     _git(empty, "commit", "-q", "--allow-empty", "-m", "an empty corpus")
 
     # --- the non-directory state --------------------------------------------

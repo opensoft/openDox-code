@@ -17,7 +17,11 @@ Four structural rules, enforced by construction rather than by convention:
      INSIDE the served checkout? A routing option is refused outright, at every
      cwd, because it redirects the command at a repository the guard did not
      inspect; and a cwd at or under the served root may run only the ALLOWLISTED
-     read/bookkeeping subcommands (`SERVED_ALLOWED_SUBCOMMANDS`). PR #49 review
+     read/bookkeeping subcommands (`SERVED_ALLOWED_SUBCOMMANDS`), plus ONE move
+     admitted by an ARGUMENT check: `git merge --ff-only <commit>` at the served
+     ROOT, for a CLEAN checkout that holds `main` and nothing else — the landing's
+     fast-forward (`SERVED_FAST_FORWARD_ARGV`; R2Q6 (a), feature 007's four
+     named exceptions). PR #49 review
      finding 18 measured all three bypasses the previous cwd-equality denylist
      permitted — a served SUBDIRECTORY, `git -C <served>`, and
      `git --git-dir <served>/.git --work-tree <served>` each moved the served
@@ -68,13 +72,14 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import socket
 import subprocess
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, Protocol, Sequence
+from typing import Iterable, Iterator, Mapping, Protocol, Sequence
 
 # The one prefix the SERVED checkout's working tree may legitimately change in:
 # `propose` / `demote` / `dispose` already write their records here, and so do
@@ -87,20 +92,88 @@ GATE_RECORDS_PREFIX = "ideation/dashboard/gate-records/"
 # allowlist below is what actually decides.
 FORBIDDEN_SERVED_SUBCOMMANDS = ("checkout", "switch", "reset", "stash", "restore")
 
-# The ONLY subcommands permitted with a cwd at or under the served checkout: reads
-# plus the ref/worktree bookkeeping the session lifecycle genuinely performs there
-# (worktree add/remove/list/prune, branch create/delete, the remote branch delete).
-# Nothing that touches the served working tree, its index, or its HEAD is here —
-# `add`, `commit`, `mv`, `rm`, `merge`, `clean`, `apply`, `am`, `rebase`,
-# `cherry-pick`, `revert`, `update-ref`, `symbolic-ref`, `update-index`,
-# `sparse-checkout`, `filter-branch` and the five FORBIDDEN_SERVED_SUBCOMMANDS all
-# fall through to a refusal because they are ABSENT, which is the property a
-# denylist could never have (PR #49 finding 18).
+# The subcommands permitted BY NAME with a cwd at or under the served checkout:
+# reads plus the ref/worktree bookkeeping the session lifecycle genuinely performs
+# there (worktree add/remove/list/prune, branch create/delete, the remote branch
+# delete). Nothing that touches the served working tree, its index, or its HEAD is
+# on this NAME-ONLY list — `add`, `commit`, `mv`, `rm`, `merge`, `clean`, `apply`,
+# `am`, `rebase`, `cherry-pick`, `revert`, `update-ref`, `symbolic-ref`,
+# `update-index`, `sparse-checkout`, `filter-branch` and the five
+# FORBIDDEN_SERVED_SUBCOMMANDS all fall through to a refusal because they are
+# ABSENT, which is the property a denylist could never have (PR #49 finding 18).
+#
+# THE STATED RULE HAS ONE NAMED EXCEPTION, and it is not on this list (R2Q6 (a),
+# Brett Heap, openxFactory#656 comment 6003486656; feature 007's four exceptions,
+# codexFactory `specs/007-workbench-branch-sessions/spec.md`): a CONFIRMED
+# landing fast-forwards the served checkout, its index and its HEAD to the merge
+# commit the lander made in its own landing worktree. The guard admits that move
+# by an ARGUMENT check, not by name: exactly the three arguments `merge
+# --ff-only <commit>`, `<commit>` a full object id and never a ref name (feature
+# 007's FR-004a exception 1), at the served ROOT, while the served checkout
+# holds `main` and `git status --porcelain` is empty, and nothing else
+# (`SERVED_FAST_FORWARD_ARGV`, `served_fast_forward_commit`). So `merge` stays
+# absent here, `merge <branch>` and every other spelling stay refused, and a
+# dirty checkout or one on another branch is never moved. The two settings that
+# could change what that command does are pinned in its ENVIRONMENT, never in
+# its arguments (`SERVED_FAST_FORWARD_SETTINGS`).
 SERVED_ALLOWED_SUBCOMMANDS = frozenset({
     "branch", "cat-file", "check-ref-format", "diff", "for-each-ref", "log",
     "ls-files", "ls-remote", "ls-tree", "merge-base", "push", "remote",
     "rev-list", "rev-parse", "show", "show-ref", "status", "worktree",
 })
+
+# The branch the served checkout must hold for the admission below (R2Q7 (a):
+# `main`).
+SERVED_FAST_FORWARD_BRANCH = "main"
+# The configuration that could make `git merge --ff-only` something else,
+# pinned for that one command. MEASURED on git 2.43: with `pull.twohead=ours`,
+# or `branch.main.mergeOptions` carrying `-s ours` (or `-s subtree`), `git merge
+# --ff-only <a descendant>` exits 0 having made a NEW merge commit of the
+# strategy's choosing, not a fast-forward; with `--squash` there, it exits 0
+# having changed the index and working tree and moved nothing. Pinned to git's
+# own strategy and to no branch options, `--ff-only` means what it says
+# (Copilot review of openDox-code#90 led to the measurement).
+#
+# THEY TRAVEL IN THE COMMAND'S ENVIRONMENT (`GIT_CONFIG_COUNT`, `_KEY_<n>`,
+# `_VALUE_<n>`, git's command-scope configuration, which outranks every file),
+# so the argument vector stays EXACTLY the three arguments feature 007's
+# FR-004a exception 1 admits. `SessionGit.fast_forward_served` is the one
+# caller that passes them; the runner drops every ambient `GIT_CONFIG_*` first.
+#
+# `core.hooksPath` IS PINNED TOO, to no directory: a `post-merge` hook runs
+# after a fast-forward, and one that pushed would publish the landing that
+# reports `pushed=False`, outside this funnel; a hooks path inside the tree
+# (husky's `.husky`) is the branch author's to write (Copilot's fourth review
+# of openDox-code#90).
+SERVED_FAST_FORWARD_SETTINGS = (
+    ("pull.twohead", "ort"),
+    (f"branch.{SERVED_FAST_FORWARD_BRANCH}.mergeOptions", ""),
+    ("core.hooksPath", os.devnull),
+)
+# The remote probe's environment (`SessionGit.ls_remote_url`): the runtime's
+# non-interactive contract (`local_git_adapter.out_bounded`: no terminal, no
+# askpass, ssh in batch mode), and only the transports git carries itself.
+PROBE_ENVIRONMENT = {
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_ASKPASS": "",
+    "SSH_ASKPASS": "",
+    "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes",
+    "GIT_ALLOW_PROTOCOL": "file:ftp:ftps:git:http:https:ssh",
+}
+# How long the probe may take, in seconds.
+PROBE_TIMEOUT = 60.0
+# The ONE argument-checked admission at the served root, above: exactly these
+# words, then exactly one full commit id: `git merge --ff-only <commit>`.
+SERVED_FAST_FORWARD_ARGV = ("merge", "--ff-only")
+# A full object id, SHA-1 or SHA-256: never a branch or a short id, which name
+# whatever they name when git resolves them.
+_OBJECT_ID_SHAPE = re.compile(r"\A(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+
+# Two spellings this module repeats: the prefix of every local branch ref, and
+# the status option that makes every porcelain line name a FILE (an untracked
+# directory's summary line would hide what is in it).
+BRANCH_REF_PREFIX = "refs/heads/"
+UNTRACKED_FILES_ALL = "--untracked-files=all"
 
 # Refused at EVERY cwd. `fetch`/`pull` would touch local refs; the remote is read
 # with `ls-remote` and NEVER fetched.
@@ -195,16 +268,73 @@ class SessionActionInProgress(SessionGitRefused):
 # --------------------------------------------------------------------------
 
 class GitRunner(Protocol):
-    def run(self, cwd: Path, *args: str) -> subprocess.CompletedProcess: ...
+    def run(self, cwd: Path, *args: str,
+            config: Sequence[tuple[str, str]] = (),
+            binary: bool = False,
+            env: Mapping[str, str] | None = None,
+            timeout: float | None = None) -> subprocess.CompletedProcess:
+        """Run `git *args` in `cwd`. `config`, when given, is command-scope
+        configuration for this one command, delivered in its environment
+        (only the landing's fast-forward and its remote probe pass any).
+        `binary` returns stdout and stderr as BYTES, untranslated
+        (`SessionGit.git_nul`). `env` is laid over the sanitized environment,
+        and `timeout` bounds the command (only the remote probe passes them;
+        `SessionGit.ls_remote_url`)."""
+        ...
 
 
 class SubprocessGitRunner:
     """The real runner: `git` as a subprocess, output captured, never checked
-    here (the funnel raises `GitError` so every failure carries git's stderr)."""
+    here (the funnel raises `GitError` so every failure carries git's stderr).
 
-    def run(self, cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    THE ENVIRONMENT IS THE RUNTIME'S SANITIZED ONE, not `os.environ`. The
+    guard's premise is that `cwd` is the truth about which repository a command
+    touches, which is why it refuses every routing OPTION (PR #49 finding 18);
+    `GIT_DIR`, `GIT_WORK_TREE` and their relatives are the same routing in the
+    environment, and they OUTRANK `cwd`, so a process started with one set (a
+    git hook, an alias) would have had the guard approve one repository while
+    git merged into another (Copilot review of openDox-code#90).
+    `local_git_adapter.sanitized_git_environment()` strips exactly that set
+    for every other `git` this product runs; it is imported rather than
+    restated, so the lists cannot drift, and imported HERE rather than at the
+    top so this module keeps its light import (`authoring.py`'s precedent)."""
+
+    def run(self, cwd: Path, *args: str,
+            config: Sequence[tuple[str, str]] = (),
+            binary: bool = False,
+            env: Mapping[str, str] | None = None,
+            timeout: float | None = None) -> subprocess.CompletedProcess:
+        from opendox.runtime.local_git_adapter import sanitized_git_environment
+        environment = {**sanitized_git_environment(), **(env or {})}
+        if config:
+            environment["GIT_CONFIG_COUNT"] = str(len(config))
+            for index, (key, value) in enumerate(config):
+                environment[f"GIT_CONFIG_KEY_{index}"] = key
+                environment[f"GIT_CONFIG_VALUE_{index}"] = value
+        try:
+            return self._run(cwd, args, environment, binary, timeout)
+        except subprocess.TimeoutExpired:
+            said = f"timed out after {timeout:g}s"
+            return subprocess.CompletedProcess(
+                ["git", *args], 124, b"" if binary else "",
+                said.encode() if binary else said)
+
+    @staticmethod
+    def _run(cwd: Path, args: Sequence[str], env: dict[str, str], binary: bool,
+             timeout: float | None) -> subprocess.CompletedProcess:
+        if binary:
+            return subprocess.run(["git", *args], cwd=str(cwd),
+                                  capture_output=True, check=False, env=env,
+                                  timeout=timeout)
+        # TEXT MODE NEVER RAISES on output that is not in the locale's
+        # encoding: a file name that is not UTF-8 reaches a merge's own
+        # output ("Auto-merging <name>"), and a strict decode raised
+        # `UnicodeDecodeError` out of a command git had already run (Copilot
+        # 4195681954; openxFactory#656 `6026275158`). The bytes survive as
+        # surrogates; paths are read exactly through `SessionGit.git_nul`.
         return subprocess.run(["git", *args], cwd=str(cwd), text=True,
-                              capture_output=True, check=False)
+                              errors="surrogateescape", capture_output=True,
+                              check=False, env=env, timeout=timeout)
 
 
 # --------------------------------------------------------------------------
@@ -263,8 +393,40 @@ def targets_served_checkout(served_root: Path, cwd: Path) -> bool:
     return here == served or served in here.parents
 
 
-def guard_served_command(served_root: Path, cwd: Path,
-                         args: Sequence[str]) -> bool:
+def is_served_root(served_root: Path, cwd: Path) -> bool:
+    """Whether `cwd` IS the served root itself, not a directory under it."""
+    try:
+        return Path(cwd).resolve() == Path(served_root).resolve()
+    except OSError:                                  # pragma: no cover - defensive
+        return False
+
+
+def shown(text: str) -> str:
+    """Text as a message shows it: as it is, or escaped as `repr` spells it when
+    it holds a character a terminal acts on (a control, a format character such
+    as a bidi override, a line separator). A file or branch name is its
+    author's to choose, and a refusal is printed where a human reads it
+    (Copilot's third and fourth reviews of openDox-code#90). Callers keep the
+    text itself; only the message escapes it."""
+    return text if text.isprintable() else repr(text)
+
+
+def served_fast_forward_commit(args: Sequence[str]) -> str | None:
+    """The `<commit>` when `args` is EXACTLY `SERVED_FAST_FORWARD_ARGV` and one
+    full object id, else None: `git merge --ff-only <commit>`, exactly three
+    arguments (FR-004a exception 1). No other option before or after it, no
+    `-c`, no `--`, no branch name and no short id: the one argv the landing's
+    fast-forward issues."""
+    argv = tuple(args)
+    width = len(SERVED_FAST_FORWARD_ARGV)
+    if len(argv) != width + 1 or argv[:width] != SERVED_FAST_FORWARD_ARGV:
+        return None
+    commit = argv[width]
+    return commit if _OBJECT_ID_SHAPE.match(commit) else None
+
+
+def guard_served_command(served_root: Path, cwd: Path, args: Sequence[str], *,
+                         served_on_clean_main: bool = False) -> bool:
     """True when this argv is permitted. False when it could move the SERVED
     checkout, or when it routes around the cwd the guard was given (FR-004).
 
@@ -277,7 +439,13 @@ def guard_served_command(served_root: Path, cwd: Path,
          the remote with `ls-remote` and never fetches.
       3. does the cwd resolve at or under the served checkout? Then the subcommand
          must be in `SERVED_ALLOWED_SUBCOMMANDS` — an ALLOWLIST, so a subcommand
-         nobody enumerated is refused rather than permitted.
+         nobody enumerated is refused rather than permitted — OR the argv must be
+         the landing's fast-forward, `merge --ff-only <commit>`, at the served
+         ROOT, and `served_on_clean_main` must say the served checkout holds
+         `main` and is clean (R2Q6 (a); feature 007's exceptions 1 and 2). The
+         caller that knows the checkout's state passes it: `SessionGit._guard`
+         reads it from git, immediately before the command, and only for that
+         argv. Unstated, it is False, so the pure answer refuses the move.
 
     A worktree is disposable, so inside a session worktree only (1) and (2) apply:
     the write operations exist precisely to run there."""
@@ -288,7 +456,11 @@ def guard_served_command(served_root: Path, cwd: Path,
         return False
     if not targets_served_checkout(served_root, cwd):
         return True
-    return subcommand in SERVED_ALLOWED_SUBCOMMANDS
+    if subcommand in SERVED_ALLOWED_SUBCOMMANDS:
+        return True
+    return (served_on_clean_main
+            and served_fast_forward_commit(args) is not None
+            and is_served_root(served_root, cwd))
 
 
 # --------------------------------------------------------------------------
@@ -495,17 +667,124 @@ class SessionGit:
         first line begins with a space for a worktree-only modification
         (` M path`) — stripping it would shift every path by one character and
         make the fingerprint's prefix filter read the wrong path."""
-        self._guard(cwd, args)
-        done = self.runner.run(Path(cwd), *args)
+        done = self._run(cwd, args)
         if done.returncode != 0:
             raise GitError(args, done.returncode, done.stderr or "")
         return (done.stdout or "").rstrip("\n")
 
+    def git_nul(self, cwd: Path | str, *args: str) -> tuple[str, ...]:
+        """The fields of a NUL-delimited (`-z`) git output, exactly as git wrote
+        them. The output is read as BYTES and each field is decoded UTF-8 with
+        `surrogateescape`, with NO newline translation. Text mode turned a
+        carriage return in a file name into a newline (so a guard asked about
+        another path), and raised `UnicodeDecodeError` on a name that is not
+        UTF-8 (Copilot 4195681954; holder ruling openxFactory#656
+        `6026275158` item 1). A field passed back to git as an argument is
+        encoded the same way, so it names the same file. Guarded and pinned
+        like every other command, through `_run` (Copilot's sixth review of
+        openDox-code#90: a bytes command that bypassed it ran the admitted
+        fast-forward argv with no pins)."""
+        done = self._run(cwd, args, binary=True)
+        if done.returncode != 0:
+            raise GitError(args, done.returncode,
+                           (done.stderr or b"").decode("utf-8", "replace"))
+        fields = (done.stdout or b"").split(b"\0")
+        if fields and not fields[-1]:
+            fields.pop()
+        return tuple(field.decode("utf-8", "surrogateescape") for field in fields)
+
+    def ls_remote_url(self, cwd: Path | str, url: str, ref: str) -> str:
+        """`git ls-remote` of ONE ref at `url`, with the URL kept OUT of the
+        argv: it is the value of a TRANSIENT remote, `remote.<fresh name>.url`,
+        passed in the command's environment (`GIT_CONFIG_COUNT=1`), and the
+        argv names only that remote. A URL may carry a credential, and an argv
+        is readable by any local user; the environment is not (plan 038, T012).
+        The transient remote has none of a configured remote's other settings.
+
+        IT NEVER WAITS ON A HUMAN AND NEVER RUNS A HELPER (Copilot's sixth
+        review of openDox-code#90). `PROBE_ENVIRONMENT` is the runtime's own
+        non-interactive contract (`local_git_adapter.out_bounded`) plus
+        `GIT_ALLOW_PROTOCOL`, which admits only the transports git carries
+        itself, so no `git-remote-<name>` and no `ext::` command runs whatever
+        the configuration says. `PROBE_TIMEOUT` bounds it: the confirmation is
+        spent before the probe, and a stalled remote must not hold the
+        landing."""
+        transient = f"opendox-probe-{uuid.uuid4().hex}"
+        args = ("ls-remote", transient, ref)
+        self._guard(cwd, args)
+        done = self.runner.run(Path(cwd), *args,
+                               config=((f"remote.{transient}.url", url),),
+                               env=PROBE_ENVIRONMENT, timeout=PROBE_TIMEOUT)
+        if done.returncode != 0:
+            raise GitError(args, done.returncode, done.stderr or "")
+        return (done.stdout or "").strip()
+
+    def _run(self, cwd: Path | str, args: Sequence[str], *,
+             binary: bool = False) -> subprocess.CompletedProcess:
+        """Guard, then run. The landing's fast-forward, the one argv the guard
+        admits by its arguments, runs with `SERVED_FAST_FORWARD_SETTINGS` pinned
+        in its environment, by whichever method issues it, a bytes read
+        included: its argument vector stays exactly the three arguments the
+        guard admitted."""
+        self._guard(cwd, args)
+        settings: dict[str, object] = {"binary": True} if binary else {}
+        if served_fast_forward_commit(args) is not None:
+            settings["config"] = SERVED_FAST_FORWARD_SETTINGS
+        return self.runner.run(Path(cwd), *args, **settings)
+
+    def _served_state(self) -> tuple[str, tuple[str, ...]]:
+        """The served checkout's `HEAD` ref (`refs/heads/<name>`, or `HEAD` when
+        detached) and its `git status --porcelain` lines, untracked included —
+        the two facts the landing's fast-forward is admitted on. Two READS."""
+        # The ref EXACTLY as git wrote it, only its newline removed: a strip
+        # would read the legal branch `main\u00a0` (a no-break space ends it)
+        # as `refs/heads/main`, and admit the move of another branch (Copilot's
+        # fifth review of openDox-code#90).
+        read = self._run(self.served_root,
+                         ("rev-parse", "--symbolic-full-name", "HEAD"))
+        ref = (read.stdout or "").removesuffix("\n") if read.returncode == 0 else ""
+        done, listed = self._try(self.served_root, "status", "--porcelain",
+                                 UNTRACKED_FILES_ALL)
+        lines = tuple(l for l in listed.splitlines() if l.strip()) if done \
+            else ("<git status failed>",)
+        return ref, lines
+
+    def _fast_forward_refusal(self, state: tuple[str, tuple[str, ...]]
+                              ) -> ServedCheckoutImmovable:
+        """Why the landing's fast-forward is refused: the branch the served
+        checkout holds, or what makes it not clean."""
+        ref, lines = state
+        held = (ref.removeprefix(BRANCH_REF_PREFIX)
+                if ref.startswith(BRANCH_REF_PREFIX)
+                else "no branch (a detached HEAD)")
+        why = (f"it holds {shown(held)}" if held != SERVED_FAST_FORWARD_BRANCH else
+               f"it is not clean ({'; '.join(shown(l.strip()) for l in lines[:5])})")
+        return ServedCheckoutImmovable(
+            f"refusing `git merge --ff-only` against the served checkout "
+            f"{self.served_root}: the landing's fast-forward is admitted only "
+            f"for a CLEAN checkout that holds {SERVED_FAST_FORWARD_BRANCH}, "
+            f"and {why} (R2Q6 (a); feature 007's exceptions). It is never "
+            "switched, reset or stashed to make it so: commit or stash, then "
+            "land again")
+
     def _guard(self, cwd: Path | str, args: Sequence[str]) -> None:
         """Raise `ServedCheckoutImmovable` when the guard refuses, with the reason
-        the human needs: which of the three questions answered no."""
-        if guard_served_command(self.served_root, Path(cwd), args):
+        the human needs: which of the three questions answered no.
+
+        For the landing's fast-forward alone (`merge --ff-only <commit>` at the
+        served root) it first READS the served checkout's state, so the guard
+        decides on git's answer immediately before the move and never on the
+        caller's word."""
+        fast_forward = (served_fast_forward_commit(args) is not None
+                        and is_served_root(self.served_root, Path(cwd)))
+        state = self._served_state() if fast_forward else None
+        clean_main = state is not None and state[0] == (
+            BRANCH_REF_PREFIX + SERVED_FAST_FORWARD_BRANCH) and not state[1]
+        if guard_served_command(self.served_root, Path(cwd), args,
+                                served_on_clean_main=clean_main):
             return
+        if state is not None:
+            raise self._fast_forward_refusal(state)
         routing = command_routing_options(args)
         subcommand = command_subcommand(args)
         if routing:
@@ -527,8 +806,10 @@ class SessionGit:
             "served checkout may run only "
             f"{', '.join(sorted(SERVED_ALLOWED_SUBCOMMANDS))} — no session "
             "operation may switch, reset, stash, restore, merge, clean, stage, or "
-            "commit there (FR-004). Session writes reach a branch only through "
-            "that branch's own worktree")
+            "commit there (FR-004), and the one admitted move is a confirmed "
+            "landing's `merge --ff-only <commit>` of a clean checkout on "
+            f"{SERVED_FAST_FORWARD_BRANCH} (R2Q6 (a)). Session writes reach a "
+            "branch only through that branch's own worktree")
 
     def git(self, cwd: Path | str, *args: str) -> str:
         """`git_raw` with the output stripped — the ordinary read/write form."""
@@ -537,8 +818,7 @@ class SessionGit:
     def _try(self, cwd: Path | str, *args: str) -> tuple[bool, str]:
         """A read whose FAILURE is an answer (`check-ref-format`, an absent
         branch) rather than an error."""
-        self._guard(cwd, args)
-        done = self.runner.run(Path(cwd), *args)
+        done = self._run(cwd, args)
         return done.returncode == 0, (done.stdout or "").strip()
 
     # ---- ref legality: every derived name is validated before any git call ----
@@ -592,12 +872,43 @@ class SessionGit:
 
         A pure REF READ: no remote contact, no fetch, nothing written — so it is
         legal on the served checkout and costs the resume path nothing."""
-        listed = self.git(self.served_root, "for-each-ref",
-                          "--format=%(worktreepath)", f"refs/heads/{branch}")
-        for line in listed.splitlines():
-            if line.strip():
-                return line.strip()
+        # `git_raw`, and no strip: a working tree's path may end in a space,
+        # and a stripped path names another directory (Copilot's fourth review
+        # of openDox-code#90).
+        listed = self.git_raw(self.served_root, "for-each-ref",
+                              "--format=%(worktreepath)", f"refs/heads/{branch}")
+        for line in listed.split("\n"):
+            if line:
+                return line
         return None
+
+    def fast_forward_served(self, commit: str) -> str:
+        """`git merge --ff-only <commit>` at the served root, and return the new
+        HEAD: the landing's fast-forward, the ONE move of the served checkout
+        feature 007 admits (R2Q6 (a)). The guard re-reads the served checkout and
+        refuses unless it holds `main` and is clean; git itself refuses a
+        `<commit>` that is not a fast-forward, and then nothing moved."""
+        if not isinstance(commit, str) or not _OBJECT_ID_SHAPE.match(commit):
+            raise SessionGitRefused(
+                f"the served checkout is fast-forwarded only to a full commit id, "
+                f"and {commit!r} is not one")
+        self.git(self.served_root, *SERVED_FAST_FORWARD_ARGV, commit)
+        # THEN VERIFY WHERE IT LANDED. The guard's reads and the merge are separate
+        # processes, and git offers no lock against a checkout switched between
+        # them; a switch to another branch at the same commit would have that
+        # branch fast-forwarded instead. That move cannot be prevented from here,
+        # but it is never reported as `main` landing (Copilot review of
+        # openDox-code#90).
+        held, _lines = self._served_state()
+        landed = self.branch_sha(SERVED_FAST_FORWARD_BRANCH)
+        if held != BRANCH_REF_PREFIX + SERVED_FAST_FORWARD_BRANCH or landed != commit:
+            raise SessionGitRefused(
+                f"the fast-forward to {commit} did not land on "
+                f"{SERVED_FAST_FORWARD_BRANCH}: the served checkout changed while "
+                f"it ran (it holds {held or 'nothing readable'}, and "
+                f"{SERVED_FAST_FORWARD_BRANCH} is at {landed or 'no commit'}). "
+                "Look at the served checkout before landing again")
+        return commit
 
     def worktree_remove(self, path: Path | str) -> None:
         """`git worktree remove --force <path>` — teardown, BOTH endings
@@ -631,8 +942,7 @@ class SessionGit:
                 branch, detached, locked, prunable = None, False, False, False
             elif line.startswith("branch "):
                 ref = line[len("branch "):].strip()
-                branch = ref[len("refs/heads/"):] \
-                    if ref.startswith("refs/heads/") else ref
+                branch = ref.removeprefix(BRANCH_REF_PREFIX)
             elif line.strip() == "detached":
                 detached = True
             elif line == "locked" or line.startswith("locked "):
@@ -677,7 +987,10 @@ class SessionGit:
     def branch_sha(self, branch: str) -> str | None:
         """The sha `refs/heads/<branch>` currently points at, or None when the
         branch does not exist. The compare-and-swap input for a delete."""
-        ok, listed = self._try(self.served_root, "show-ref", "--hash",
+        # `--verify`: the EXACT ref. Without it `show-ref` matches every ref
+        # that ENDS in the name, so a tag `backup/refs/heads/main` made a
+        # second line (Copilot's fourth review of openDox-code#90).
+        ok, listed = self._try(self.served_root, "show-ref", "--verify", "--hash",
                                f"refs/heads/{branch}")
         return listed.strip() or None if ok else None
 
@@ -995,7 +1308,7 @@ class SessionGit:
         was committed by an earlier commit, so its record could only ride a
         different one (FR-006)."""
         listed = self.git_raw(Path(worktree), "status", "--porcelain",
-                              "--untracked-files=all")
+                              UNTRACKED_FILES_ALL)
         return tuple(porcelain_path(l) for l in listed.splitlines() if l.strip())
 
     # ---- ordinal inputs (FR-026, D17) ----
@@ -1022,7 +1335,7 @@ class SessionGit:
             if "\t" not in line:
                 continue
             ref = line.split("\t", 1)[1].strip()
-            name = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+            name = ref.removeprefix(BRANCH_REF_PREFIX)
             if name.startswith(prefix):
                 names.append(name)
         return tuple(sorted(set(names)))
@@ -1187,7 +1500,7 @@ class SessionGit:
         so every porcelain line names a FILE: an untracked-directory summary
         line would make the prefix filter coarser than the declared prefix."""
         porcelain = self.git_raw(self.served_root, "status", "--porcelain",
-                                 "--untracked-files=all").splitlines()
+                                 UNTRACKED_FILES_ALL).splitlines()
         return ServedFingerprint(
             branch=self.current_branch(self.served_root),
             head=self.head(self.served_root),
