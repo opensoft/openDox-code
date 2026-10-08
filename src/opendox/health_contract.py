@@ -263,7 +263,7 @@ _ENTRY = re.compile(r"(?:[a-z0-9-]+)?")
 _DRIVE = re.compile(r"[A-Za-z]:")
 _SURROGATE = re.compile("[\ud800-\udfff]")
 _CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\ud800-\udfff]")
-_NOT_ONE_LINE = re.compile("[\x00-\x1f\x7f-\x9f  \ud800-\udfff]")
+_NOT_ONE_LINE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")
 
 
 class Violation(NamedTuple):

@@ -335,7 +335,9 @@ _REFUSED_IDENTITIES = [
 ]
 
 
-@pytest.mark.parametrize("identity, path, kind, rule", _REFUSED_IDENTITIES)
+@pytest.mark.parametrize("identity, path, kind, rule", _REFUSED_IDENTITIES,
+                         ids=[f"{case[3]}-{index}" for index, case
+                              in enumerate(_REFUSED_IDENTITIES)])
 def test_an_identity_outside_the_bound_is_never_serialized(
         identity: Any, path: str, kind: str, rule: str) -> None:
     """The other half of the falsifier: an identity that breaks the bound is
@@ -926,6 +928,17 @@ def test_a_pathless_finding_breaks_the_human_only_rule_only_over_a_known_class()
         "resolution-class-is-one-of-three"]
     assert _rules(_with("identity-collision", resolution_class="later")) == [
         "resolution-class-is-one-of-three"]
+
+
+@pytest.mark.parametrize("fid", [
+    "house-style.broken-link.546cd2aacb1a6738",
+    "opendox.orphan.546cd2aacb1a6738",
+    "house-style.orphan.546cd2aacb1a6738",
+], ids=["another pack", "another kind", "both"])
+def test_the_id_names_the_findings_own_pack_and_its_own_kind(fid: str) -> None:
+    """Each of the id's two names is judged: its hash is still the hash of
+    the finding's own key, so this rule alone is broken."""
+    assert _rules(_with("broken-link", id=fid)) == ["id-names-its-pack-and-kind"]
 
 
 def test_the_reference_rules_judge_only_admitted_parts() -> None:
