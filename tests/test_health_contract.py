@@ -43,12 +43,13 @@ WHAT ELSE IT HOLDS.
 6. THE BOUNDS ON `message` AND `evidence` (R2Q25 (a); ADV-27).
 7. EVERY RULE THE COPY CATALOGUES IS ENFORCED. Each of its 27 rules has one
    negative case, openDox-spec's own negative example rebuilt, refused for
-   that rule and no other; so are the module's four engine rules.
+   that rule and no other; so are the module's five engine rules.
 8. THE ENGINE'S OWN FINDINGS (the holder's `6069024023`): the eleven ruled
    categories, each one finding per category and entry with one id across
-   runs and one `pack_id` per category (`engine_finding()`); the disappearance
-   re-raise in both forms, option (D); and openDox-spec's five examples
-   rebuilt through `make_finding()` and `engine_finding()`, id included.
+   runs and the `pack_id` its category takes (`engine_finding()`; `6072086385`
+   item 1); the disappearance re-raise in both forms, option (D); and
+   openDox-spec's five examples rebuilt through `make_finding()` and
+   `engine_finding()`, id included.
 9. THE CLOSURE: the module imports the standard library and nothing else. Its
    imports are read from its source, it is imported in a fresh interpreter
    that blocks openXdox and openxFactory, and it runs from a directory that
@@ -1176,8 +1177,8 @@ def test_the_categories_are_the_ruled_ones_and_names() -> None:
 @pytest.mark.parametrize("category", [c for c in RULED_CATEGORIES if c not in INSTALL_LEVEL])
 def test_each_category_makes_one_engine_finding_per_entry_with_one_id(category: str) -> None:
     """A category is its finding's kind, the path is empty, it is human-only,
-    one `pack_id` per category, and one id per category and entry across runs
-    (the holder's `6069024023` item 1)."""
+    its `pack_id` is the one its category takes (`6072086385` item 1), and one
+    id per category and entry across runs (the holder's `6069024023` item 1)."""
     entry = "house-style"
 
     def build(entry: str = entry, message: str = "the pack did not run") -> dict[str, Any]:
