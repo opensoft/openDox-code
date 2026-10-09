@@ -332,6 +332,12 @@ _REFUSED_IDENTITIES = [
      "pathless-identity-is-category-and-entry"),
     ({"category": "no-sandbox", "entry": "House"}, "", "no-sandbox",
      "pathless-identity-is-category-and-entry"),
+    # the holder's 6072197564: (b) a closed set of categories; (e) one
+    # install-level finding per run, so its entry is ""
+    ({"category": "orphan", "entry": ""}, "", "no-sandbox",
+     "pathless-identity-is-category-and-entry"),
+    ({"category": "no-sandbox", "entry": "house-style"}, "", "no-sandbox",
+     "pathless-identity-is-category-and-entry"),
     ({"target": "../old/brief.md"}, "", "broken-link",
      "pathless-identity-is-category-and-entry"),
     ({"id": "house-style.heading-case.0f1e2d3c4b5a6978"}, "notes/plan.md",
@@ -395,7 +401,10 @@ def test_the_vocabulary_is_the_packaged_copys() -> None:
         field for field in props if field in schema["required"]) + tuple(
         field for field in props if field not in schema["required"])
     assert hc.FIELDS == tuple(props)
-    assert set(hc.ENGINE_FIELDS) == {"id", "pack_id", "pack_version", "baseline_class"}
+    # the holder's 6072197564 (d): a pack's id is ignored; the rest are the engine's
+    assert hc.IGNORED_FIELDS == ("id",)
+    assert hc.STAMPED_FIELDS == ("pack_id", "pack_version", "baseline_class")
+    assert set(hc.IGNORED_FIELDS + hc.STAMPED_FIELDS) < set(hc.FIELDS)
     for name in ("identity_key", "evidence_key"):
         assert tuple(defs[name]["allOf"][0]["not"]["enum"]) == hc.FORBIDDEN_KEYS == FORBIDDEN
         assert defs[name]["allOf"][1]["maxLength"] == hc.STRING_MAX == STRING_MAX
@@ -922,7 +931,7 @@ def test_the_path_is_corpus_relative(path: Any, admitted: bool) -> None:
     finding = _example("orphan")
     finding["path"] = path
     if path == "":
-        finding["identity"] = {"category": "x", "entry": ""}
+        finding["identity"] = {"category": "no-sandbox", "entry": ""}
     rules = [r for r in _rules(finding) if r != "id-is-the-hash-of-its-key"]
     assert rules == ([] if admitted else ["path-is-corpus-relative"])
 
@@ -1142,6 +1151,10 @@ RULED_CATEGORIES = ("no-sandbox", "entry-refused", "fetch-failed", "digest-misma
 #: against the pack their manifest entry launched.
 AGAINST_OPENDOX = {"no-sandbox", "entry-refused", "manifest-refused", "dispositions-refused"}
 
+#: The install-level categories: a run raises ONE such finding, so its entry
+#: is "" (the holder's `6072197564` (e); data-model.md:382).
+INSTALL_LEVEL = {"no-sandbox", "manifest-refused", "dispositions-refused"}
+
 
 def test_the_categories_are_the_ruled_ones_and_names() -> None:
     assert hc.CATEGORIES == RULED_CATEGORIES
@@ -1152,9 +1165,11 @@ def test_the_categories_are_the_ruled_ones_and_names() -> None:
     assert hc.ENTRY_CATEGORIES < set(hc.CATEGORIES)
     assert hc.ENGINE_KINDS == set(RULED_CATEGORIES) | {"identity-collision",
                                                       "uncited-disappearance"}
+    assert hc.INSTALL_CATEGORIES == INSTALL_LEVEL
+    assert hc.PATHLESS_CATEGORIES == set(RULED_CATEGORIES) | {"identity-collision"}
 
 
-@pytest.mark.parametrize("category", RULED_CATEGORIES)
+@pytest.mark.parametrize("category", [c for c in RULED_CATEGORIES if c not in INSTALL_LEVEL])
 def test_each_category_makes_one_engine_finding_per_entry_with_one_id(category: str) -> None:
     """A category is its finding's kind, the path is empty, it is human-only,
     one `pack_id` per category, and one id per category and entry across runs
@@ -1193,6 +1208,49 @@ def test_a_finding_against_a_pack_names_that_packs_entry(category: str, entry: s
     assert refused.value.rule == "pathless-identity-is-category-and-entry"
 
 
+@pytest.mark.parametrize("category", sorted(INSTALL_LEVEL))
+def test_an_install_level_finding_takes_no_entry(category: str) -> None:
+    """Lane 3's REVIEW-W1 MINOR at `f9cc4b0c` (`health_contract.py:865`) and the
+    holder's `6072197564` (e): a run raises ONE install-level finding, never one
+    per entry (data-model.md:382), so its entry is "", and a non-empty one is
+    refused by `engine_finding()`, `pathless_identity()` and `check_finding()`
+    alike. Otherwise one whole-file refusal could split per entry."""
+    with pytest.raises(hc.FindingRefused) as refused:
+        hc.engine_finding(category, "house-style", pack_version="0.2.0", severity="warning",
+                          message="the run could not use it")
+    assert refused.value.rule == "pathless-identity-is-category-and-entry"
+    assert refused.value.where == "/identity/entry"
+    with pytest.raises(hc.FindingRefused) as built:
+        hc.pathless_identity(category, "house-style")
+    assert built.value.where == "/identity/entry"
+    identity = {"category": category, "entry": "house-style"}
+    finding = {**_example("no-sandbox"), "kind": category, "identity": identity,
+               "id": _independent_id("opendox", category, "", identity)}
+    assert [(v.rule, v.where) for v in hc.violations(finding)] == [
+        ("pathless-identity-is-category-and-entry", "/identity/entry")]
+
+
+@pytest.mark.parametrize("category, admitted", [
+    *[(category, True) for category in RULED_CATEGORIES],
+    ("identity-collision", True),
+    ("uncited-disappearance", False), ("broken-link", False), ("orphan", False),
+])
+def test_a_pathless_identity_names_an_engine_category_or_a_collision(category: str,
+                                                                      admitted: bool) -> None:
+    """The holder's `6072197564` (b): the set is CLOSED. Only the engine raises
+    a pathless finding, so its category is one of the engine's, or
+    `identity-collision` in the re-raise of a pathless collision's
+    disappearance (option (D))."""
+    identity = {"category": category, "entry": ""}
+    finding = {**_example("no-sandbox"), "kind": "uncited-disappearance", "identity": identity,
+               "id": _independent_id("opendox", "uncited-disappearance", "", identity)}
+    found = [(v.rule, v.where) for v in hc.violations(finding)]
+    if admitted:
+        assert found == []
+    else:
+        assert found == [("pathless-identity-is-category-and-entry", "/identity/category")]
+
+
 def test_an_engine_finding_against_a_41_character_pack_is_refused() -> None:
     hc.engine_finding("pack-crashed", "p" * 40, pack_version="1", severity="error",
                       message="the pack crashed")
@@ -1217,7 +1275,9 @@ def test_the_two_added_categories_are_admitted(category: str) -> None:
 
 @pytest.mark.parametrize("category, entry", [
     ("not-a-category", ""), ("No-Sandbox", ""), ("", ""), (None, ""),
-    ("no-sandbox", "House"), ("no-sandbox", "a" * 201), ("no-sandbox", None)])
+    ("entry-refused", "House"), ("entry-refused", "a" * 201), ("entry-refused", None),
+    ("no-sandbox", "house-style"), ("manifest-refused", "house-style"),
+    ("dispositions-refused", "house-style")])
 def test_the_pathless_identity_refuses_what_is_not_the_engines(category: Any,
                                                                  entry: Any) -> None:
     with pytest.raises(hc.FindingRefused) as refused:
@@ -1282,6 +1342,27 @@ def test_the_disappearance_takes_the_form_its_originals_path_calls_for(name: str
     assert hc.violations(reraise) == []
     assert reraise["id"] != original["id"]
     assert reraise["path"] == original["path"]
+
+
+def test_a_pathless_reraise_takes_its_originals_kind_not_its_category() -> None:
+    """Lane 3's REVIEW-W1 NIT at `f9cc4b0c`: an original whose kind is not its
+    identity's category, the engine's own re-raise of a pathless
+    disappearance. Its disappearance's identity names the original's KIND
+    (option (D)). Under the closed set (`6072197564` (b)) no pathless finding
+    names that kind, so the contract admits no re-raise of a pathless
+    re-raise's disappearance."""
+    original = hc.make_finding(
+        kind="uncited-disappearance", pack_id="opendox", pack_version="0.2.0", path="",
+        identity={"category": "no-sandbox", "entry": ""}, severity="warning",
+        resolution_class="human-only",
+        message="a finding disappeared with no landed repair citing it")
+    identity = hc.disappearance_identity(original)
+    assert identity == {"category": "uncited-disappearance", "entry": ""}
+    with pytest.raises(hc.FindingRefused) as refused:
+        hc.make_finding(kind="uncited-disappearance", pack_id="opendox", pack_version="0.2.0",
+                        path="", identity=identity, severity="warning",
+                        resolution_class="human-only", message="it disappeared again")
+    assert refused.value.where == "/identity/category"
 
 
 def test_the_disappeared_id_alone_is_refused_for_a_pathless_original() -> None:
@@ -1456,10 +1537,15 @@ def _nested_keys(levels: int, key: str, leaf: Any) -> dict[str, Any]:
     ({"~" * 95: 5}, "/identity/" + "~0" * 95),
     ({"~" * 96: 5}, "/identity"),
     ({"a": [["x"], [True, 1]]}, "/identity/a/1/1"),
+    ({"k" * 189: [5]}, "/identity/" + "k" * 189),
+    ({"k" * 189: [[[[5]]]]}, "/identity/" + "k" * 189),
+    ({"k" * 195: [{"a": 5}]}, "/identity"),
 ], ids=["a 171-character key, named", "the bound, 200 characters",
         "one past it, the ancestor", "lane 3's fifteen nested 200-character keys",
         "a stopped pointer stays stopped", "escapes count, at the bound",
-        "escapes count, one past it", "array indices"])
+        "escapes count, one past it", "array indices",
+        "an index one past the bound, 201 characters", "indices to 207 characters",
+        "a stopped pointer stays stopped through an index"])
 def test_where_is_bounded_at_the_nearest_ancestor_that_fits(identity: Any, where: str) -> None:
     """Lane 3's REVIEW-W1 MINOR, bounded as the holder preferred: `where` is at
     most 200 characters, the place's own pointer or its nearest ancestor's that

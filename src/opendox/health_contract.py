@@ -102,9 +102,13 @@ holder's rulings `openxFactory#656` `6069024023`, items 1 and 2).
   per category (`ENTRY_CATEGORIES`; the value is `6072086385` item 1's), and
   its identity is `{category, entry}`, so the engine raises ONE such finding
   per category and entry in a run, with the reasons in `evidence`, and it
-  keeps one id across runs.
-  `pathless_identity()` builds the identity and `engine_finding()` the whole
-  finding.
+  keeps one id across runs. The install-level categories
+  (`INSTALL_CATEGORIES`) take entry "": a run raises ONE such finding
+  (`6072197564` (e)). `pathless_identity()` builds the identity and
+  `engine_finding()` the whole finding.
+* A pathless finding's `identity.category` is one of `PATHLESS_CATEGORIES`,
+  the engine's categories and `identity-collision`, and nothing else
+  (`6072197564` (b)): only the engine raises a pathless finding.
 * `collision_identity()` builds a collision's `{collided_id}`.
 * `disappearance_identity()` builds the identity of the re-raise of an
   uncited disappearance, in the form its original's path calls for: a pathed
@@ -113,6 +117,9 @@ holder's rulings `openxFactory#656` `6069024023`, items 1 and 2).
   or "">}` (option (D)). T046 raises it.
 * `ENGINE_KINDS` are the kinds only the engine raises, which T045 refuses in a
   pack's declaration.
+* `IGNORED_FIELDS` and `STAMPED_FIELDS` split the fields a pack does not own
+  by what happens to a pack's value (`6072197564` (d)): its `id` is ignored,
+  and `pack_id`, `pack_version` and `baseline_class` are the engine's.
 
 T045 APPENDS the pack protocol to this module (the static declaration, the
 stdout document and the patch type) at T041's landing, a cross-lane hand-off
@@ -138,7 +145,6 @@ __all__ = [
     "AUTO_FIX",
     "BASELINE_CLASSES",
     "CATEGORIES",
-    "ENGINE_FIELDS",
     "ENGINE_KINDS",
     "ENGINE_RULES",
     "ENTRY_CATEGORIES",
@@ -150,15 +156,19 @@ __all__ = [
     "IDENTITY_COLLISION",
     "IDENTITY_MAX_BYTES",
     "ID_MAX",
+    "IGNORED_FIELDS",
+    "INSTALL_CATEGORIES",
     "NAME_MAX",
     "NESTING_MAX",
     "OPENDOX",
     "OPTIONAL_FIELDS",
+    "PATHLESS_CATEGORIES",
     "REFERENCE_RULES",
     "REQUIRED_FIELDS",
     "RESOLUTION_CLASSES",
     "SEVERITIES",
     "SHAPE_RULES",
+    "STAMPED_FIELDS",
     "STRING_MAX",
     "UNCITED_DISAPPEARANCE",
     "Violation",
@@ -216,8 +226,15 @@ FIELDS: tuple[str, ...] = (
     "id", "kind", "pack_id", "pack_version", "path", "identity", "locator",
     "severity", "resolution_class", "message", "evidence", "baseline_class")
 
-#: The fields the ENGINE sets; a family or pack is never asked for them (15.7).
-ENGINE_FIELDS: tuple[str, ...] = ("id", "pack_id", "pack_version", "baseline_class")
+#: The fields a pack does not own, split by what happens to its value (the
+#: holder's `6072197564` (d)). A pack's own `id` is IGNORED: the engine computes
+#: every id by the id rule (`finding_id()`), so `make_finding()` takes none and
+#: a pack's value never reaches a finding (`6065680005` item 3).
+IGNORED_FIELDS: tuple[str, ...] = ("id",)
+#: The fields that are the ENGINE's: it stamps `pack_id` and `pack_version`
+#: (15.7) and sets `baseline_class`; a pack's output that sets one is refused
+#: (T045, `6065680005` item 3).
+STAMPED_FIELDS: tuple[str, ...] = ("pack_id", "pack_version", "baseline_class")
 
 #: No key of `identity` or `evidence`, at any depth, is named one of these
 #: (R2Q25 (a)).
@@ -291,6 +308,20 @@ ENTRY_CATEGORIES: frozenset[str] = frozenset({
 ENGINE_KINDS: frozenset[str] = frozenset(CATEGORIES) | {IDENTITY_COLLISION,
                                                        UNCITED_DISAPPEARANCE}
 
+#: The install-level categories: a run raises ONE such finding, never one per
+#: entry (data-model.md:382, "ONE install-level finding"; R2Q16 (a)), so its
+#: entry is always "" and a non-empty one is refused (the holder's `6069024023`
+#: item 1 and `6072197564` (e)). Only `ENTRY_CATEGORIES` and `entry-refused`
+#: take an entry.
+INSTALL_CATEGORIES: frozenset[str] = frozenset({
+    "no-sandbox", "manifest-refused", "dispositions-refused"})
+
+#: The categories a pathless finding's identity may name, a CLOSED set (the
+#: holder's `6072197564` (b)): the engine's own, and `identity-collision`, the
+#: kind of a pathless collision whose disappearance is re-raised (option (D)).
+#: A pack raises no pathless finding (T045 refuses one; `6072086385` item 3).
+PATHLESS_CATEGORIES: frozenset[str] = frozenset(CATEGORIES) | {IDENTITY_COLLISION}
+
 #: The copy's catalog: the rules its own keywords state, and the three
 #: cross-field rules no JSON Schema keyword can state.
 SHAPE_RULES: tuple[str, ...] = (
@@ -335,6 +366,8 @@ _CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\ud800-\udfff]")
 _NOT_ONE_LINE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")
 _NUL = "\x00"
 _NUL_DETAIL = "holds U+0000, which a stored finding cannot carry (jsonb refuses it)"
+_INSTALL_DETAIL = ("is not empty, though a run raises ONE install-level finding of its "
+                   "category, never one per entry")
 
 
 class Violation(NamedTuple):
@@ -431,6 +464,8 @@ def pathless_identity(category: str, entry: str = "") -> dict[str, str]:
             rule, _AT_ENTRY,
             "the entry is a manifest entry's id, of lowercase letters, digits and "
             f"hyphens and at most {STRING_MAX} characters, or the empty string"))
+    if entry and category in INSTALL_CATEGORIES:
+        raise FindingRefused(Violation(rule, _AT_ENTRY, _INSTALL_DETAIL))
     return {"category": category, "entry": entry}
 
 
@@ -647,12 +682,16 @@ def _pathless_form(identity: dict[Any, Any]) -> Iterator[Violation]:
         yield Violation(rule, _AT_IDENTITY, "a pathless finding's identity is exactly "
                         "{category, entry}, the engine's own")
         return
-    if not isinstance(identity["category"], str) or not _NAME.fullmatch(identity["category"]):
-        yield Violation(rule, "/identity/category", "is not a name of lowercase letters, "
-                        "digits and hyphens")
-    if not isinstance(identity["entry"], str) or not _ENTRY.fullmatch(identity["entry"]):
+    category, entry = identity["category"], identity["entry"]
+    known = isinstance(category, str) and category in PATHLESS_CATEGORIES
+    if not known:
+        yield Violation(rule, "/identity/category", "is not one of the engine's categories "
+                        "or identity-collision")
+    if not isinstance(entry, str) or not _ENTRY.fullmatch(entry):
         yield Violation(rule, _AT_ENTRY, "is neither a manifest entry's id nor the "
                         "empty string")
+    elif entry and known and category in INSTALL_CATEGORIES:
+        yield Violation(rule, _AT_ENTRY, _INSTALL_DETAIL)
 
 
 def _collision_form(identity: dict[Any, Any]) -> Iterator[Violation]:
@@ -883,7 +922,9 @@ def engine_finding(category: str, entry: str = "", *, pack_version: str, severit
     empty, its identity is `{category, entry}`, and it is human-only. Its
     `pack_id` is the one its category fixes (`6072086385` item 1): for
     `ENTRY_CATEGORIES`, `entry`, the manifest entry's id, which is never empty
-    and never `opendox`; for every other category, `opendox`. `pack_version` is that pack's: the
+    and never `opendox`; for every other category, `opendox`. An
+    install-level category (`INSTALL_CATEGORIES`) takes entry "", and a
+    non-empty one is refused (`6072197564` (e)). `pack_version` is that pack's: the
     entry's version, or the installed version for `opendox`. The reasons ride
     in `evidence`, so a run raises one such finding per category and entry,
     and it keeps one id across runs."""
