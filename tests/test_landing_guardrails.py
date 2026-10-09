@@ -3077,3 +3077,222 @@ def test_a_live_session_whose_branch_lands_ends_by_the_merge_observation(world):
     assert ended.merged is True
     assert world.git("branch", "--list", BRANCH) == ""
     assert not worktree.exists()
+
+
+# ---- the confirm control (`web/views/branch-actions.js`), run in node ------
+
+_CONTROL_HARNESS = r"""
+const out = {};
+function node(tag) {
+  return { tag, children: [], attrs: {}, listeners: {}, textContent: "",
+           value: "", disabled: false, className: "", type: "", placeholder: "",
+           setAttribute(k, v) { this.attrs[k] = v; },
+           addEventListener(k, f) { this.listeners[k] = f; },
+           append(...c) { this.children.push(...c); } };
+}
+const doc = { createElement: node };
+function host() { const h = node("span"); h.ownerDocument = doc; return h; }
+const m = await import("./branch-actions.js");
+const TOKEN = "Tk_" + "b".repeat(40);
+const HEAD = "0123456789abcdef0123456789abcdef01234567";
+const MERGE = "fedcba9876543210fedcba9876543210fedcba98";
+const SERVED = "served-repo";
+const live = { actions: { land: true, session: true }, console_token: TOKEN,
+               repository: SERVED };
+const calls = [];
+function scripted(answers) {
+  return async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body), headers: options.headers,
+                 method: options.method });
+    const [status, payload] = answers.shift();
+    return { ok: status < 400, status, json: async () => payload };
+  };
+}
+out.capable = {
+  live: m.landCapable(live),
+  sessionOnly: m.landCapable({ actions: { session: true, submit: true },
+                               console_token: TOKEN }),
+  falseKey: m.landCapable({ actions: { land: false }, console_token: TOKEN }),
+  truthy: m.landCapable({ actions: { land: 1 }, console_token: TOKEN }),
+  noToken: m.landCapable({ actions: { land: true } }),
+  nothing: m.landCapable(undefined),
+};
+let h = host();
+let c = m.mountLandConfirm(h, { caps: { actions: { session: true, submit: true },
+                                        console_token: TOKEN } });
+out.unoffered = { enabled: c.enabled, children: h.children.length,
+                  asked: await c.ask(), confirmed: await c.confirm() };
+h = host();
+c = m.mountLandConfirm(h, { caps: live, branch: "sess-1", repository: SERVED,
+                            composed: true });
+out.composed = { enabled: c.enabled, children: h.children.length };
+h = host();
+c = m.mountLandConfirm(h, { caps: live, branch: "sess-1",
+                            repository: "other-repo" });
+out.otherRepository = { enabled: c.enabled, children: h.children.length };
+
+// the whole act: ask, see the branch and head, confirm ONCE
+h = host();
+c = m.mountLandConfirm(h, { caps: live, branch: "sess-1", repository: SERVED,
+  fetcher: scripted([
+    [200, { nonce: "N1", branch: "sess-1", head: HEAD }],
+    [200, { branch: "sess-1", merge_commit: MERGE, previous_main: HEAD,
+            served_checkout: "fast-forwarded", pushed: false }]]) });
+const [input, askButton, confirmButton, message] = h.children;
+out.mounted = { enabled: c.enabled, count: h.children.length, value: input.value,
+                ask: askButton.textContent, confirm: confirmButton.textContent,
+                confirmDisabled: confirmButton.disabled, role: message.attrs.role };
+out.question = await c.ask();
+out.confirmEnabledAfterAsk = !confirmButton.disabled;
+out.landed = await c.confirm();
+out.confirmDisabledAfter = confirmButton.disabled;
+out.again = await c.confirm();
+out.requests = calls.map(r => ({ url: r.url, body: r.body, method: r.method,
+                                 token: r.headers["X-XF-Console-Token"] }));
+
+// main is never asked for
+calls.length = 0;
+h = host();
+c = m.mountLandConfirm(h, { caps: live, branch: "main", repository: SERVED,
+                            fetcher: scripted([]) });
+out.mainValue = h.children[0].value;
+h.children[0].value = "main";
+out.mainAsked = await c.ask();
+out.mainCalls = calls.length;
+
+// a nonce bound to ANOTHER branch, or with no full head, is not offered
+h = host();
+c = m.mountLandConfirm(h, { caps: live, branch: "sess-1", repository: SERVED,
+  fetcher: scripted([[200, { nonce: "N2", branch: "sess-2", head: HEAD }],
+                     [200, { nonce: "N3", branch: "sess-1", head: "abc" }]]) });
+out.otherBranch = await c.ask();
+out.otherBranchConfirm = !h.children[2].disabled;
+out.shortHead = await c.ask();
+
+// refusals, in the server's own words; a governed landing's report
+h = host();
+c = m.mountLandConfirm(h, { caps: live, branch: "sess-1", repository: SERVED,
+  fetcher: scripted([
+    [409, { ok: false, error: "landing_refused", code: "no-declaration",
+            message: "main carries no .opendox/governance.yaml" }],
+    [200, { nonce: "N4", branch: "sess-1", head: HEAD }],
+    [409, { ok: false, error: "merge_conflict", code: "merge-conflict",
+            message: "sess-1 conflicts with main in: doc.md" }],
+    [200, { nonce: "N5", branch: "sess-1", head: HEAD }],
+    [200, { remote: "review", ref: "refs/heads/sess-1", url: "https://f.example/r",
+            branch: "sess-1", commit: HEAD }]]) });
+out.refusedAsk = await c.ask();
+await c.ask();
+out.conflict = await c.confirm();
+await c.ask();
+out.governed = await c.confirm();
+out.thrown = await m.mountLandConfirm(host(), { caps: live, branch: "sess-1",
+  repository: SERVED, fetcher: async () => { throw new Error("offline"); } }).ask();
+out.routes = [m.ACTIONS_SESSION_LAND_NONCE_ROUTE, m.ACTIONS_SESSION_LAND_ROUTE];
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+@pytest.fixture(scope="module")
+def confirm_control(tmp_path_factory):
+    if NODE is None:
+        pytest.skip("node not available for the confirm control's probe")
+    root = tmp_path_factory.mktemp("land-confirm")
+    shutil.copy(WEB / "views" / "branch-actions.js", root / "branch-actions.js")
+    (root / "package.json").write_text('{"type": "module"}', encoding="utf-8")
+    (root / "harness.mjs").write_text(_CONTROL_HARNESS, encoding="utf-8")
+    done = subprocess.run([NODE, str(root / "harness.mjs")], capture_output=True,
+                          text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+def test_the_confirm_control_is_keyed_on_land_and_the_token(confirm_control):
+    """OQ-12-14 refined by ADV-14: `actions.land` exactly true, never
+    `session` or `submit`, and a console token to send; a composed render and
+    another repository on screen offer none."""
+    assert confirm_control["capable"] == {
+        "live": True, "sessionOnly": False, "falseKey": False, "truthy": False,
+        "noToken": False, "nothing": False}
+    assert confirm_control["unoffered"] == {"enabled": False, "children": 0,
+                                            "asked": None, "confirmed": None}
+    assert confirm_control["composed"] == {"enabled": False, "children": 0}
+    assert confirm_control["otherRepository"] == {"enabled": False,
+                                                  "children": 0}
+
+
+def test_the_confirm_control_shows_the_branch_and_head_and_posts_once(
+        confirm_control):
+    """OQ-12-13 and the contract's § The view: it fetches a nonce, shows the
+    branch and head it is bound to, and posts it ONCE."""
+    head = "0123456789abcdef0123456789abcdef01234567"
+    merge = "fedcba9876543210fedcba9876543210fedcba98"
+    assert confirm_control["routes"] == [NONCE_ROUTE, LAND_ROUTE]
+    assert confirm_control["mounted"] == {
+        "enabled": True, "count": 4, "value": "sess-1", "ask": "land",
+        "confirm": "confirm", "confirmDisabled": True, "role": "status"}
+    assert confirm_control["question"] == (
+        f"land sess-1 at {head} onto main with a merge commit?")
+    assert confirm_control["confirmEnabledAfterAsk"] is True
+    assert confirm_control["landed"] == (
+        f"landed sess-1 as {merge[:12]}; nothing pushed; undo with git revert "
+        f"-m 1 {merge}")
+    assert confirm_control["confirmDisabledAfter"] is True
+    assert confirm_control["again"] == "ask to land a branch first"
+    token = "Tk_" + "b" * 40
+    assert confirm_control["requests"] == [
+        {"url": NONCE_ROUTE, "body": {"branch": "sess-1"}, "method": "POST",
+         "token": token},
+        {"url": LAND_ROUTE, "body": {"branch": "sess-1", "nonce": "N1"},
+         "method": "POST", "token": token}]
+
+
+def test_the_confirm_control_never_offers_main_or_a_foreign_nonce(
+        confirm_control):
+    assert confirm_control["mainValue"] == ""
+    assert confirm_control["mainAsked"] == "name a branch other than main"
+    assert confirm_control["mainCalls"] == 0
+    assert confirm_control["otherBranch"].startswith("not landed")
+    assert confirm_control["otherBranchConfirm"] is False
+    assert confirm_control["shortHead"].startswith("not landed")
+
+
+def test_the_confirm_control_states_each_answer_in_the_servers_words(
+        confirm_control):
+    assert confirm_control["refusedAsk"] == (
+        "not landed: main carries no .opendox/governance.yaml")
+    assert confirm_control["conflict"] == (
+        "not landed: sess-1 conflicts with main in: doc.md")
+    assert confirm_control["governed"] == (
+        "submitted sess-1 to review (https://f.example/r) as refs/heads/sess-1; "
+        "the merge stays its governance's act")
+    assert confirm_control["thrown"] == "not landed: offline"
+
+
+_MENU_PROBE = r"""
+const am = await import("./account-menu.js");
+process.stdout.write(JSON.stringify({
+  standalone: am.accessLevel({ actions: { gate: true, edit: true, session: true,
+                                          submit: true, land: true } }),
+  notGranted: am.accessLevel({ actions: { session: true, land: false } }),
+  hostPlane: am.accessLevel({ actions: { session: true } }),
+}));
+"""
+
+
+def test_the_account_menu_names_land_where_it_is_granted(tmp_path):
+    """`land` is a write-class verb of its own (the chain T015 -> T016,
+    `6069024568` item 2): the access line names it where `actions.land` is
+    true, and a host's plane, which carries no key, reads as it did."""
+    if NODE is None:
+        pytest.skip("node not available for the account menu's probe")
+    for name in ("account-menu.js", "helpers.js"):
+        shutil.copy(WEB / "views" / name, tmp_path / name)
+    (tmp_path / "package.json").write_text('{"type": "module"}', encoding="utf-8")
+    (tmp_path / "probe.mjs").write_text(_MENU_PROBE, encoding="utf-8")
+    done = subprocess.run([NODE, str(tmp_path / "probe.mjs")],
+                          capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout) == {
+        "standalone": "gate, edit, session, submit, land",
+        "notGranted": "session", "hostPlane": "session"}

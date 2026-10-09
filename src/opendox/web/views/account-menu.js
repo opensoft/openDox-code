@@ -26,7 +26,7 @@ import { el } from "./helpers.js";
 // The write-class capabilities: their absence is what "read-only" means, and
 // their presence is what the access level names. Read from the existing
 // `/capabilities.actions` map — no new flag is invented here.
-const WRITE_ACTIONS = ["gate", "edit", "session", "submit"];
+const WRITE_ACTIONS = ["gate", "edit", "session", "submit", "land"];
 
 // Pure — node-testable. The signed-in username: the hosted actor when the
 // gateway stamped one, else the resolved local actor, else the generic label.
