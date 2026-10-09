@@ -61,10 +61,20 @@ field bounds, so the engine's caps are here, each tested at its boundary:
   Python's recursion limit.
 * Every value is a JSON value: text keys, finite numbers, and no tuple, set or
   bytes (`finding-is-json`).
+* No string a finding carries holds U+0000 (`text-holds-no-nul`; the holder's
+  `openxFactory#656` `6072086385` item 4), keys and values alike: Postgres
+  `jsonb` cannot store it (SQLSTATE 22P05), so such a finding could never be
+  stored. The schema admits it in `identity`, `evidence` and `locator.target`,
+  so this rule refuses it there, with a bounded `where`; in `message`, `path`
+  and `pack_version` the schema's own control-character rules refuse it
+  already. For a pack's output, this refusal is T045's whole-output
+  `pack-output-refused` (`6069024023` item 1's mapping), so a broken or hostile
+  pack loses its own output, never the run. T042's `_json_text` refuses it
+  too, as defence in depth.
 
 EVERY RULE HAS AN IDENTIFIER. A violation names the copy's own rule id (its
 `x-rules` catalog: 24 shape rules and 3 reference rules) or one of the engine's
-four (`ENGINE_RULES`). openDox's validator cannot build the finding schema: it
+five (`ENGINE_RULES`). openDox's validator cannot build the finding schema: it
 refuses a copy whose catalog names reference rules it does not implement
 (`SchemaNotEvaluable`). The finding is no validator kind anyway (N-15), so all
 27 rules are written here by hand, the three reference rules among them:
@@ -89,9 +99,10 @@ holder's rulings `openxFactory#656` `6069024023`, items 1 and 2).
 
 * `CATEGORIES` fixes the failure categories of an install-level or pre-run
   finding. A category is also that finding's `kind`, its `pack_id` is fixed
-  per category (`ENTRY_CATEGORIES`), and its identity is `{category, entry}`,
-  so the engine raises ONE such finding per category and entry in a run,
-  with the reasons in `evidence`, and it keeps one id across runs.
+  per category (`ENTRY_CATEGORIES`; the value is `6072086385` item 1's), and
+  its identity is `{category, entry}`, so the engine raises ONE such finding
+  per category and entry in a run, with the reasons in `evidence`, and it
+  keeps one id across runs.
   `pathless_identity()` builds the identity and `engine_finding()` the whole
   finding.
 * `collision_identity()` builds a collision's `{collided_id}`.
@@ -266,8 +277,10 @@ CATEGORIES: tuple[str, ...] = (
 #: (15.7), so `entry` is never empty for them. Every other category's finding is
 #: against the product itself, `opendox`: no live sandbox, a refused manifest or
 #: dispositions file, and a refused entry, whose id may be malformed, reserved
-#: or repeated and so is no pack id to attribute a finding to. One `pack_id`
-#: per category (the holder's `6069024023` item 1).
+#: or repeated and so is no pack id to attribute a finding to; it rides only in
+#: `identity.entry`. This is the holder's `6072086385` item 1, beside
+#: `6069024023` item 1: it names the value that ruling's "one pack_id per
+#: category" left open, after dox-v1.2's schema text for `pack_id`.
 ENTRY_CATEGORIES: frozenset[str] = frozenset({
     "fetch-failed", "digest-mismatch", "declaration-refused", "pack-crashed",
     "pack-timed-out", "pack-bound-hit", "pack-output-refused"})
@@ -301,11 +314,14 @@ NAME_CAP = "name-is-at-most-40-characters"
 SIZE_CAP = "identity-is-within-the-size-cap"
 NESTING_CAP = "nesting-is-within-the-cap"
 NOT_JSON = "finding-is-json"
-ENGINE_RULES: tuple[str, ...] = (NAME_CAP, SIZE_CAP, NESTING_CAP, NOT_JSON)
+NO_NUL = "text-holds-no-nul"
+ENGINE_RULES: tuple[str, ...] = (NAME_CAP, SIZE_CAP, NESTING_CAP, NOT_JSON, NO_NUL)
 
 # The pointers of the fields more than one rule reports at.
 _AT_IDENTITY = "/identity"
+_AT_ENTRY = "/identity/entry"
 _AT_LOCATOR = "/locator"
+_AT_TARGET = "/locator/target"
 _AT_RESOLUTION_CLASS = "/resolution_class"
 
 # The schema's patterns, read as Python's `fullmatch`, which admits no trailing
@@ -317,6 +333,8 @@ _DRIVE = re.compile(r"[A-Za-z]:")
 _SURROGATE = re.compile("[\ud800-\udfff]")
 _CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\ud800-\udfff]")
 _NOT_ONE_LINE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")
+_NUL = "\x00"
+_NUL_DETAIL = "holds U+0000, which a stored finding cannot carry (jsonb refuses it)"
 
 
 class Violation(NamedTuple):
@@ -410,7 +428,7 @@ def pathless_identity(category: str, entry: str = "") -> dict[str, str]:
     if (not isinstance(entry, str) or not _ENTRY.fullmatch(entry)
             or len(entry) > STRING_MAX):
         raise FindingRefused(Violation(
-            rule, "/identity/entry",
+            rule, _AT_ENTRY,
             "the entry is a manifest entry's id, of lowercase letters, digits and "
             f"hyphens and at most {STRING_MAX} characters, or the empty string"))
     return {"category": category, "entry": entry}
@@ -575,6 +593,8 @@ def _members(value: dict[Any, Any], at: str, stopped: bool, level: int, field: s
         elif (problem := _text_problem(key)) is not None:
             refused.append(Violation(f"{field}-strings-are-short-text", at,
                                      f"has a key that {problem}"))
+        elif _NUL in key:
+            refused.append(Violation(NO_NUL, at, f"has a key that {_NUL_DETAIL}"))
         else:
             inner.append((item, *_child(at, stopped, key), level + 1))
     return refused, inner
@@ -585,6 +605,8 @@ def _scalar(value: Any, at: str, field: str) -> Iterator[Violation]:
     if isinstance(value, str):
         if (problem := _text_problem(value)) is not None:
             yield Violation(f"{field}-strings-are-short-text", at, f"is a string that {problem}")
+        elif _NUL in value:
+            yield Violation(NO_NUL, at, f"is a string that {_NUL_DETAIL}")
     elif value is None or isinstance(value, bool):
         return
     elif not isinstance(value, (int, float)):
@@ -629,7 +651,7 @@ def _pathless_form(identity: dict[Any, Any]) -> Iterator[Violation]:
         yield Violation(rule, "/identity/category", "is not a name of lowercase letters, "
                         "digits and hyphens")
     if not isinstance(identity["entry"], str) or not _ENTRY.fullmatch(identity["entry"]):
-        yield Violation(rule, "/identity/entry", "is neither a manifest entry's id nor the "
+        yield Violation(rule, _AT_ENTRY, "is neither a manifest entry's id nor the "
                         "empty string")
 
 
@@ -686,11 +708,16 @@ def _locator(value: Any) -> Iterator[Violation]:
             yield Violation("locator-line-is-a-line-number", f"/locator/{key}",
                             f"is not a whole number no less than 1 ({_type(line)})")
     if "target" in value:
-        target = value["target"]
-        if not isinstance(target, str) or not target or _text_problem(target):
-            yield Violation("locator-target-is-short-text", "/locator/target",
-                            f"is not text of 1 to {STRING_MAX} characters free of lone "
-                            f"surrogates ({_type(target)})")
+        yield from _target(value["target"])
+
+
+def _target(target: Any) -> Iterator[Violation]:
+    if not isinstance(target, str) or not target or _text_problem(target):
+        yield Violation("locator-target-is-short-text", _AT_TARGET,
+                        f"is not text of 1 to {STRING_MAX} characters free of lone "
+                        f"surrogates ({_type(target)})")
+    elif _NUL in target:
+        yield Violation(NO_NUL, _AT_TARGET, _NUL_DETAIL)
 
 
 def _one_of(value: Any, allowed: tuple[str, ...], where: str, rule: str) -> Iterator[Violation]:
@@ -854,9 +881,9 @@ def engine_finding(category: str, entry: str = "", *, pack_version: str, severit
     """An install-level or pre-run finding, as the engine raises it (the
     holder's `6069024023` item 1). Its `kind` is its category, its `path` is
     empty, its identity is `{category, entry}`, and it is human-only. Its
-    `pack_id` is the one its category fixes: for `ENTRY_CATEGORIES`, `entry`,
-    the manifest entry's id, which is never empty and never `opendox`; for
-    every other category, `opendox`. `pack_version` is that pack's: the
+    `pack_id` is the one its category fixes (`6072086385` item 1): for
+    `ENTRY_CATEGORIES`, `entry`, the manifest entry's id, which is never empty
+    and never `opendox`; for every other category, `opendox`. `pack_version` is that pack's: the
     entry's version, or the installed version for `opendox`. The reasons ride
     in `evidence`, so a run raises one such finding per category and entry,
     and it keeps one id across runs."""
@@ -865,7 +892,7 @@ def engine_finding(category: str, entry: str = "", *, pack_version: str, severit
     if category in ENTRY_CATEGORIES:
         if entry in ("", OPENDOX):
             raise FindingRefused(Violation(
-                "pathless-identity-is-category-and-entry", "/identity/entry",
+                "pathless-identity-is-category-and-entry", _AT_ENTRY,
                 f"a {category} finding is against the pack its manifest entry "
                 f"launched, so its entry is that pack's id, never empty and never "
                 f"{OPENDOX}"))

@@ -340,6 +340,11 @@ _REFUSED_IDENTITIES = [
      "notes/plan.md", "identity-collision", "collision-identity-is-the-collided-id"),
     ({"collided_id": "not an id"}, "notes/plan.md", "identity-collision",
      "collision-identity-is-the-collided-id"),
+    # U+0000, which jsonb cannot store (the holder's 6072086385 item 4)
+    ({"target": "../old/brief\x00.md"}, "notes/plan.md", "broken-link", "text-holds-no-nul"),
+    ({"tar\x00get": "../old/brief.md"}, "notes/plan.md", "broken-link", "text-holds-no-nul"),
+    ({"a": ["b", "\x00"]}, "notes/plan.md", "broken-link", "text-holds-no-nul"),
+    ({"a": {"\x00": "b"}}, "notes/plan.md", "broken-link", "text-holds-no-nul"),
     ({"category": "no-sandbox", "entry": ""}, "", "identity-collision",
      "collision-identity-is-the-collided-id"),
 ]
@@ -381,7 +386,7 @@ def test_the_vocabulary_is_the_packaged_copys() -> None:
     defs = schema["$defs"]
     assert hc.RESOLUTION_CLASSES == tuple(props["resolution_class"]["enum"]) == (
         "auto-fix", "assisted", "human-only")
-    assert (hc.AUTO_FIX, hc.ASSISTED, hc.HUMAN_ONLY) == hc.RESOLUTION_CLASSES
+    assert hc.RESOLUTION_CLASSES == (hc.AUTO_FIX, hc.ASSISTED, hc.HUMAN_ONLY)
     assert hc.SEVERITIES == tuple(props["severity"]["enum"]) == ("error", "warning", "info")
     assert hc.BASELINE_CLASSES == tuple(props["baseline_class"]["enum"]) == (
         "new", "pack-upgrade", "persistent")
@@ -413,7 +418,8 @@ def test_the_rule_catalog_is_the_copys_plus_the_engines_own() -> None:
     assert len(hc.SHAPE_RULES) == len(set(hc.SHAPE_RULES)) == 24
     assert set(hc.ENGINE_RULES) == {"name-is-at-most-40-characters",
                                     "identity-is-within-the-size-cap",
-                                    "nesting-is-within-the-cap", "finding-is-json"}
+                                    "nesting-is-within-the-cap", "finding-is-json",
+                                    "text-holds-no-nul"}
     assert not set(hc.ENGINE_RULES) & set(catalog)
 
 
@@ -754,6 +760,9 @@ def test_the_message_is_one_bounded_line(message: Any, admitted: bool) -> None:
     ({"a": b"bytes"}, "/evidence/a", "finding-is-json"),
     ({1: "a"}, "/evidence", "finding-is-json"),
     ({"a": 10 ** 5000}, "/evidence/a", "finding-is-json"),
+    ({"a": "b\x00"}, "/evidence/a", "text-holds-no-nul"),
+    ({"a\x00": "b"}, "/evidence", "text-holds-no-nul"),
+    ({"a": [{"b": "\x00"}]}, "/evidence/a/0/b", "text-holds-no-nul"),
 ])
 def test_evidence_holds_locators_only(evidence: Any, where: str | None,
                                       rule: str | None) -> None:
@@ -764,6 +773,45 @@ def test_evidence_holds_locators_only(evidence: Any, where: str | None,
         assert json.loads(hc.to_json(finding))["evidence"] == evidence
     else:
         assert [(v.rule, v.where) for v in found] == [(rule, where)]
+
+
+@pytest.mark.parametrize("field, value, rule, where", [
+    ("identity", {"target": "../old/brief.md\x00"}, "text-holds-no-nul", "/identity/target"),
+    ("identity", {"tar\x00get": "../old/brief.md"}, "text-holds-no-nul", "/identity"),
+    ("identity", {"a": [{"b": "\x00"}]}, "text-holds-no-nul", "/identity/a/0/b"),
+    ("identity", {"k" * 189: {"x": "\x00"}}, "text-holds-no-nul", "/identity/" + "k" * 189),
+    ("evidence", {"a": "\x00"}, "text-holds-no-nul", "/evidence/a"),
+    ("evidence", {"\x00": "a"}, "text-holds-no-nul", "/evidence"),
+    ("locator", {"target": "\x00"}, "text-holds-no-nul", "/locator/target"),
+    ("message", "a\x00b", "message-is-one-bounded-line", "/message"),
+    ("path", "notes/pl\x00an.md", "path-is-corpus-relative", "/path"),
+    ("pack_version", "0.2.0\x00", "pack-version-is-text", "/pack_version"),
+], ids=["identity value", "identity key", "identity, deep", "identity, past the bound",
+        "evidence value", "evidence key", "locator target", "message", "path",
+        "pack_version"])
+def test_u0000_is_refused_in_every_string_a_finding_carries(field: str, value: Any,
+                                                            rule: str, where: str) -> None:
+    """The holder's `6072086385` item 4: Postgres `jsonb` cannot store U+0000
+    (SQLSTATE 22P05), so no string a finding carries holds it, keys and values
+    alike. The schema admits it in `identity`, `evidence` and `locator.target`,
+    where the engine's rule refuses it; in `message`, `path` and
+    `pack_version`, the schema's own rules do. Each refusal is a
+    `FindingRefused` with a bounded `where`, never a raw error, and quotes
+    nothing it refused."""
+    finding = {**_example("broken-link"), field: value}
+    assert [(v.rule, v.where) for v in hc.violations(finding)] == [(rule, where)]
+    assert len(where) <= STRING_MAX
+    with pytest.raises(hc.FindingRefused) as refused:
+        hc.check_finding(finding)
+    assert refused.value.rule == rule
+    assert refused.value.where == where
+    assert "\x00" not in str(refused.value)
+    with pytest.raises(hc.FindingRefused):
+        hc.to_json(finding)
+    fields = {**_fields(_example("broken-link")), field: value}
+    with pytest.raises(hc.FindingRefused) as made:
+        hc.make_finding(**fields)
+    assert made.value.rule == rule
 
 
 def test_evidence_is_an_empty_object_when_a_family_supplies_none() -> None:
@@ -810,6 +858,8 @@ def test_an_identity_that_is_not_text_utf8_can_encode_is_refused(identity: Any,
     ({"target": ""}, ["locator-target-is-short-text"]),
     ({"target": "x" * 201}, ["locator-target-is-short-text"]),
     ({"target": "\ud800"}, ["locator-target-is-short-text"]),
+    ({"target": "../old/\x00brief.md"}, ["text-holds-no-nul"]),
+    ({"line_start": 1, "line_end": 1, "target": "\x00"}, ["text-holds-no-nul"]),
 ])
 def test_the_locator_is_display_only_and_bounded(locator: Any, rules: list[str]) -> None:
     finding = {**_example("broken-link"), "locator": locator}
@@ -968,6 +1018,7 @@ NEGATIVES: dict[str, dict[str, Any]] = {
                            _identity_of(IDENTITY_MAX_BYTES + 1))),
     "nesting-is-within-the-cap": _with("orphan", evidence=_nested(17)),
     "finding-is-json": _with("orphan", evidence={"a": ("b",)}),
+    "text-holds-no-nul": _with("orphan", evidence={"a": "b\x00c"}),
 }
 
 
