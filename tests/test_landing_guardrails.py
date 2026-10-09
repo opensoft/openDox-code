@@ -2845,6 +2845,9 @@ def test_the_land_routes_take_no_repository_from_the_request(
 @pytest.mark.parametrize("branch, code", [
     ("main", "branch-is-main"), ("sess-9", "no-such-branch"),
     ("-x", "no-such-branch"),
+    # a REVISION, not a branch name: git resolves it, so only the name check
+    # refuses it before a nonce is bound to its commit
+    ("sess-1~1", "no-such-branch"), ("sess-1^{commit}", "no-such-branch"),
 ])
 def test_the_nonce_route_refuses_what_cannot_land(world, tmp_path, local_install,
                                                   branch, code):
@@ -2853,6 +2856,17 @@ def test_the_nonce_route_refuses_what_cannot_land(world, tmp_path, local_install
                            token=httpd.console_token)
     assert (status, body["error"], body["code"]) == (409, "landing_refused",
                                                      code), body
+
+
+def test_the_land_route_refuses_main_before_any_nonce_is_asked(
+        world, tmp_path, local_install):
+    before = world.refs()
+    with serving(world.root, tmp_path) as httpd:
+        status, body = ask(httpd, "POST", LAND_ROUTE,
+                           {"branch": "main", "nonce": "n" * 43},
+                           token=httpd.console_token)
+    assert (status, body["code"]) == (409, "branch-is-main"), body
+    assert world.refs() == before
 
 
 def test_the_nonce_route_refuses_where_nothing_can_land(tmp_path, local_install):
