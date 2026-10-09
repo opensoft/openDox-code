@@ -494,6 +494,15 @@ def collision_identity(collided_id: str) -> dict[str, str]:
     return {"collided_id": collided_id}
 
 
+def _spelling(value: Any) -> Any:
+    """`refused_entry()`'s `default` hook for a value JSON cannot represent: a
+    set's members in the order of their `ascii()` text, and anything else by
+    its `str()` (the holder's `6090537166` item 8 (b))."""
+    if isinstance(value, (set, frozenset)):
+        return sorted(value, key=ascii)
+    return str(value)
+
+
 def refused_entry(entry_id: Any) -> str:
     """`entry-refused`'s `identity.entry` for a refused manifest entry's id
     (the holder's `6086098003` item 4 and `6088484643`). Deterministic, total
@@ -506,13 +515,27 @@ def refused_entry(entry_id: Any) -> str:
       non-string): `sha256-` and the lowercase SHA-256 hex of the ASCII bytes
       of its CANONICAL TEXT, 71 characters. The canonical text is
       `json.dumps(entry_id, sort_keys=True, separators=(",", ":"),
-      ensure_ascii=True, allow_nan=True, default=str)`; when that raises (a
-      mapping whose keys JSON cannot spell or sort, a self-referencing value),
-      it is `ascii(entry_id)`, Python's `repr()` with every non-ASCII
-      character escaped (the holder's `6088732352` (b)), so the text is always
-      ASCII and the digest never raises.
-      A value nested past Python's recursion limit, which neither spelling
-      reaches, takes the fixed text `<nested past the recursion limit>`.
+      ensure_ascii=True, allow_nan=True, default=...)`, whose `default` hook
+      spells a `set` or `frozenset` as the list of its members sorted by each
+      member's `ascii()` text, so a YAML `!!set` is spelled one way under every
+      `PYTHONHASHSEED`, and spells every other value JSON cannot represent (a
+      YAML date, timestamp or binary) by its `str()` (the holder's `6090537166`
+      item 8 (b)). When that raises (a mapping whose keys JSON cannot spell or
+      sort, a self-referencing value), the text is `ascii(entry_id)`,
+      Python's `repr()` with every non-ASCII character escaped (`6088732352`
+      (b)), so it is always ASCII.
+      A value neither spelling can write, an integer past Python's 4300-digit
+      conversion limit (which YAML yields from a long `0x` or `0b` literal) or
+      a value nested past the recursion limit, takes ONE fixed text, `<past
+      the int-digit or recursion limit>` (item 8 (a)). So the digest never
+      raises.
+
+    ACCEPTED LIMITS (`6088732352` (a), `6089449884`, `6090537166`): the text is
+    not injective across YAML value types (a date and its `str()`, a
+    non-string mapping key and its JSON spelling), two ids past the limits
+    share the fixed text, and a set reached only through the `ascii()`
+    fallback keeps Python's order. `identity-collision` reports any
+    collision.
 
     The digest is no finding id (every id is `finding_id()`'s); it keeps a
     refused id out of the stored identity while keeping two distinct ids
@@ -524,12 +547,12 @@ def refused_entry(entry_id: Any) -> str:
         return entry_id
     try:
         text = json.dumps(entry_id, sort_keys=True, separators=(",", ":"),
-                          ensure_ascii=True, allow_nan=True, default=str)
+                          ensure_ascii=True, allow_nan=True, default=_spelling)
     except (TypeError, ValueError, RecursionError):
         try:
             text = ascii(entry_id)
-        except RecursionError:
-            text = "<nested past the recursion limit>"
+        except (ValueError, RecursionError):
+            text = "<past the int-digit or recursion limit>"
     digest = hashlib.sha256(text.encode("ascii")).hexdigest()
     return f"sha256-{digest}"
 
