@@ -19,11 +19,12 @@ which the engine applies before it calls here; this store is not a second
 spelling of them, and imports nothing from it.
 
 WHAT POSTGRESQL OR JSON CANNOT KEEP IS REFUSED BY NAME, before any statement:
-a NUL anywhere in a field, a value that contains itself, and a value nested
-deeper than `MAX_JSON_DEPTH` (the holder, opensoft/openxFactory#656 comments
-6072086385 item 4 and 6081875839). These are not field bounds but what the
-store can hold at all, so the driver's NUL errors and `RecursionError` never
-leave it.
+a NUL or a lone surrogate anywhere in a field or a bound text parameter, a
+value that contains itself, and a value nested deeper than `MAX_JSON_DEPTH`
+(the holder, opensoft/openxFactory#656 comments 6072086385 item 4, 6081875839
+and 6086098003 item 3 (c)). These are not field bounds but what the store can
+hold at all, so the driver's NUL and encoding errors and `RecursionError`
+never leave it.
 
 PROVENANCE IS REFUSED HERE AND IN THE SCHEMA (box 15.7). A finding with no
 `pack_id` or no `pack_version` — absent, null or empty — is refused by
@@ -59,6 +60,7 @@ IS A `%s` PARAMETER, exactly as in `identity.py`.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -139,12 +141,32 @@ _UNSTORABLE: dict[str, str] = {
     "nul": (
         "carries U+0000 (NUL), which PostgreSQL can store in neither text nor "
         "jsonb"),
+    "surrogate": (
+        "carries a lone surrogate (U+D800 to U+DFFF), which UTF-8, and so "
+        "PostgreSQL, cannot encode"),
     "cycle": (
         "contains itself (a cycle), which JSON cannot represent"),
     "depth": (
         f"nests deeper than {MAX_JSON_DEPTH} levels, which is as deep as this "
         "store follows a value"),
 }
+
+
+#: A UTF-16 surrogate code point. A Python string holds one only "lone": a
+#: surrogate-escaped file name (`os.fsdecode` of bytes that are not UTF-8),
+#: or text decoded with `surrogatepass`. UTF-8 cannot encode it, so the driver
+#: raised `UnicodeEncodeError` ("surrogates not allowed") while binding it
+#: (Copilot's review of openDox-code#99 at `01f4192d`).
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _text_unstorable(text: str) -> str | None:
+    """What makes one string unstorable (a key of `_UNSTORABLE`), or None."""
+    if "\x00" in text:
+        return "nul"
+    if _SURROGATE.search(text):
+        return "surrogate"
+    return None
 
 
 def _json_children(item: Any) -> list[Any] | None:
@@ -161,8 +183,8 @@ def _unstorable(value: Any) -> str | None:
     """What makes `value` unstorable (a key of `_UNSTORABLE`), or None.
 
     One walk over a string, or a mapping's keys and values, or a list's items,
-    at any depth: a NUL anywhere, a container that contains itself, or a
-    container nested deeper than `MAX_JSON_DEPTH`. The walk is ITERATIVE and
+    at any depth: a NUL or a lone surrogate anywhere, a container that
+    contains itself, or a container nested deeper than `MAX_JSON_DEPTH`. The walk is ITERATIVE and
     keeps only the containers on its current path, so no input can make it
     recurse, a cycle is named rather than followed, and a value shared by two
     branches (which is not a cycle, and which `json.dumps` writes twice) is
@@ -176,8 +198,9 @@ def _unstorable(value: Any) -> str | None:
             on_path.discard(id(item))
             continue
         if isinstance(item, str):
-            if "\x00" in item:
-                return "nul"
+            reason = _text_unstorable(item)
+            if reason is not None:
+                return reason
             continue
         children = _json_children(item)
         if children is None:
@@ -205,6 +228,12 @@ def _refuse_unstorable(value: Any, what: str) -> None:
     itself, as a `RefusedError` that names the field and quotes nothing, as
     defence in depth behind the contract module's own refusal.
 
+    A lone surrogate (U+D800 to U+DFFF), which a surrogate-escaped file name
+    carries: UTF-8 cannot encode it, so the driver raised `UnicodeEncodeError`
+    while binding it, on a write only after the run's own insert (Copilot's
+    review of openDox-code#99 at `01f4192d`, under the holder's principle in
+    opensoft/openxFactory#656 comment 6086098003 item 3 (c)).
+
     A cycle, or a value nested past `MAX_JSON_DEPTH`: the holder,
     opensoft/openxFactory#656 comment 6081875839 (Copilot's review of
     openDox-code#99 at `fbf9e77e`). `json.dumps` refused a cycle by name
@@ -221,7 +250,8 @@ def _refuse_unstorable(value: Any, what: str) -> None:
 
 
 def _refuse_nul_parameters(**columns: str | None) -> None:
-    """Refuse U+0000 in each text parameter a READ binds, naming its column.
+    """Refuse U+0000, or a lone surrogate, in each text parameter a READ
+    binds, naming its column.
 
     The holder, opensoft/openxFactory#656 comment 6086098003 item 3 (c): the
     store refuses U+0000 in EVERY text parameter it binds, as a `RefusedError`
@@ -229,8 +259,10 @@ def _refuse_nul_parameters(**columns: str | None) -> None:
     `DataError` ("PostgreSQL text fields cannot contain NUL (0x00) bytes",
     measured from `latest_run` at `7e13130d`). The writes were already
     guarded (`_refuse_unstorable`); this is the same defence in depth for the
-    reads. Each keyword names a column: `id (finding_id)` and `id (after)`
-    are the `id` column, read through those parameters.
+    reads. A lone surrogate, which UTF-8 cannot encode, is refused the same
+    way (`_text_unstorable`; Copilot's review of openDox-code#99 at
+    `01f4192d`). Each keyword names a column: `id (finding_id)` and
+    `id (after)` are the `id` column, read through those parameters.
     """
     for column, value in columns.items():
         _refuse_unstorable(value, column)

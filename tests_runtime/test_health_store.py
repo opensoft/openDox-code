@@ -1046,3 +1046,68 @@ def test_a_nul_in_a_path_never_reaches_the_driver(database: Any) -> None:
     assert "notes/a" not in str(caught.value)
     assert _count(database, "health_runs") == 0
     assert _count(database, "health_findings") == 0
+
+
+# ---------------------------------------------------------------------------
+# Copilot's review of #99 at `01f4192d`: a lone surrogate (U+D800 to U+DFFF),
+# which a surrogate-escaped file name carries, is a named refusal, never the
+# driver's `UnicodeEncodeError`
+# ---------------------------------------------------------------------------
+
+#: Every place a write can carry a lone surrogate, directly as text or nested
+#: in JSON, and the name the refusal must give. UTF-8 cannot encode one, so
+#: before the guard the driver raised `UnicodeEncodeError` ("surrogates not
+#: allowed") while binding, and on a write only after the run's own insert.
+_SURROGATE_WRITES = [
+    ({"findings": [_finding(path="notes/\udcff.md")]}, "finding 0's path"),
+    ({"corpus_root": "/corpora/\udcff"}, "corpus_root"),
+    ({"findings": [_finding(identity={"target": "a\ud800"})]},
+     "finding 0's identity"),
+    ({"findings": [_finding(evidence={"k\udfff": ["x"]})]},
+     "finding 0's evidence"),
+    ({"pack_pins": {"opendox": {"version": "0.2.0", "note": ["\udcff"]}}},
+     "pack_pins"),
+]
+
+
+@pytest.mark.parametrize(("over", "field"), _SURROGATE_WRITES,
+                         ids=["path", "corpus-root", "identity-value",
+                              "evidence-key", "pack-pins-nested"])
+def test_a_lone_surrogate_in_a_write_is_refused_by_name_before_any_statement(
+        over: dict, field: str) -> None:
+    record_run = HealthStore(_NoStatement()).record_run
+    kwargs = _run_kwargs(**over)
+    with pytest.raises(RefusedError) as caught:
+        record_run(**kwargs)
+    message = str(caught.value)
+    assert f"{field} carries a lone surrogate" in message, message
+    assert not any("\ud800" <= char <= "\udfff" for char in message)
+
+
+@pytest.mark.parametrize(("method", "arguments", "column"), [
+    ("latest_run", {"corpus_root": "/corpora/\udcff"}, "corpus_root"),
+    ("get_finding", {"run_id": _SOME_RUN, "finding_id": "opendox.x\udcff"},
+     "id (finding_id)"),
+], ids=["latest-corpus-root", "finding-id"])
+def test_a_lone_surrogate_in_a_read_is_refused_by_name_never_by_the_driver(
+        database: Any, method: str, arguments: dict[str, Any],
+        column: str) -> None:
+    read = getattr(HealthStore(_NoStatement()), method)
+    with pytest.raises(RefusedError) as caught:
+        read(**arguments)
+    assert f"{column} carries a lone surrogate" in str(caught.value)
+    with database.connection() as conn:
+        read = getattr(HealthStore(conn), method)
+        with pytest.raises(RefusedError) as caught:
+            read(**arguments)
+    assert f"{column} carries a lone surrogate" in str(caught.value)
+
+
+def test_a_lone_surrogate_in_a_path_writes_nothing(database: Any) -> None:
+    """Over a real database: refused by name, and no row is written."""
+    findings = [_finding(path="notes/\udcff.md")]
+    with pytest.raises(RefusedError) as caught:
+        _record(database, findings=findings)
+    assert "finding 0's path carries a lone surrogate" in str(caught.value)
+    assert _count(database, "health_runs") == 0
+    assert _count(database, "health_findings") == 0
