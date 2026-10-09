@@ -2825,6 +2825,23 @@ def test_each_land_route_is_gated_like_submit(world, tmp_path, local_install,
     assert world.refs() == before
 
 
+@pytest.mark.parametrize("payload, route, message", [
+    (["sess-1"], NONCE_ROUTE, "a land-nonce request is a JSON object naming `branch`"),
+    ("sess-1", NONCE_ROUTE, "a land-nonce request is a JSON object naming `branch`"),
+    (["sess-1"], LAND_ROUTE,
+     "a land request is a JSON object naming `branch` and `nonce`"),
+])
+def test_each_land_route_names_its_own_body_shape(world, tmp_path, local_install,
+                                                  payload, route, message):
+    """Copilot r4234726939 on #100: a body that is not an object is told the
+    shape of the route it was sent to, never the other route's."""
+    with serving(world.root, tmp_path) as httpd:
+        status, body = ask(httpd, "POST", route, payload,
+                           token=httpd.console_token)
+    assert (status, body["error"], body["message"]) == (400, "invalid_body",
+                                                        message), body
+
+
 @pytest.mark.parametrize("payload", [
     {"branch": BRANCH, "repo_root": "/elsewhere"},
     {"branch": BRANCH, "nonce": "n", "checkout_root": "/elsewhere"},
@@ -2926,6 +2943,28 @@ def test_the_land_route_shows_a_conflict_and_lands_nothing(tmp_path,
                                                      "merge-conflict"), body
     assert body["paths"] == ["doc.md"]
     assert "bring `main` into sess-1" in body["remedy"]
+    assert world.refs() == before
+
+
+def test_a_conflict_answer_redacts_every_field_it_carries(tmp_path,
+                                                         local_install):
+    """Copilot r4234726885 on #100: `paths` and `remedy` carry repository text
+    (a path, the branch's name) and are redacted by the rule `message` is."""
+    branch = "sess&access_token=" + SECRET
+    path = "notes?token=" + SECRET + ".md"
+    world = World(tmp_path)
+    world.branch_with(branch, path, "the branch's words\n")
+    world.on_main(path, "main's words\n")
+    before = world.refs()
+    with serving(world.root, tmp_path / "s") as httpd:
+        issued = nonce_for(httpd, branch)
+        status, body = ask(httpd, "POST", LAND_ROUTE,
+                           {"branch": branch, "nonce": issued["nonce"]},
+                           token=httpd.console_token)
+    assert (status, body["error"]) == (409, "merge_conflict"), body
+    assert SECRET not in json.dumps(body), body
+    assert body["paths"] == ["notes?token=<redacted>"]
+    assert "bring `main` into" in body["remedy"]
     assert world.refs() == before
 
 

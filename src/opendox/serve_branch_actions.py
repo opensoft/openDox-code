@@ -132,6 +132,7 @@ LAND_LOOPBACK_ONLY = (
 LAND_UNAVAILABLE = ("land is unavailable on this plane (no real checkout or no "
                     "resolved human actor)")
 LAND_NOT_AN_OBJECT = "a land request is a JSON object naming `branch` and `nonce`"
+LAND_NONCE_NOT_AN_OBJECT = "a land-nonce request is a JSON object naming `branch`"
 LAND_ONLY_THE_BRANCH = (
     "a land-nonce request carries `branch` alone. The route takes no "
     "repository from the request (12.4a): it lands a branch of the checkout "
@@ -170,7 +171,7 @@ def requested_nonce_branch(body) -> tuple[str | None, str | None]:
     """`(branch, None)` for a well-formed land-nonce request, else `(None,
     why)`: a JSON object whose ONE key is `branch`, a non-empty string."""
     if not isinstance(body, dict):
-        return None, LAND_NOT_AN_OBJECT
+        return None, LAND_NONCE_NOT_AN_OBJECT
     if set(body) - {BRANCH_FIELD}:
         return None, LAND_ONLY_THE_BRANCH
     branch = body.get(BRANCH_FIELD)
@@ -290,17 +291,21 @@ class BranchActionRoutes:
 
     def _send_landing_refusal(self, exc) -> None:
         """A NAMED landing refusal, its sentence redacted (12.1a): a conflict
-        with its paths and remedy, or any other with its code."""
+        with its paths and remedy, or any other with its code. EVERY text field
+        a conflict carries is redacted by the same rule as its sentence, since
+        a path and a branch name are the repository's text (Copilot on #100,
+        r4234726885)."""
         from opendox import cli_branch_actions
         from opendox.landing import MergeConflict
         from opendox.landing_confirm import ConfirmationRefused
 
         message = cli_branch_actions.redacted_text(str(exc))
         if isinstance(exc, MergeConflict):
+            redact = cli_branch_actions.redacted_text
             self._send_json(409, {
                 "ok": False, "error": "merge_conflict", "code": exc.code,
-                "paths": list(exc.paths), "remedy": exc.remedy,
-                "message": message})
+                "paths": [redact(path) for path in exc.paths],
+                "remedy": redact(exc.remedy), "message": message})
             return
         # A refused NONCE is named as the lander names a refused confirmation.
         code = (f"confirmation:{exc.code}" if isinstance(exc, ConfirmationRefused)
