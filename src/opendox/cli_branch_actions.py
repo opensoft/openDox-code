@@ -43,7 +43,10 @@ REFUSALS: a named sentence on stderr and exit 1, with nothing pushed and no
 traceback (requirement 11's fourth scenario): `main`; no remote, or several
 and none named `origin` (`NoSubmissionTarget`); a remote with several push
 URLs, a rejected push or a failed transport (`SubmissionRefused`). Every
-such message is the port's own, which 12.1a redacts. A failure the port did
+such message is the port's own, with every credential-shaped URL redacted
+again at this boundary (`refusal_text`; 12.1a), since a host's port's text
+is not this module's to vet; the report's `url` and `remote` are redacted
+the same way (`submission_object`). A failure the port did
 NOT name (any other exception, from the binding or from the port) is refused
 with a fixed sentence naming its TYPE alone, as the route answers it: its text
 is a host's port's, which this verb cannot vet, and it may carry a remote
@@ -69,8 +72,8 @@ from pathlib import Path
 
 __all__ = [
     "LOCAL_BESIDE_HOSTED", "SUBMISSION_FIELDS", "UNNAMED_FAILURE",
-    "BranchActionSubcommands", "cmd_submit", "submission_object",
-    "submit_branch",
+    "BranchActionSubcommands", "cmd_submit", "refusal_text",
+    "submission_object", "submit_branch",
 ]
 
 #: The `Submission` report's fields, in the order the verb prints them
@@ -109,8 +112,17 @@ def submission_object(report) -> dict[str, str]:
     where the work went is refused rather than printed: a report missing a
     field, or carrying one that is not a non-empty string. A host's port is
     the case this guards; `LocalGitSubmissions` always answers all five.
+
+    THE TWO FIELDS THAT NAME A PLACE ARE REDACTED HERE, whoever answered
+    (12.1a). `LocalGitSubmissions` reports `url` already redacted, but a
+    host's contributed port is not this module's to vet, and this is the one
+    boundary both doors print from, so `url` and `remote` pass through
+    `submission_push.redact_destination` again: a credential a host's port
+    returns reaches neither the printed report nor the route's answer (Copilot
+    on #96 at `7dc8214b`). It changes nothing the neutral port reports.
     """
     from opendox.session_pr import SubmissionRefused
+    from opendox.submission_push import redact_destination
 
     fields: dict[str, str] = {}
     for name in SUBMISSION_FIELDS:
@@ -121,7 +133,23 @@ def submission_object(report) -> dict[str, str]:
                 f"went (its report carries no `{name}`), so nothing is "
                 "reported as submitted")
         fields[name] = value
+    for name in ("url", "remote"):
+        fields[name] = redact_destination(fields[name])
     return fields
+
+
+def refusal_text(exc: BaseException) -> str:
+    """A `SubmissionError`'s message as either door shows it: with anything
+    shaped like a credential-bearing URL replaced (12.1a).
+
+    The neutral port's refusals are redacted where they are raised; a host's
+    contributed port's are not this module's to vet, so the boundary runs
+    the package's credential redactor over every refusal it prints or
+    answers, as `submission_object` does over the report.
+    """
+    from opendox.runtime.local_git_adapter import redact_credentials
+
+    return redact_credentials(str(exc), a_bare_username_is_not_a_secret=True)
 
 
 def submit_branch(port, branch: str) -> dict[str, str]:
@@ -181,7 +209,7 @@ def cmd_submit(args: argparse.Namespace) -> int:
         report = submit_branch(_core()._submission_port(Path(args.repo_root)),
                                args.branch)
     except SubmissionError as exc:
-        print(f"submit refused: {exc}", file=sys.stderr)
+        print(f"submit refused: {refusal_text(exc)}", file=sys.stderr)
         return 1
     # A host's binding or port, unvetted: its type is all this verb prints.
     except Exception as exc:  # noqa: BLE001

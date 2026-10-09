@@ -41,7 +41,9 @@ WHAT IT ANSWERS: the `Submission` object (data-model.md) with 200, or a named
 refusal, `{"ok": false, "error": <name>, "message": <sentence>}`. A refusal's
 message is either a fixed sentence of this module's, which echoes nothing a
 request carried, or the act's own (`submit_branch`, then the port's), which
-is redacted by 12.1a's rule and may name the requested `branch` back to the
+this boundary redacts by 12.1a's rule whoever raised it
+(`cli_branch_actions.refusal_text`; the report's `url` and `remote` too) and
+which may name the requested `branch` back to the
 console that sent it, as JSON the view renders as text. Nothing else a request
 carried is echoed. A failure the port did not name is answered with a fixed
 sentence, and only the exception's type reaches the server log.
@@ -150,11 +152,11 @@ class BranchActionRoutes:
             report = cli_branch_actions.submit_branch(port, branch)
         except NoSubmissionTarget as exc:
             self._send_json(409, {"ok": False, "error": "no_submission_target",
-                                  "message": str(exc)})
+                                  "message": cli_branch_actions.refusal_text(exc)})
             return
         except SubmissionError as exc:
             self._send_json(409, {"ok": False, "error": "submission_refused",
-                                  "message": str(exc)})
+                                  "message": cli_branch_actions.refusal_text(exc)})
             return
         # A host's port, unvetted: its type is all this route logs.
         except Exception as exc:  # noqa: BLE001

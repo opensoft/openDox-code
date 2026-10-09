@@ -408,6 +408,52 @@ def test_a_port_failure_it_did_not_name_is_refused_without_its_text(
     assert _heads(origin) == ""
 
 
+HOST_PORT_SECRET = "S3CRET-from-a-host-port"
+HOST_PORT_URL = (f"https://alice:{HOST_PORT_SECRET}@forge.example/team/repo"
+                 f"?token={HOST_PORT_SECRET}")
+
+
+def test_a_contributed_report_is_redacted_at_the_boundary(
+        checkout: Path, standalone_profile, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture) -> None:
+    """Copilot on #96 at `7dc8214b`: a host's contributed port that answers a
+    credential-bearing `url` (or `remote`) does not get it printed. The
+    boundary both doors print from runs `redact_destination` over the two
+    fields that name a place, whoever answered (12.1a)."""
+    from opendox.submission_push import redact_destination
+
+    remote = f"https://bob:{HOST_PORT_SECRET}@forge.example/team/repo"
+    port = _ContributedPort(answer=session_pr.Submission(
+        remote=remote, ref="refs/heads/sess-1", url=HOST_PORT_URL,
+        branch="sess-1", commit="c" * 40))
+    monkeypatch.setattr(cli, "_submission_port", lambda _root: port)
+    status, out, err = _submit(capsys, checkout)
+    json_status, json_out, _ = _submit(capsys, checkout, "--json")
+    assert (status, json_status, err) == (0, 0, ""), err
+    for text in (out, json_out):
+        assert HOST_PORT_SECRET not in text, text
+        assert "forge.example/team/repo" in text, text
+    report = json.loads(json_out)
+    assert report["url"] == redact_destination(HOST_PORT_URL)
+    assert report["remote"] == redact_destination(remote)
+
+
+def test_a_contributed_refusal_is_redacted_at_the_boundary(
+        checkout: Path, standalone_profile, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture) -> None:
+    """A host's port whose refusal names a credential-bearing URL: the verb
+    prints the refusal in its own words with the URL redacted, as the
+    package's credential redactor redacts free text (the URL replaced whole)."""
+    port = _ContributedPort(raises=session_pr.SubmissionRefused(
+        f"push to {HOST_PORT_URL} was rejected"))
+    monkeypatch.setattr(cli, "_submission_port", lambda _root: port)
+    status, out, err = _submit(capsys, checkout)
+    assert (status, out) == (1, "")
+    assert err.startswith("submit refused: push to "), err
+    assert HOST_PORT_SECRET not in err
+    assert err.rstrip("\n").endswith(" was rejected"), err
+
+
 @pytest.mark.parametrize("missing", cli_branch_actions.SUBMISSION_FIELDS)
 def test_a_report_that_does_not_name_where_the_work_went_is_refused(
         checkout: Path, standalone_profile, monkeypatch: pytest.MonkeyPatch,

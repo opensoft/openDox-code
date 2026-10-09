@@ -466,6 +466,46 @@ def test_a_port_failure_it_did_not_name_is_reported_without_its_text(
     assert secret not in json.dumps(body)
 
 
+
+HOST_PORT_SECRET = "S3CRET-from-a-host-port"
+HOST_PORT_URL = (f"https://alice:{HOST_PORT_SECRET}@forge.example/team/repo"
+                 f"?token={HOST_PORT_SECRET}")
+
+
+def test_a_contributed_report_is_answered_redacted(
+        checkout: Path, tmp_path: Path, standalone_profile) -> None:
+    """Copilot on #96 at `7dc8214b`: the route answers a host port's report
+    with `url` and `remote` redacted, as the verb prints it (12.1a)."""
+    port = _ContributedPort(answer=session_pr.Submission(
+        remote=f"https://bob:{HOST_PORT_SECRET}@forge.example/team/repo",
+        ref="refs/heads/sess-1", url=HOST_PORT_URL, branch="sess-1",
+        commit="c" * 40))
+    with _serving(checkout, tmp_path, submission_factory=lambda: port) as httpd:
+        status, body = _submit(httpd, token=httpd.console_token)
+    assert status == 200, body
+    assert HOST_PORT_SECRET not in json.dumps(body)
+    assert "forge.example/team/repo" in body["url"]
+    assert "forge.example/team/repo" in body["remote"]
+
+
+@pytest.mark.parametrize(("refusal", "error"), [
+    (session_pr.SubmissionRefused, "submission_refused"),
+    (session_pr.NoSubmissionTarget, "no_submission_target"),
+])
+def test_a_contributed_refusal_is_answered_redacted(
+        checkout: Path, tmp_path: Path, standalone_profile, refusal,
+        error: str) -> None:
+    """A host port's refusal naming a credential-bearing URL: the 409's
+    message keeps the refusal's own words and loses the credential, on both
+    arms."""
+    port = _ContributedPort(raises=refusal(f"push to {HOST_PORT_URL} was rejected"))
+    with _serving(checkout, tmp_path, submission_factory=lambda: port) as httpd:
+        status, body = _submit(httpd, token=httpd.console_token)
+    assert (status, body["error"]) == (409, error), body
+    assert HOST_PORT_SECRET not in body["message"]
+    assert body["message"].startswith("push to ")
+    assert body["message"].endswith(" was rejected")
+
 # --------------------------------------------------------------------------
 # `actions.submit`: PRESENT only under openDox's own profile, its VALUE from
 # the route bindings (ADV-14; OQ-12-14; contracts § /capabilities).
