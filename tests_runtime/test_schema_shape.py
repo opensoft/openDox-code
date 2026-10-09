@@ -30,8 +30,9 @@ from opendox.runtime import identity, migrations
 
 ROOT = Path(__file__).resolve().parents[1]
 CANONICAL = ROOT / "migrations" / "0001_identity_and_coordination.sql"
-#: The health store's tables, declared additively (#1144 box 14.1). R2Q13 (a)
-#: (opensoft/openxFactory#656 comment 6003486656): "the closure test reads
+#: The health store's tables, declared additively (#1144 box 14.1). R2Q13 (a),
+#: ruled by opensoft/openxFactory#656 comment 6003486656, whose option text
+#: (plan 038's `clarify-questions.md:651-653`) reads: "the closure test reads
 #: `0001` together with `0003_`, in the same change". `0002` is not read: it
 #: declares the ledger, which is infrastructure and not a table the domain
 #: owns (`test_the_ledger_is_not_declared_in_the_canonical_migration`).
@@ -72,8 +73,9 @@ def _columns_of(table: str) -> list[tuple[str, str]]:
 #: order, so this file does not read the closure off the very module it is
 #: checking. "Users, memberships, projects, the project-to-repository mapping,
 #: sessions and unsaved drafts live in the openDox database." THEN THE TWO
-#: HEALTH TABLES, transcribed from R2Q13 (a) (Brett Heap, opensoft/
-#: openxFactory#656 comment 6003486656): "DOMAIN. The results table joins Q1's
+#: HEALTH TABLES, transcribed from R2Q13 option (a)'s text (plan 038's
+#: `clarify-questions.md:651-653`), which Brett Heap ruled in opensoft/
+#: openxFactory#656 comment 6003486656: "DOMAIN. The results table joins Q1's
 #: list in `identity.TABLES`, and the closure test reads `0001` together with
 #: `0003_`, in the same change, as the ruling's words have it" — ruling
 #: `5784155201` item 4's "health results become a seventh table … with the

@@ -9,11 +9,12 @@ in git, read from repositories and written back only through the apply lane."
 So this module has exactly six record types and one store. `TABLES` below is
 the DOMAIN's closed table list: those six, and the two health tables
 `migrations/0003_health.sql` declares and `opendox.runtime.health_store` reads
-and writes, which R2Q13 (a) adds (opensoft/openxFactory#656 comment
-6003486656). A test reads it against `0001` with `0003_`. There is no
-`documents` table, no `specs` table and no `content` column outside
-`drafts.body` — the one Q1 rules IN, because an unsaved draft is by definition
-the text that has not entered the corpus yet.
+and writes, which R2Q13 (a) adds (ruled by Brett Heap in opensoft/
+openxFactory#656 comment 6003486656; option (a)'s text is plan 038's
+`clarify-questions.md:651-653`). A test reads it against `0001` with
+`0003_`. There is no `documents` table, no `specs` table and no `content`
+column outside `drafts.body` — the one Q1 rules IN, because an unsaved draft
+is by definition the text that has not entered the corpus yet.
 
 EVERY STATEMENT IS COMPOSED FROM MODULE-LEVEL CONSTANTS AND EVERY RUNTIME VALUE
 IS A `%s` PARAMETER. Table and column names below are literals in this file;
@@ -55,13 +56,15 @@ from typing import Any
 from .config import credential_in_a_remote_url, redacted_remote_url
 
 #: The closed DOMAIN table list: RULING Q1's six in the ruling's own order, then
-#: the two health tables. R2Q13 (a) (Brett Heap, opensoft/openxFactory#656
-#: comment 6003486656) puts them here: "The results table joins Q1's list in
-#: `identity.TABLES`, and the closure test reads `0001` together with `0003_`,
-#: in the same change". Read by `tests_runtime/test_schema_shape.py` against
-#: `0001` with `0003_`, and through this tuple by `runtime reset`, the init
-#: scripts' grants and `MigrationRunner.verify_runtime_access`: a table here or
-#: there is a claim about what the database owns.
+#: the two health tables. R2Q13 (a), ruled by Brett Heap in opensoft/
+#: openxFactory#656 comment 6003486656, puts them here; option (a)'s text, at
+#: plan 038's `clarify-questions.md:651-653`, reads: "The results table joins
+#: Q1's list in `identity.TABLES`, and the closure test reads `0001` together
+#: with `0003_`, in the same change". Read by
+#: `tests_runtime/test_schema_shape.py` against `0001` with `0003_`, and
+#: through this tuple by `runtime reset`, the init scripts' grants and
+#: `MigrationRunner.verify_runtime_access`: a table here or there is a claim
+#: about what the database owns.
 TABLES: tuple[str, ...] = (
     "users",
     "memberships",

@@ -814,10 +814,14 @@ def test_run_seq_is_generated_always_with_a_cache_of_one(database: Any) -> None:
 
 
 def test_a_findings_page_is_never_empty_for_a_run_with_findings(
-        database: Any) -> None:
+        database: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """`list_findings` is bounded by `identity.clamp_limit`: a limit below one
     is one row and a limit above the maximum is the maximum, never 0 rows and
-    never an unbounded scan."""
+    never an unbounded scan.
+
+    A run of two findings cannot show the upper bound at the real maximum
+    (500), so the maximum is lowered to one: a limit of two must then read
+    one row. Without that step, a store that dropped the cap would pass."""
     from opendox.runtime.identity import MAX_PAGE_SIZE
 
     run = _record(database, findings=[_finding(), _finding(
@@ -828,6 +832,8 @@ def test_a_findings_page_is_never_empty_for_a_run_with_findings(
         assert len(store.list_findings(run_id=run.run_id, limit=-5)) == 1
         assert len(store.list_findings(run_id=run.run_id,
                                        limit=MAX_PAGE_SIZE + 1)) == 2
+        monkeypatch.setattr(identity, "MAX_PAGE_SIZE", 1)
+        assert len(store.list_findings(run_id=run.run_id, limit=2)) == 1
 
 
 @pytest.mark.parametrize("pids_max", ["1.5", "-1", "-0.5", "true", '"8"'])
