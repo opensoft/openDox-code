@@ -4,14 +4,17 @@
 # exactly once per data volume and never against an existing database.
 #
 # WHY TWO ROLES AT ALL. `opendox-runtime runtime migrate` applies DDL and needs to own
-# the schema; the served API needs to read and write six tables and must not be
+# the schema; the served API needs to read and write the domain's tables
+# (RULING Q1's six and the two health tables, R2Q13 (a)) and must not be
 # able to drop one. A single role makes the API's blast radius the whole
 # schema for no benefit, and the compose file's separate `migrate` service
 # exists precisely so the two identities are never in the same container.
 #
 # The runtime role is granted on the tables that EXIST at migration time and on
 # everything created later by the migration owner (`alter default privileges`),
-# so a 0003 that adds a table does not need this file edited.
+# so a later migration's table needs no GRANT here. Its NAME still joins the
+# two lists below, which `tests_runtime/test_deploy_shape.py` derives from
+# `identity.TABLES`: `0003_`'s two health tables did (plan 038 T042).
 #
 # AND `alter default privileges` IS AIMED AT THE MIGRATION OWNER BY NAME.
 # Default privileges belong to the role that CREATES the object, and this
@@ -121,19 +124,20 @@ select format('grant usage on schema %I to %I', :'schema', :'runtime_user')
 -- THE COORDINATION TABLES THAT ALREADY EXIST, and only those. A database
 -- migrated before this prerequisite ran already holds them, and a `grant … on
 -- table` for one that is absent is an error — so the list is a JOIN against
--- the catalogue rather than seven statements, and it emits NOTHING on a fresh
--- database. It used to read `on all tables in schema public`, which on a
+-- the catalogue rather than one statement per table, and it emits NOTHING on a
+-- fresh database. It used to read `on all tables in schema public`, which on a
 -- REUSED database handed the served role another application's data (Copilot
--- review of openDox-code#25, round 30). The names are Q1's six plus the
--- ledger; `tests_runtime/test_deploy_shape.py` derives them from
--- `identity.TABLES` and `migrations.LEDGER_TABLE` so this list cannot drift.
+-- review of openDox-code#25, round 30). The names are Q1's six, the two health
+-- tables `0003_` adds (R2Q13 (a): DOMAIN) and the ledger;
+-- `tests_runtime/test_deploy_shape.py` derives them from `identity.TABLES` and
+-- `migrations.LEDGER_TABLE` so this list cannot drift.
 select format('grant select, insert, update, delete on table %I to %I',
               c.relname, :'runtime_user')
   from pg_class c
   join pg_namespace n on n.oid = c.relnamespace
  where n.nspname = :'schema' and c.relkind = 'r'
-   and c.relname = any (array['drafts', 'memberships',
-                              'opendox_schema_migrations',
+   and c.relname = any (array['drafts', 'health_findings', 'health_runs',
+                              'memberships', 'opendox_schema_migrations',
                               'project_repositories', 'projects', 'sessions',
                               'users'])
 \gexec
@@ -143,13 +147,14 @@ select format('grant select, insert, update, delete on table %I to %I',
 -- select/insert/update/delete on every table that schema already held —
 -- another application's data, which the migration preflight explicitly
 -- tolerates being there (Copilot review of openDox-code#25, round 30). It was
--- not even doing the job it looked like it was doing: at first start the six
--- coordination tables DO NOT EXIST YET, so that grant could only ever reach
+-- not even doing the job it looked like it was doing: at first start the
+-- domain's tables DO NOT EXIST YET, so that grant could only ever reach
 -- tables this install did not create.
 --
 -- The `alter default privileges` below is the whole grant, and it is exactly
 -- the narrow one: every table the MIGRATION OWNER creates from here on, which
--- is the six and the ledger and nothing else. MEASURED on postgres 16.15 —
+-- is the domain's tables and the ledger and nothing else. MEASURED on
+-- postgres 16.15 —
 -- with the broad grant removed, a table created afterwards by the owner
 -- carries `DELETE, INSERT, SELECT, UPDATE` for the served role, and a table
 -- created by anybody else carries none.
@@ -176,8 +181,8 @@ select format('do $refuse$ begin raise exception %L; end $refuse$',
   join pg_roles r on r.oid = c.relowner
  where n.nspname = :'schema' and c.relkind = 'r'
    and r.rolname = :'migration_owner'
-   and c.relname <> all (array['drafts', 'memberships',
-                               'opendox_schema_migrations',
+   and c.relname <> all (array['drafts', 'health_findings', 'health_runs',
+                               'memberships', 'opendox_schema_migrations',
                                'project_repositories', 'projects', 'sessions',
                                'users'])
 having count(*) > 0
