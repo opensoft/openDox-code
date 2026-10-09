@@ -293,11 +293,12 @@ def test_the_default_contributes_the_runtime_command_opendox_runtime_builds() ->
     """
     contributed = _subparsers(_contributed_parser(
         default_profile.SUBCOMMAND_EXTENSIONS))
-    assert list(contributed.choices) == ["runtime", "submit"], (
+    assert list(contributed.choices) == ["runtime", "submit", "land"], (
         f"the default contributes {list(contributed.choices)}, where R1Q4 (a) "
-        "and R1Q5 (a) give it the runtime verbs and plan 038 T015 adds "
-        "`submit` (#1144 12.4a). A further verb is a ruled act: release 2's "
-        "land and health, or the `project` command if Brett Heap rules on U4")
+        "and R1Q5 (a) give it the runtime verbs, plan 038 T015 adds `submit` "
+        "(#1144 12.4a) and T016 adds `land` (12.6a). A further verb is a "
+        "ruled act: release 2's health, or the `project` command if Brett "
+        "Heap rules on U4")
 
     def shape(parser: argparse.ArgumentParser) -> dict:
         verbs = _subparsers(parser)

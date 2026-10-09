@@ -3844,6 +3844,15 @@ def _teardown_residue(git: SessionGit, worktree: Path, branch: str,
 # holds the authority to perform it (FR-030). So the merge ending cannot be
 # COMMANDED — it can only be OBSERVED, and the observation is what triggers it.
 #
+# A STANDALONE LANDING IS OBSERVED THE SAME WAY (plan 038 T016; #1144 12.6a;
+# R2Q5 (a)). Where the owner governs the repository, `opendox land` (or the
+# view's confirm control) makes the merge itself: a `--no-ff` merge commit on
+# `main` whose merged parent is the branch's tip (`landing.NeutralLander`).
+# That is exactly part 3's shape below, so a live session whose branch lands
+# ends by this same observation, unchanged, and nothing here is told about the
+# landing. A session still cannot command its own ending: `land` is a human's
+# confirmed act, and no session verb reaches it.
+#
 # The observation is git's own, and it has THREE parts (PR #49 review finding 9
 # replaced the second — see the repair note at the tail of tasks.md, which supersedes
 # Phase 7 realization note 2):
