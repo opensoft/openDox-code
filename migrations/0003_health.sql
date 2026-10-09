@@ -65,6 +65,12 @@
 -- `export_commit` form check holds `commit` too; a second check on `commit`
 -- could never be the one that refuses a row.
 --
+-- `sandbox` IS `{"live": bool, "pids_max": int or null}` (data-model.md), and
+-- an int here is a NON-NEGATIVE WHOLE number: a fraction or a negative count of
+-- processes is no bound the probe can have found (lane 3's REVIEW-W1 of T042).
+-- The check is a CASE so that the numeric cast is reached only for a JSON
+-- number: SQL does not promise to evaluate an AND's operands in order.
+--
 -- EVERY STORED FINDING CARRIES ITS BASELINE CLASS (`baseline_class not
 -- null`). R2Q12 (a) rules exactly three classes and I-2 (a) rules out a
 -- fourth, and a null would be that fourth ("unclassed") by another name: the
@@ -97,7 +103,7 @@ create table health_runs (
   constraint health_runs_export_commit_check check (commit is null or export_commit = commit),
   constraint health_runs_default_tip_branch_check check (kind <> 'default-tip' or baseline_branch is not null),
   constraint health_runs_pack_pins_check check (jsonb_typeof(pack_pins) = 'object' and pack_pins ? 'opendox'),
-  constraint health_runs_sandbox_check check (coalesce(jsonb_typeof(sandbox -> 'live'), 'absent') = 'boolean' and coalesce(jsonb_typeof(sandbox -> 'pids_max'), 'absent') in ('number', 'null'))
+  constraint health_runs_sandbox_check check (coalesce(jsonb_typeof(sandbox -> 'live'), 'absent') = 'boolean' and case jsonb_typeof(sandbox -> 'pids_max') when 'null' then true when 'number' then (sandbox ->> 'pids_max')::numeric >= 0 and (sandbox ->> 'pids_max')::numeric = trunc((sandbox ->> 'pids_max')::numeric) else false end)
 );
 
 create table health_findings (

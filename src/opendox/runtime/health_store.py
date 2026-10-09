@@ -117,12 +117,46 @@ _FINDING_RECORD = (
     "baseline_class text, message text, evidence jsonb")
 
 
+def _carries_nul(value: Any) -> bool:
+    """Whether U+0000 (NUL) is anywhere in `value`: a string, a key, or nested."""
+    if isinstance(value, str):
+        return "\x00" in value
+    if isinstance(value, Mapping):
+        return any(_carries_nul(key) or _carries_nul(item)
+                   for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_carries_nul(item) for item in value)
+    return False
+
+
+def _refuse_nul(value: Any, what: str) -> None:
+    """Refuse U+0000 anywhere in `value`, BY NAME and before any statement.
+
+    PostgreSQL stores a NUL in neither `jsonb` (SQLSTATE 22P05, raised by the
+    server, whose message quotes the JSON around it) nor a `text` parameter (a
+    client-side `DataError`), both measured on postgres 16.15. Without this the
+    store raised a DRIVER error for a value it could have judged, and the
+    jsonb one put a slice of the finding's text in the exception (lane 3's
+    REVIEW-W1 of T042, MINOR 1). The holder, opensoft/openxFactory#656 comment
+    6072086385 item 4: the store refuses it itself, as a `RefusedError` that
+    names the field and quotes nothing, as defence in depth behind the contract
+    module's own refusal.
+    """
+    if _carries_nul(value):
+        raise RefusedError(
+            f"{what} carries U+0000 (NUL), which PostgreSQL can store in "
+            "neither text nor jsonb; the store refuses it before any "
+            "statement, and the value is not repeated here")
+
+
 def _json_text(value: Any, what: str) -> str:
     """Strict JSON text for a `%s::jsonb` parameter, or a refusal naming `what`.
 
     `allow_nan=False`, because `NaN` is Python's JSON and not JSON: Postgres
-    would refuse the cast, and the refusal belongs here, by name.
+    would refuse the cast, and the refusal belongs here, by name. A NUL is
+    refused here too (`_refuse_nul`), in a key or a value at any depth.
     """
+    _refuse_nul(value, what)
     try:
         return json.dumps(value, sort_keys=True, separators=(",", ":"),
                           ensure_ascii=False, allow_nan=False)
@@ -329,6 +363,8 @@ def _finding_record(index: int, finding: Any) -> dict[str, Any]:
         raise RefusedError(
             f"finding {index}'s {not_text} must be strings; the store does not "
             "turn another type into text for them")
+    for field in (*REQUIRED_FINDING_FIELDS, *OPTIONAL_FINDING_FIELDS):
+        _refuse_nul(finding.get(field), f"finding {index}'s {field}")
     evidence = finding["evidence"]
     if not isinstance(evidence, Mapping):
         raise RefusedError(
@@ -381,6 +417,12 @@ class HealthStore:
         if not isinstance(sandbox, Mapping):
             raise RefusedError("sandbox must be a JSON object (what the "
                                "per-run probe found)")
+        for name, value in (("corpus_root", corpus_root), ("kind", kind),
+                            ("commit", commit),
+                            ("baseline_branch", baseline_branch),
+                            ("outcome", outcome),
+                            ("export_commit", export_commit)):
+            _refuse_nul(value, name)
         records = [_finding_record(index, finding)
                    for index, finding in enumerate(findings)]
         pins_text = _json_text(dict(pack_pins), "pack_pins")

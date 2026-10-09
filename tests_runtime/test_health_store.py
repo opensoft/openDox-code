@@ -689,3 +689,161 @@ def test_a_restarted_sequence_cannot_record_a_second_run_at_one_position(
     assert refused.sqlstate == "23505", refused        # unique_violation
     assert refused.diag.constraint_name == "health_runs_run_seq_key"
     assert _count(database, "health_runs") == 1
+
+
+# ---------------------------------------------------------------------------
+# lane 3's REVIEW-W1 of T042 (#99 6071241577) and the holder's rulings on it
+# (#656 6072086385)
+# ---------------------------------------------------------------------------
+
+#: Every place a finding or a run can carry U+0000 (NUL), and the field the
+#: refusal must name. PostgreSQL stores neither: `jsonb` refuses it with 22P05
+#: and a `text` parameter with a client-side `DataError` (both measured on
+#: 16.15), so without the guard `record_run` raised a DRIVER error, and the
+#: jsonb one quoted the finding's JSON in its `CONTEXT` line.
+_NUL_CASES = [
+    ({"findings": [_finding(identity={"target": "a\x00b"})]}, "finding 0's identity"),
+    ({"findings": [_finding(identity={"tar\x00get": "x"})]}, "finding 0's identity"),
+    ({"findings": [_finding(evidence={"paths": ["ok", "b\x00"]})]},
+     "finding 0's evidence"),
+    ({"findings": [_finding(), _finding(id="opendox.orphan.0123456789abcdef",
+                                        locator={"target": "\x00"})]},
+     "finding 1's locator"),
+    ({"findings": [_finding(message="link\x00target")]}, "finding 0's message"),
+    ({"findings": [_finding(path="notes/a\x00.md")]}, "finding 0's path"),
+    ({"pack_pins": {"opendox": {"version": "0.2.0"}, "p\x00": {"version": "1"}}},
+     "pack_pins"),
+    ({"sandbox": {"live": True, "pids_max": None, "no\x00te": 1}}, "sandbox"),
+    ({"corpus_root": "/corpora/a\x00b"}, "corpus_root"),
+    ({"baseline_branch": "ma\x00in"}, "baseline_branch"),
+    ({"kind": "default-tip\x00"}, "kind"),
+]
+
+
+@pytest.mark.parametrize(("over", "field"), _NUL_CASES,
+                         ids=["identity-value", "identity-key", "evidence-list",
+                              "locator", "message", "path", "pack-pins-key",
+                              "sandbox-key", "corpus-root", "baseline-branch",
+                              "kind"])
+def test_a_nul_is_refused_by_name_before_any_statement(over: dict,
+                                                       field: str) -> None:
+    """The holder, #656 `6072086385` item 4: the store refuses U+0000 itself.
+
+    A `RefusedError` that names the FIELD, raised before any statement (the
+    connection fails the test if one reaches it), and quoting nothing: not the
+    NUL, and not the text around it.
+    """
+    no_statement = HealthStore(_NoStatement())
+    kwargs = _run_kwargs(**over)
+    with pytest.raises(RefusedError) as caught:
+        no_statement.record_run(**kwargs)
+    message = str(caught.value)
+    assert f"{field} carries U+0000" in message, message
+    assert "\x00" not in message
+    for quoted in ("a\x00b", "link", "notes/a", "/corpora", "ma", "tar"):
+        assert quoted not in message.replace("U+0000", ""), (quoted, message)
+
+
+def test_a_nul_in_an_identity_never_reaches_the_driver(database: Any) -> None:
+    """Lane 3's measured case, over a real database: before this guard the run
+    raised `psycopg.errors.UntranslatableCharacter` (22P05) quoting the JSON."""
+    nul = [_finding(identity={"target": "x\x00y"})]
+    with pytest.raises(RefusedError) as caught:
+        _record(database, findings=nul)
+    assert "finding 0's identity carries U+0000" in str(caught.value)
+    assert _count(database, "health_runs") == 0
+    assert _count(database, "health_findings") == 0
+
+
+def test_a_pathed_finding_reads_back_field_for_field(database: Any) -> None:
+    """MINOR 2: a pathed finding's locator, evidence and message survive the store.
+
+    Only the install-level case read fields back, and only their empty forms,
+    so a store that dropped the locator, wrote `{}` for the evidence or
+    rewrote the message passed every test.
+    """
+    sent = _finding()
+    run = _record(database, findings=[sent])
+    with database.connection() as conn:
+        stored = HealthStore(conn).get_finding(run_id=run.run_id,
+                                               finding_id=sent["id"])
+    assert stored.locator == sent["locator"]
+    assert stored.evidence == sent["evidence"]
+    assert stored.message == sent["message"]
+    assert stored.path == sent["path"]
+    assert stored.identity == sent["identity"]
+    assert (stored.kind, stored.pack_id, stored.pack_version, stored.severity,
+            stored.resolution_class, stored.baseline_class) == (
+        sent["kind"], sent["pack_id"], sent["pack_version"], sent["severity"],
+        sent["resolution_class"], sent["baseline_class"])
+
+
+def test_deleting_a_run_takes_its_findings_with_it(database: Any) -> None:
+    """The findings' foreign key cascades (`on delete cascade`): a run deleted
+    by any path leaves no orphan finding behind."""
+    run = _record(database, findings=[_finding(), _finding(
+        id="opendox.orphan.0123456789abcdef", path="other.md")])
+    kept = _record(database, findings=[_finding()])
+    assert _count(database, "health_findings") == 3
+    with database.transaction() as conn:
+        conn.execute("delete from health_runs where run_id = %s::uuid",
+                     (run.run_id,))
+    assert _count(database, "health_findings") == 1
+    with database.connection() as conn:
+        assert [f.run_id for f in HealthStore(conn).list_findings(
+            run_id=kept.run_id)] == [kept.run_id]
+
+
+def test_run_seq_is_generated_always_with_a_cache_of_one(database: Any) -> None:
+    """The holder, `6069024023` item 3 ("the sequence's cache stays 1") and
+    `6072086385` item 2: GENERATED ALWAYS, so no caller supplies a position,
+    and CACHE 1, so no session holds a block of positions that a later
+    recording would overtake."""
+    with database.connection() as conn:
+        identity_row = conn.execute(
+            "select data_type, is_nullable, is_identity, identity_generation "
+            "from information_schema.columns where table_schema = "
+            "current_schema() and table_name = 'health_runs' and column_name "
+            "= 'run_seq'").fetchone()
+        sequence_row = conn.execute(
+            "select s.seqcache, s.seqincrement, s.seqcycle from pg_sequence s "
+            "where s.seqrelid = pg_get_serial_sequence('health_runs', "
+            "'run_seq')::regclass").fetchone()
+    assert tuple(identity_row) == ("bigint", "NO", "YES", "ALWAYS")
+    assert tuple(sequence_row) == (1, 1, False)
+
+
+def test_a_findings_page_is_never_empty_for_a_run_with_findings(
+        database: Any) -> None:
+    """`list_findings` is bounded by `identity.clamp_limit`: a limit below one
+    is one row and a limit above the maximum is the maximum, never 0 rows and
+    never an unbounded scan."""
+    from opendox.runtime.identity import MAX_PAGE_SIZE
+
+    run = _record(database, findings=[_finding(), _finding(
+        id="opendox.orphan.0123456789abcdef", path="other.md")])
+    with database.connection() as conn:
+        store = HealthStore(conn)
+        assert len(store.list_findings(run_id=run.run_id, limit=0)) == 1
+        assert len(store.list_findings(run_id=run.run_id, limit=-5)) == 1
+        assert len(store.list_findings(run_id=run.run_id,
+                                       limit=MAX_PAGE_SIZE + 1)) == 2
+
+
+@pytest.mark.parametrize("pids_max", ["1.5", "-1", "-0.5", "true", '"8"'])
+def test_pids_max_is_a_non_negative_integer_or_null(database: Any,
+                                                    pids_max: str) -> None:
+    """data-model.md § Health run: `pids_max` is "int or null". A fraction, a
+    negative number, a boolean and a string are each refused by the check."""
+    refused = _raw(database, _RAW_RUN, _raw_run(
+        sandbox=f'{{"live": true, "pids_max": {pids_max}}}'))
+    assert refused is not None, f"pids_max {pids_max} was admitted"
+    assert refused.sqlstate == "23514", refused
+    assert refused.diag.constraint_name == "health_runs_sandbox_check"
+
+
+@pytest.mark.parametrize("pids_max", ["null", "0", "1", "4096", "100000000000"])
+def test_pids_max_admits_null_and_every_non_negative_integer(
+        database: Any, pids_max: str) -> None:
+    assert _raw(database, _RAW_RUN, _raw_run(
+        sandbox=f'{{"live": true, "pids_max": {pids_max}}}')) is None
