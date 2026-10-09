@@ -1401,7 +1401,7 @@ def test_refused_entry_keeps_distinct_ids_apart_and_never_raises() -> None:
     entries = [hc.refused_entry(entry_id) for entry_id, _ in _REFUSED_IDS.values()]
     assert len(set(entries)) == len(entries)
     deep: Any = "x"
-    for _ in range(sys.getrecursionlimit() * 3):
+    for _ in range(50_000):  # past the C recursion limit json.dumps and repr() share
         deep = [deep]
     deep_entry = hc.refused_entry(deep)
     assert re.fullmatch(r"sha256-[0-9a-f]{64}", deep_entry)
