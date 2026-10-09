@@ -6,7 +6,7 @@ install, and `opendox generate-and-open --local …`, which starts the bundled
 server (13.1; R1Q15 (b), R1Q16 (iii), `5850003126`). F10.1 fetches `/` and
 reads `<html` from it. 10.2 asks more than that page: *"The web bundle is
 served by that entry point and is reachable in a browser from an
-openDox-only install"*, and the bundle is 42 files. So the fetch is widened
+openDox-only install"*, and the bundle is 43 files. So the fetch is widened
 here to every one of them, the way F10.1's own fetch is made: an HTTP GET to
 the running console script, whose status is the status.
 
@@ -35,7 +35,7 @@ installed OUTSIDE it (T072's own recipe, `tests_runtime/test_bundled_postgres.py
 2. F10.1's fetch, widened: the installed `opendox` console script, started
    with `generate-and-open --local --no-open` from a directory that is not a
    checkout, with no sibling importable, answers `/` with the bundle's
-   `<html`, and answers every one of the 42 files with 200, the tree's bytes
+   `<html`, and answers every one of the 43 files with 200, the tree's bytes
    and a content type a browser accepts for it. The module graph a browser
    walks from `/` closes inside the bundle. It stops on SIGTERM, as F10.1's
    `kill "$SERVER"` stops it, and its bundled server stops with it.
@@ -47,7 +47,7 @@ installed OUTSIDE it (T072's own recipe, `tests_runtime/test_bundled_postgres.py
 openxFactory (RULED OQ-F) and is not owed to openDox; `views/intent-binding.js`
 is openDox's replacement and reaches it only by a dynamic `import()`, so a
 missing module is an absent binding, not a broken bundle. Case 2 holds both
-halves: the 42 do not include it, and the installed server answers it 404.
+halves: the 43 do not include it, and the installed server answers it 404.
 
 THE CHILD'S ENVIRONMENT IS SCRUBBED of every `OPENDOX_*`, `PG*`, `GIT_*` and
 `XF_*` name the suite runs with: the suite exports a gate roster
@@ -95,7 +95,8 @@ WEB = ROOT / "src" / "opendox" / "web"
 PLAIN_DOCUMENTS = ROOT / "tests" / "fixtures" / "plain-documents"
 
 #: #1144 10.2's count of the bundle openDox-code carries.
-BUNDLE_FILES = 42
+#: Plan 038 T015 adds `views/branch-actions.js` (the submit control): 42 -> 43.
+BUNDLE_FILES = 43
 
 #: 10.2a: not owed to openDox, and not counted as a missing file.
 NOT_OWED = "views/intent-feed.js"
@@ -413,7 +414,7 @@ def _module_graph(read, carried: set[str]) -> tuple[set[str], set[str], set]:
 # ---------------------------------------------------------------------------
 
 def test_the_wheel_carries_every_web_file_the_tree_holds(wheel: Path) -> None:
-    """10.2's 42 files, all of them in the wheel `pip install ".[local]"`
+    """10.2's bundle, 43 files, all of them in the wheel `pip install ".[local]"`
     installs, and nothing under `opendox/web/` that the tree does not hold."""
     tree = _tree_files()
     assert len(tree) == BUNDLE_FILES, sorted(tree)
@@ -433,7 +434,7 @@ def test_F10_1_fetch_the_installed_local_entry_point_serves_every_bundle_file(
         installed: tuple[Path, Path], state_dir: Path, tmp_path: Path) -> None:
     """`opendox generate-and-open --local --no-open`, as installed, from a
     directory that is not a checkout: `/` is the bundle's page, every one of
-    the 42 files answers with the tree's bytes, the browser's module graph
+    the 43 files answers with the tree's bytes, the browser's module graph
     closes inside the bundle, and 10.2a's file is the one that is absent."""
     script, site = installed
     elsewhere = tmp_path / "elsewhere"

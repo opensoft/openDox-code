@@ -67,6 +67,9 @@ GOVERNED: dict[str, tuple[str, str] | None] = {
     "edit": ("POST", "/actions/edit"),
     # a POST to ANOTHER plane's intent API, which that plane answers
     "intent": None,
+    # openDox's own submit route (plan 038 T015; #1144 12.4a), contributed by
+    # its default profile, so a host's map carries no such key
+    "submit": ("POST", "/actions/session/submit"),
 }
 
 _SERVE_URL = re.compile(r"^serving ideation dashboard at "
@@ -107,13 +110,18 @@ def _unknown(answer: tuple[int, dict]) -> bool:
     return status == 404 and body.get("error") == "unknown_action"
 
 
-def _assert_every_true_flag_answers(base: tuple[str, int], caps: dict) -> None:
+def _assert_every_true_flag_answers(base: tuple[str, int], caps: dict, *,
+                                    default_profile: bool) -> None:
     """Case 3: every `actions` key is accounted for, and each that reads true
     has a route that answers something other than `unknown_action`."""
     actions = caps["actions"]
-    assert set(actions) == set(GOVERNED), (
+    # PROFILE-AWARE (plan 038 T015; holder ruling, #656 6028383410): `submit`
+    # is openDox's default profile's own key, so the default's map carries
+    # every key here and a composed host's carries every key but that one.
+    expected = set(GOVERNED) if default_profile else set(GOVERNED) - {"submit"}
+    assert set(actions) == expected, (
         f"the actions map has keys this test does not account for: "
-        f"{sorted(set(actions) ^ set(GOVERNED))}")
+        f"{sorted(set(actions) ^ expected)}")
     for key, value in actions.items():
         if value is not True or GOVERNED[key] is None:
             continue
@@ -180,7 +188,7 @@ def test_a_standalone_server_offers_neither_gate_nor_refresh(
         assert actions["gate"] is False and actions["refresh"] is False, caps
         assert _unknown(_request(base, "POST", "/actions/gate/demote"))
         assert _unknown(_request(base, "POST", "/actions/refresh"))
-        _assert_every_true_flag_answers(base, caps)
+        _assert_every_true_flag_answers(base, caps, default_profile=True)
         assert child.interrupt() == 0, child.stderr_text()
     finally:
         child.kill()
@@ -267,21 +275,21 @@ def test_a_composed_host_contributing_both_routes_reads_both_true(composed) -> N
     assert caps["actions"]["gate"] is True, caps
     assert caps["actions"]["refresh"] is True, caps
     assert caps["actions"]["session"] is True and caps["actions"]["edit"] is True
-    _assert_every_true_flag_answers(base, caps)
+    _assert_every_true_flag_answers(base, caps, default_profile=False)
 
 
 def test_a_gate_only_host_reads_only_gate_true(composed) -> None:
     base, caps = composed(_gate())
     assert caps["actions"]["gate"] is True, caps
     assert caps["actions"]["refresh"] is False, caps
-    _assert_every_true_flag_answers(base, caps)
+    _assert_every_true_flag_answers(base, caps, default_profile=False)
 
 
 def test_a_refresh_only_host_reads_only_refresh_true(composed) -> None:
     base, caps = composed(_refresh())
     assert caps["actions"]["refresh"] is True, caps
     assert caps["actions"]["gate"] is False, caps
-    _assert_every_true_flag_answers(base, caps)
+    _assert_every_true_flag_answers(base, caps, default_profile=False)
 
 
 def test_the_same_host_with_nothing_contributed_reads_both_false(composed) -> None:
@@ -290,7 +298,7 @@ def test_the_same_host_with_nothing_contributed_reads_both_false(composed) -> No
     assert caps["actor"] == "brett", caps
     assert caps["actions"]["gate"] is False and caps["actions"]["refresh"] is False
     assert caps["actions"]["session"] is True
-    _assert_every_true_flag_answers(base, caps)
+    _assert_every_true_flag_answers(base, caps, default_profile=False)
 
 
 # ---------------------------------------------------------------------------

@@ -476,6 +476,12 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 # offering two affordances that would answer `404 unknown_action`.
 ACTIONS_GATE_PREFIX = "/actions/gate/"
 ACTIONS_REFRESH_ROUTE = "/actions/refresh"
+# AND THE ONE ROUTE THE `actions` MAP NAMES THAT openDox's OWN DEFAULT PROFILE
+# CONTRIBUTES (plan 038 T015; #1144 12.4a): `POST /actions/session/submit`,
+# declared beside its handler in `serve_branch_actions`, which imports only the
+# standard library. Not a fixed core arm either, so `actions.submit` is present
+# only where a binding the assembly collected answers it (`compute_capabilities`).
+from opendox.serve_branch_actions import ACTIONS_SESSION_SUBMIT_ROUTE  # noqa: E402
 
 # THE STATIC BUNDLE'S CONTENT TYPES, PINNED (plan 034 T084, the holder's
 # addition for #1144 10.2, "reachable in a browser from an openDox-only
@@ -524,6 +530,12 @@ def answers_a_gate_verb(binding) -> bool:
 def answers_the_refresh(binding) -> bool:
     """Whether a contributed route binding answers `POST /actions/refresh`."""
     return binding.matches("POST", ACTIONS_REFRESH_ROUTE)
+
+
+def answers_the_submit(binding) -> bool:
+    """Whether a contributed route binding answers `POST
+    /actions/session/submit` (plan 038 T015; #1144 12.4a)."""
+    return binding.matches("POST", ACTIONS_SESSION_SUBMIT_ROUTE)
 
 _DEFAULT_CAPABILITIES = {"actions": {"notebook": False, "gate": False, "refresh": False,
                                     "session": False, "edit": False,
@@ -615,7 +627,19 @@ def compute_capabilities(*, nlm_present: bool, checkout_real: bool, loopback: bo
     that plane answers, so its condition, the served plane, stands. The
     `refresh` block below still names the plane's binding: it says which
     binding a contributed refresh would use, and the flag says whether one is
-    offered."""
+    offered.
+
+    SUBMIT (plan 038 T015; #1144 12.4a; OQ-12-14 refined by ADV-14) is the one
+    key whose PRESENCE is contributed too. `POST /actions/session/submit` is a
+    route of openDox's own DEFAULT profile, never a core arm, so the key is
+    present only where a binding the assembly collected answers that route
+    (`answers_the_submit`), and core `_DEFAULT_CAPABILITIES` gains nothing. A
+    host profile that replaces the default contributes no such binding, so its
+    `actions` map is what it was, key for key (R2Q3 (a)). Where the key is
+    present its VALUE is the local human's verdict, the route's own first two
+    clauses, so it is never true where the route would refuse: false on a
+    hosted plane, and false with no resolved actor or no real checkout. The
+    submit control keys on it and never on `session` (OQ-12-14)."""
     binding = refresh_binding
     if binding == registry_mod.BINDING_REGENERATE and not (loopback and checkout_real):
         binding = None
@@ -623,20 +647,23 @@ def compute_capabilities(*, nlm_present: bool, checkout_real: bool, loopback: bo
     bindings = tuple(route_bindings or ())
     gate_routed = any(answers_a_gate_verb(b) for b in bindings)
     refresh_routed = any(answers_the_refresh(b) for b in bindings)
+    actions = {
+        "notebook": bool(nlm_present and checkout_real and loopback),
+        "gate": local_human and gate_routed,
+        "refresh": bool(binding) and refresh_routed,
+        "session": local_human,
+        "edit": local_human,
+        # THE HOSTED WRITE-REQUEST SEAM, and the only capability here that
+        # is true OFF loopback. It grants no write: an intent is a REQUEST
+        # the apply lane revalidates and may refuse (kernel schema: "an
+        # intent is NEVER a write"), which is why it does not join the
+        # account menu's WRITE_ACTIONS list either.
+        "intent": not loopback,
+    }
+    if any(answers_the_submit(b) for b in bindings):
+        actions["submit"] = local_human
     return {
-        "actions": {
-            "notebook": bool(nlm_present and checkout_real and loopback),
-            "gate": local_human and gate_routed,
-            "refresh": bool(binding) and refresh_routed,
-            "session": local_human,
-            "edit": local_human,
-            # THE HOSTED WRITE-REQUEST SEAM, and the only capability here that
-            # is true OFF loopback. It grants no write: an intent is a REQUEST
-            # the apply lane revalidates and may refuse (kernel schema: "an
-            # intent is NEVER a write"), which is why it does not join the
-            # account menu's WRITE_ACTIONS list either.
-            "intent": not loopback,
-        },
+        "actions": actions,
         "actor": actor if (actor and checkout_real and loopback) else None,
         "refresh": {
             "binding": binding,
