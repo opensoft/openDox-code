@@ -332,6 +332,14 @@ class BranchActionRoutes:
         except LandingRefused as exc:
             self._send_landing_refusal(exc)
             return
+        # A read nobody named (git, or a host's profile): its TYPE alone
+        # reaches the log, as the land route logs one.
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write("[actions/session/land-nonce] the reading raised "
+                             f"{type(exc).__name__}\n")
+            self._send_json(500, {"ok": False, "error": "landing_failed",
+                                  "message": LAND_FAILED})
+            return
         nonce = self._branch_action_nonces().issue_nonce(branch, head)
         self._send_json(200, {"nonce": nonce, "branch": branch, "head": head})
 

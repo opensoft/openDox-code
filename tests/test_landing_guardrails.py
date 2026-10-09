@@ -2865,6 +2865,38 @@ def test_the_nonce_route_refuses_where_nothing_can_land(tmp_path, local_install)
     assert DECLARATION_PATH in body["message"]
 
 
+def test_a_reading_that_fails_unnamed_is_contained_by_both_routes(
+        world, tmp_path, local_install, capsys):
+    """A failure nobody named, here a `landing_factory` whose lander raises in
+    `land` and a governance read that raises at the nonce: a fixed 500, the
+    TYPE alone in the log, and nothing lands."""
+    before = world.refs()
+
+    class Exploding:
+        def land(self, branch, *, confirmation):
+            raise RuntimeError(f"broke with {SECRET}")
+
+    with serving(world.root, tmp_path / "land",
+                 landing_factory=lambda: Exploding()) as httpd:
+        issued = nonce_for(httpd)
+        status, body = ask(httpd, "POST", LAND_ROUTE,
+                           {"branch": BRANCH, "nonce": issued["nonce"]},
+                           token=httpd.console_token)
+    assert (status, body["error"]) == (500, "landing_failed"), body
+    with pytest.MonkeyPatch.context() as patch:
+        def broken(*_args, **_kwargs):
+            raise OSError(f"unreadable {SECRET}")
+        patch.setattr(cli_branch_actions, "landing_refusal", broken)
+        with serving(world.root, tmp_path / "nonce") as httpd:
+            status, body = ask(httpd, "POST", NONCE_ROUTE, {"branch": BRANCH},
+                               token=httpd.console_token)
+    assert (status, body["error"]) == (500, "landing_failed"), body
+    logged = capsys.readouterr().err
+    assert "raised RuntimeError" in logged and "raised OSError" in logged
+    assert SECRET not in logged
+    assert world.refs() == before
+
+
 def test_the_land_route_shows_a_conflict_and_lands_nothing(tmp_path,
                                                            local_install):
     world = World(tmp_path)
