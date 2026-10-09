@@ -78,8 +78,10 @@
 -- so a row without a class is a row the engine never classed.
 --
 -- THE HOSTED PLANE MIGRATES THIS FILE TOO (R2Q15 (a)): there is one
--- migration set. The hosted plane refuses the `health` verbs and routes by
--- name and records nothing, so its tables stay empty.
+-- migration set. R2Q15 (a) also rules that the hosted plane refuses the
+-- `health` verbs and routes by name and records nothing, so its tables stay
+-- empty. That refusal is T046's, which adds the verbs and routes; this file
+-- only declares the tables both planes migrate.
 
 create table health_runs (
   run_id           uuid primary key,

@@ -27,8 +27,10 @@ It is identity and coordination: six tables, six collections, one bearer token
 verified against the Keycloak broker. Beside the six, `0003_` adds the health
 store's two tables (`health_runs`, `health_findings`; R2Q13 (a) makes them
 DOMAIN tables, so `runtime reset` and the served role's grants reach them). They
-serve no collection: the hosted plane refuses `health` by name (R2Q15 (a)), and
-they hold findings that address documents, never the documents themselves.
+serve no collection, and they hold findings that address documents, never the
+documents themselves. R2Q15 (a) rules that the hosted plane refuses `health` by
+name; that refusal arrives with the `health` verbs and routes (T046), and until
+then this runtime has no `health` verb or route at all.
 
 It is **not** a document store and it is not a second dashboard. It does not
 import `opendox.serve` — the stdlib document surface a student runs from a
