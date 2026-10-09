@@ -66,19 +66,26 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 
 __all__ = [
     "LOCAL_BESIDE_HOSTED", "SUBMISSION_FIELDS", "UNNAMED_FAILURE",
-    "BranchActionSubcommands", "cmd_submit", "refusal_text",
-    "submission_object", "submit_branch",
+    "BranchActionSubcommands", "cmd_submit", "redacted_text",
+    "refusal_text", "submission_object", "submit_branch",
 ]
 
 #: The `Submission` report's fields, in the order the verb prints them
 #: (data-model.md § Submission; 12.1a).
 SUBMISSION_FIELDS = ("remote", "ref", "url", "branch", "commit")
+
+#: A `scheme://` URL inside free text, up to whitespace or a quoting mark.
+_URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s`'\"<>]+")
+
+#: A full git object name: 40 hex digits (sha1), or 64 (sha256).
+_OBJECT_NAME = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 #: The refusal of `--local` beside `OPENDOX_INSTALL_MODE=hosted` (N-17).
 LOCAL_BESIDE_HOSTED = (
@@ -105,24 +112,48 @@ def _core():
     return cli
 
 
-def submission_object(report) -> dict[str, str]:
-    """The `Submission` report's five fields, read by name.
+def redacted_text(text: str) -> str:
+    """`text` as either door may show it: every credential gone (12.1a).
+
+    Every `scheme://` URL in it passes through
+    `submission_push.redact_destination` first, which treats ANY userinfo of
+    a non-ssh URL as a secret (a token spelled as a bare username included)
+    and redacts every query and fragment value, keeping the scheme, host and
+    path. The package's free-text redactor then runs over the result for the
+    shapes that are not `scheme://` URLs. It spares a bare username, because
+    after the first pass the only userinfo left in a URL is an ssh login name
+    or the redaction marker, and so a refusal can still name the host that
+    would not answer.
+    """
+    from opendox.runtime.local_git_adapter import redact_credentials
+    from opendox.submission_push import redact_destination
+
+    text = _URL_IN_TEXT.sub(lambda found: redact_destination(found.group(0)),
+                            text)
+    return redact_credentials(text, a_bare_username_is_not_a_secret=True)
+
+
+def submission_object(report, branch: str) -> dict[str, str]:
+    """The `Submission` report's five fields, read by name and checked.
 
     A port answers ONLY on success (12.1a), so an answer that does not name
     where the work went is refused rather than printed: a report missing a
     field, or carrying one that is not a non-empty string. A host's port is
     the case this guards; `LocalGitSubmissions` always answers all five.
 
+    THE THREE FIELDS THAT NAME THE SUBMISSION ARE CHECKED, not printed on
+    trust: `branch` must be the branch submitted, `ref` must be
+    `refs/heads/<that branch>`, and `commit` must be a full object name (40
+    hex digits, or 64 in a sha256 repository). A report that says anything
+    else is refused by a fixed sentence that repeats none of it.
+
     THE TWO FIELDS THAT NAME A PLACE ARE REDACTED HERE, whoever answered
-    (12.1a). `LocalGitSubmissions` reports `url` already redacted, but a
-    host's contributed port is not this module's to vet, and this is the one
-    boundary both doors print from, so `url` and `remote` pass through
-    `submission_push.redact_destination` again: a credential a host's port
-    returns reaches neither the printed report nor the route's answer (Copilot
-    on #96 at `7dc8214b`). It changes nothing the neutral port reports.
+    (12.1a; Copilot on #96 at `7dc8214b`): `url` and `remote` pass through
+    `redacted_text`, so a credential a host's port returns, whole or
+    embedded, reaches neither the printed report nor the route's answer. It
+    changes nothing the neutral port reports, which is redacted already.
     """
     from opendox.session_pr import SubmissionRefused
-    from opendox.submission_push import redact_destination
 
     fields: dict[str, str] = {}
     for name in SUBMISSION_FIELDS:
@@ -133,23 +164,28 @@ def submission_object(report) -> dict[str, str]:
                 f"went (its report carries no `{name}`), so nothing is "
                 "reported as submitted")
         fields[name] = value
+    for name, matches in (
+            ("branch", fields["branch"] == branch),
+            ("ref", fields["ref"] == "refs/heads/" + branch),
+            ("commit", _OBJECT_NAME.fullmatch(fields["commit"]) is not None)):
+        if not matches:
+            raise SubmissionRefused(
+                f"the submission port answered a report whose `{name}` is not "
+                "the submission's, so nothing is reported as submitted")
     for name in ("url", "remote"):
-        fields[name] = redact_destination(fields[name])
+        fields[name] = redacted_text(fields[name])
     return fields
 
 
 def refusal_text(exc: BaseException) -> str:
-    """A `SubmissionError`'s message as either door shows it: with anything
-    shaped like a credential-bearing URL replaced (12.1a).
+    """A `SubmissionError`'s message as either door shows it (12.1a).
 
     The neutral port's refusals are redacted where they are raised; a host's
-    contributed port's are not this module's to vet, so the boundary runs
-    the package's credential redactor over every refusal it prints or
-    answers, as `submission_object` does over the report.
+    contributed port's are not this module's to vet, so every refusal either
+    door prints or answers passes through `redacted_text`, the report's own
+    rule.
     """
-    from opendox.runtime.local_git_adapter import redact_credentials
-
-    return redact_credentials(str(exc), a_bare_username_is_not_a_secret=True)
+    return redacted_text(str(exc))
 
 
 def submit_branch(port, branch: str) -> dict[str, str]:
@@ -168,7 +204,7 @@ def submit_branch(port, branch: str) -> dict[str, str]:
             f"`{DEFAULT_BRANCH}` is the default branch, and a submission takes "
             "any local branch except it (R2Q5 (a)); nothing is pushed. Submit "
             "the branch the work is on.")
-    return submission_object(port.submit(branch))
+    return submission_object(port.submit(branch), branch)
 
 
 def _install_mode_refusal(args: argparse.Namespace) -> str | None:

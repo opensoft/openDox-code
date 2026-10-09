@@ -409,23 +409,42 @@ def test_a_port_failure_it_did_not_name_is_refused_without_its_text(
 
 
 HOST_PORT_SECRET = "S3CRET-from-a-host-port"
-HOST_PORT_URL = (f"https://alice:{HOST_PORT_SECRET}@forge.example/team/repo"
-                 f"?token={HOST_PORT_SECRET}")
+#: Credential-shaped URLs ASSEMBLED, never spelled whole in this tree's source.
+HOST_PORT_URL = with_userinfo(
+    "https", f"alice:{HOST_PORT_SECRET}",
+    f"forge.example/team/repo?token={HOST_PORT_SECRET}")
+#: A host port's refusal, in each shape lane 3 measured leaking at `2d64f42e`:
+#: a token spelled as a bare username, a secret under a query name no pattern
+#: knows, and a secret in the fragment.
+REFUSAL_SHAPES = {
+    "token-as-username": with_userinfo(
+        "https", HOST_PORT_SECRET, "forge.example/team/repo.git"),
+    "unknown-query-name": ("https://forge.example/team/repo.git?ticket="
+                           + HOST_PORT_SECRET),
+    "fragment": "https://forge.example/team/repo.git#" + HOST_PORT_SECRET,
+}
+
+
+def _report(**overrides) -> session_pr.Submission:
+    """A host port's report of `sess-1`, every field well formed unless
+    overridden."""
+    fields = {"remote": "review", "ref": "refs/heads/sess-1",
+              "url": "https://forge.example/team/repo", "branch": "sess-1",
+              "commit": "c" * 40}
+    fields.update(overrides)
+    return session_pr.Submission(**fields)
 
 
 def test_a_contributed_report_is_redacted_at_the_boundary(
         checkout: Path, standalone_profile, monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture) -> None:
     """Copilot on #96 at `7dc8214b`: a host's contributed port that answers a
-    credential-bearing `url` (or `remote`) does not get it printed. The
-    boundary both doors print from runs `redact_destination` over the two
-    fields that name a place, whoever answered (12.1a)."""
-    from opendox.submission_push import redact_destination
-
-    remote = f"https://bob:{HOST_PORT_SECRET}@forge.example/team/repo"
-    port = _ContributedPort(answer=session_pr.Submission(
-        remote=remote, ref="refs/heads/sess-1", url=HOST_PORT_URL,
-        branch="sess-1", commit="c" * 40))
+    credential-bearing `url` or `remote`, whole or embedded in text, does not
+    get it printed. The boundary both doors print from redacts the two fields
+    that name a place, whoever answered (12.1a), and keeps the place."""
+    remote = "review (" + with_userinfo(
+        "https", HOST_PORT_SECRET, "forge.example/team/repo") + ")"
+    port = _ContributedPort(answer=_report(remote=remote, url=HOST_PORT_URL))
     monkeypatch.setattr(cli, "_submission_port", lambda _root: port)
     status, out, err = _submit(capsys, checkout)
     json_status, json_out, _ = _submit(capsys, checkout, "--json")
@@ -434,24 +453,50 @@ def test_a_contributed_report_is_redacted_at_the_boundary(
         assert HOST_PORT_SECRET not in text, text
         assert "forge.example/team/repo" in text, text
     report = json.loads(json_out)
-    assert report["url"] == redact_destination(HOST_PORT_URL)
-    assert report["remote"] == redact_destination(remote)
+    assert report["url"].startswith("https://<redacted>@forge.example/team/repo?token=")
+    assert report["remote"].startswith("review (https://<redacted>@forge.example/")
 
 
+@pytest.mark.parametrize("shape", sorted(REFUSAL_SHAPES))
 def test_a_contributed_refusal_is_redacted_at_the_boundary(
         checkout: Path, standalone_profile, monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture) -> None:
-    """A host's port whose refusal names a credential-bearing URL: the verb
-    prints the refusal in its own words with the URL redacted, as the
-    package's credential redactor redacts free text (the URL replaced whole)."""
+        capsys: pytest.CaptureFixture, shape: str) -> None:
+    """Lane 3's MAJOR on R1-T015 at `2d64f42e`, and Copilot's thread there: a
+    host's port whose refusal names a URL carrying a secret, in any of the
+    three shapes, gets it printed with the secret gone and the HOST KEPT, so
+    the refusal still says where the push would not go."""
     port = _ContributedPort(raises=session_pr.SubmissionRefused(
-        f"push to {HOST_PORT_URL} was rejected"))
+        f"push to {REFUSAL_SHAPES[shape]} was rejected by the host"))
     monkeypatch.setattr(cli, "_submission_port", lambda _root: port)
     status, out, err = _submit(capsys, checkout)
     assert (status, out) == (1, "")
-    assert err.startswith("submit refused: push to "), err
     assert HOST_PORT_SECRET not in err
-    assert err.rstrip("\n").endswith(" was rejected"), err
+    assert err.startswith("submit refused: push to https://"), err
+    assert "forge.example/team/repo.git" in err
+    assert err.rstrip("\n").endswith(" was rejected by the host"), err
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("branch", "sess-2"),
+    ("ref", "refs/heads/sess-2"),
+    ("ref", "refs/tags/sess-1"),
+    ("commit", "c" * 39),
+    ("commit", "C" * 40),
+    ("commit", HOST_PORT_SECRET),
+])
+def test_a_report_that_is_not_the_submissions_is_refused(
+        checkout: Path, standalone_profile, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture, field: str, value: str) -> None:
+    """Lane 3's MINOR at `2d64f42e`: `branch`, `ref` and `commit` are checked,
+    not printed on trust. A report naming another branch, another ref or a
+    commit that is no full object name is refused by a fixed sentence that
+    repeats none of it."""
+    port = _ContributedPort(answer=_report(**{field: value}))
+    monkeypatch.setattr(cli, "_submission_port", lambda _root: port)
+    status, out, err = _submit(capsys, checkout)
+    assert (status, out) == (1, "")
+    assert f"report whose `{field}` is not the submission's" in err, err
+    assert value not in err
 
 
 @pytest.mark.parametrize("missing", cli_branch_actions.SUBMISSION_FIELDS)
@@ -470,18 +515,22 @@ def test_a_report_that_does_not_name_where_the_work_went_is_refused(
 
 def test_submission_object_reads_the_five_fields_by_name() -> None:
     class _Report:
-        remote, ref, url, branch, commit = "o", "refs/heads/b", "u", "b", "c"
+        remote, ref, url, branch, commit = "o", "refs/heads/b", "u", "b", "c" * 40
         extra = "never read"
 
-    assert cli_branch_actions.submission_object(_Report()) == {
+    class _Sha256Report(_Report):
+        commit = "d" * 64
+
+    assert cli_branch_actions.submission_object(_Report(), "b") == {
         "remote": "o", "ref": "refs/heads/b", "url": "u", "branch": "b",
-        "commit": "c"}
+        "commit": "c" * 40}
+    assert cli_branch_actions.submission_object(_Sha256Report(), "b")["commit"] == "d" * 64
     with pytest.raises(session_pr.SubmissionRefused, match="no `remote`"):
-        cli_branch_actions.submission_object(None)
+        cli_branch_actions.submission_object(None, "b")
     _Report.url = 7
     report = _Report()
     with pytest.raises(session_pr.SubmissionRefused, match="no `url`"):
-        cli_branch_actions.submission_object(report)
+        cli_branch_actions.submission_object(report, "b")
 
 
 # --------------------------------------------------------------------------

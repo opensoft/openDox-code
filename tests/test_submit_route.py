@@ -51,6 +51,7 @@ from test_submission_default import (  # noqa: F401 - fixtures, by name
     _isolated_git,
     _tip,
     checkout,
+    with_userinfo,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -468,8 +469,18 @@ def test_a_port_failure_it_did_not_name_is_reported_without_its_text(
 
 
 HOST_PORT_SECRET = "S3CRET-from-a-host-port"
-HOST_PORT_URL = (f"https://alice:{HOST_PORT_SECRET}@forge.example/team/repo"
-                 f"?token={HOST_PORT_SECRET}")
+#: Credential-shaped URLs ASSEMBLED, never spelled whole in this tree's source.
+HOST_PORT_URL = with_userinfo(
+    "https", f"alice:{HOST_PORT_SECRET}",
+    f"forge.example/team/repo?token={HOST_PORT_SECRET}")
+#: A host port's refusal, in each shape lane 3 measured leaking at `2d64f42e`.
+REFUSAL_SHAPES = {
+    "token-as-username": with_userinfo(
+        "https", HOST_PORT_SECRET, "forge.example/team/repo.git"),
+    "unknown-query-name": ("https://forge.example/team/repo.git?ticket="
+                           + HOST_PORT_SECRET),
+    "fragment": "https://forge.example/team/repo.git#" + HOST_PORT_SECRET,
+}
 
 
 def test_a_contributed_report_is_answered_redacted(
@@ -477,7 +488,7 @@ def test_a_contributed_report_is_answered_redacted(
     """Copilot on #96 at `7dc8214b`: the route answers a host port's report
     with `url` and `remote` redacted, as the verb prints it (12.1a)."""
     port = _ContributedPort(answer=session_pr.Submission(
-        remote=f"https://bob:{HOST_PORT_SECRET}@forge.example/team/repo",
+        remote=with_userinfo("https", HOST_PORT_SECRET, "forge.example/team/repo"),
         ref="refs/heads/sess-1", url=HOST_PORT_URL, branch="sess-1",
         commit="c" * 40))
     with _serving(checkout, tmp_path, submission_factory=lambda: port) as httpd:
@@ -492,19 +503,38 @@ def test_a_contributed_report_is_answered_redacted(
     (session_pr.SubmissionRefused, "submission_refused"),
     (session_pr.NoSubmissionTarget, "no_submission_target"),
 ])
+@pytest.mark.parametrize("shape", sorted(REFUSAL_SHAPES))
 def test_a_contributed_refusal_is_answered_redacted(
         checkout: Path, tmp_path: Path, standalone_profile, refusal,
-        error: str) -> None:
-    """A host port's refusal naming a credential-bearing URL: the 409's
-    message keeps the refusal's own words and loses the credential, on both
-    arms."""
-    port = _ContributedPort(raises=refusal(f"push to {HOST_PORT_URL} was rejected"))
+        error: str, shape: str) -> None:
+    """Lane 3's MAJOR on R1-T015 at `2d64f42e`, and Copilot's thread there: a
+    host port's refusal naming a URL that carries a secret, in each shape, is
+    answered on both 409 arms with the secret gone, the host kept and the
+    refusal's own words intact."""
+    port = _ContributedPort(raises=refusal(
+        f"push to {REFUSAL_SHAPES[shape]} was rejected by the host"))
     with _serving(checkout, tmp_path, submission_factory=lambda: port) as httpd:
         status, body = _submit(httpd, token=httpd.console_token)
     assert (status, body["error"]) == (409, error), body
     assert HOST_PORT_SECRET not in body["message"]
-    assert body["message"].startswith("push to ")
-    assert body["message"].endswith(" was rejected")
+    assert body["message"].startswith("push to https://")
+    assert "forge.example/team/repo.git" in body["message"]
+    assert body["message"].endswith(" was rejected by the host")
+
+
+def test_a_report_that_is_not_the_submissions_is_refused_by_the_route(
+        checkout: Path, tmp_path: Path, standalone_profile) -> None:
+    """Lane 3's MINOR at `2d64f42e`: a report naming another branch is refused
+    with a fixed sentence (409 `submission_refused`), never answered."""
+    port = _ContributedPort(answer=session_pr.Submission(
+        remote="review", ref="refs/heads/sess-2", url="https://forge.example/r",
+        branch="sess-2", commit="c" * 40))
+    with _serving(checkout, tmp_path, submission_factory=lambda: port) as httpd:
+        status, body = _submit(httpd, token=httpd.console_token)
+    assert (status, body["error"]) == (409, "submission_refused"), body
+    assert "is not the submission's" in body["message"]
+    assert "sess-2" not in body["message"]
+
 
 # --------------------------------------------------------------------------
 # `actions.submit`: PRESENT only under openDox's own profile, its VALUE from
