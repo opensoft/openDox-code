@@ -981,3 +981,63 @@ def test_a_value_shared_by_two_branches_is_not_a_cycle(database: Any) -> None:
         stored = store.get_finding(run_id=run.run_id, finding_id=sent["id"])
         assert store.get_run(run.run_id).pack_pins["twice"] == [shared, shared]
     assert stored.evidence == {"first": shared, "second": shared}
+
+
+# ---------------------------------------------------------------------------
+# The holder, #656 6086098003 item 3 (c): U+0000 in EVERY text parameter the
+# store binds is a `RefusedError` naming the column, never a driver error
+# ---------------------------------------------------------------------------
+
+_SOME_RUN = "00000000-0000-4000-8000-000000000000"
+
+#: Every read that binds a caller's text, the parameter carrying a NUL, and
+#: the name the refusal must give. Before the guard, each one reached the
+#: driver, which raised `psycopg.DataError` ("PostgreSQL text fields cannot
+#: contain NUL (0x00) bytes"); the writes were already guarded (`_NUL_CASES`).
+_NUL_READS = [
+    ("latest_run", {"corpus_root": "/corpora/a\x00"}, "corpus_root"),
+    ("baseline_run", {"corpus_root": "/corpora/a\x00",
+                      "baseline_branch": "main"}, "corpus_root"),
+    ("baseline_run", {"corpus_root": "/corpora/a",
+                      "baseline_branch": "ma\x00in"}, "baseline_branch"),
+    ("get_finding", {"run_id": _SOME_RUN, "finding_id": "opendox.x\x00"},
+     "id (finding_id)"),
+    ("list_findings", {"run_id": _SOME_RUN, "after": "opendox.x\x00"},
+     "id (after)"),
+    ("list_findings", {"run_id": _SOME_RUN, "resolution_class": "auto\x00"},
+     "resolution_class"),
+    ("list_findings", {"run_id": _SOME_RUN, "baseline_class": "new\x00"},
+     "baseline_class"),
+]
+
+
+@pytest.mark.parametrize(("method", "arguments", "column"), _NUL_READS,
+                         ids=["latest-corpus-root", "baseline-corpus-root",
+                              "baseline-branch", "finding-id", "after",
+                              "resolution-class", "baseline-class"])
+def test_a_nul_in_a_read_is_refused_by_name_never_by_the_driver(
+        database: Any, method: str, arguments: dict[str, Any],
+        column: str) -> None:
+    """A read's text parameter carrying U+0000 is a `RefusedError` naming the
+    column, raised before any statement and quoting nothing, over a double
+    that fails on any statement and over a real database alike."""
+    with pytest.raises(RefusedError) as caught:
+        getattr(HealthStore(_NoStatement()), method)(**arguments)
+    message = str(caught.value)
+    assert f"{column} carries U+0000" in message, message
+    assert "\x00" not in message
+    with database.connection() as conn:
+        with pytest.raises(RefusedError) as caught:
+            getattr(HealthStore(conn), method)(**arguments)
+    assert f"{column} carries U+0000" in str(caught.value)
+
+
+def test_a_nul_in_a_path_never_reaches_the_driver(database: Any) -> None:
+    """The holder, #656 6086098003 item 3 (c), names `path`: over a real
+    database a NUL in it is refused by name, and no row is written."""
+    with pytest.raises(RefusedError) as caught:
+        _record(database, findings=[_finding(path="notes/a\x00.md")])
+    assert "finding 0's path carries U+0000" in str(caught.value)
+    assert "notes/a" not in str(caught.value)
+    assert _count(database, "health_runs") == 0
+    assert _count(database, "health_findings") == 0

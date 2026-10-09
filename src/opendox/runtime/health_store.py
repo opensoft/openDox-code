@@ -213,6 +213,22 @@ def _refuse_unstorable(value: Any, what: str) -> None:
             "statement, and the value is not repeated here")
 
 
+def _refuse_nul_parameters(**columns: str | None) -> None:
+    """Refuse U+0000 in each text parameter a READ binds, naming its column.
+
+    The holder, opensoft/openxFactory#656 comment 6086098003 item 3 (c): the
+    store refuses U+0000 in EVERY text parameter it binds, as a `RefusedError`
+    naming the column, before any statement, and never as the driver's
+    `DataError` ("PostgreSQL text fields cannot contain NUL (0x00) bytes",
+    measured from `latest_run` at `7e13130d`). The writes were already
+    guarded (`_refuse_unstorable`); this is the same defence in depth for the
+    reads. Each keyword names a column: `id (finding_id)` and `id (after)`
+    are the `id` column, read through those parameters.
+    """
+    for column, value in columns.items():
+        _refuse_unstorable(value, column)
+
+
 def _dumps(value: Any, what: str) -> str:
     """Strict JSON text for a `%s::jsonb` parameter, or a refusal naming `what`.
 
@@ -536,6 +552,7 @@ class HealthStore:
         Only this corpus's: two corpora sharing one store never read each
         other's runs (`list`, `fix` and `accept` read the resolved corpus's).
         """
+        _refuse_nul_parameters(corpus_root=corpus_root)
         row = self._conn.execute(
             f"select {_RUN_SELECT} from health_runs where corpus_root = %s "
             "order by run_seq desc limit 1", (corpus_root,)).fetchone()
@@ -551,6 +568,8 @@ class HealthStore:
         `before_seq` bounds it to runs recorded before a given one. With no
         baseline branch no run is default-tip, so there is no B.
         """
+        _refuse_nul_parameters(corpus_root=corpus_root,
+                               baseline_branch=baseline_branch)
         if baseline_branch is None:
             return None
         row = self._conn.execute(
@@ -563,6 +582,7 @@ class HealthStore:
         return None if row is None else HealthRun._from_row(row)
 
     def get_finding(self, *, run_id: str, finding_id: str) -> HealthFinding:
+        _refuse_nul_parameters(**{"id (finding_id)": finding_id})
         row = self._conn.execute(
             f"select {_FINDING_SELECT} from health_findings "
             "where run_id = %s::uuid and id = %s",
@@ -578,6 +598,9 @@ class HealthStore:
 
         Bounded like every listing in this package (`identity.clamp_limit`).
         """
+        _refuse_nul_parameters(**{"id (after)": after},
+                               resolution_class=resolution_class,
+                               baseline_class=baseline_class)
         rows = self._conn.execute(
             f"select {_FINDING_SELECT} from health_findings "
             "where run_id = %s::uuid "
