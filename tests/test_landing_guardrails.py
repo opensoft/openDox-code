@@ -2415,6 +2415,13 @@ class SubmittingHost:
         return [branch for port in self.ports for branch in port.submitted]
 
 
+class SubmittingHostWithTheVerb(SubmittingHost):
+    """The same test host, carrying openDox's own branch verbs, so the host
+    side of `opendox land` runs (R2Q3 (a): no production host carries them)."""
+
+    SUBCOMMAND_EXTENSIONS: tuple = (cli_branch_actions.BranchActionSubcommands(),)
+
+
 class BranchActionsOnTop:
     """openDox's own branch-action routes and their mixin, contributed ON TOP
     of a test host, so the host side of the routes runs (R2Q3 (a))."""
@@ -2429,6 +2436,7 @@ class BranchActionsOnTop:
 def serving(root: Path, tmp_path: Path, *, host: str = "127.0.0.1",
             actor: str | None = "tester", **injected):
     """`serve.build_server` over `root`, serving on a thread."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     snapshot = tmp_path / "snapshot.json"
     snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
     httpd = serve.build_server(WEB, snapshot, root, host=host, port=0,
@@ -2632,7 +2640,7 @@ def test_land_under_a_governed_host_submits_through_the_instrument(
         world, monkeypatch, capsys, local_install):
     """R2Q4 (a): the verb submits through the host's instrument and reports
     where the work went; nothing merges here."""
-    host = domain_profile.register(SubmittingHost())
+    host = domain_profile.register(SubmittingHostWithTheVerb())
     before = world.refs()
     at_terminal(monkeypatch, f"{BRANCH}\n")
     status, out, err = land_verb(capsys, world.root, "--json")
@@ -2649,18 +2657,20 @@ def test_an_instruments_words_are_redacted_by_the_verb(world, monkeypatch,
     """12.1a at this boundary: an instrument's report URL, its refusal, and a
     failure it did not name reach no output with the credential in them."""
     leaky = f"https://alice:{SECRET}@forge.example/team/repo?token={SECRET}"
-    domain_profile.register(SubmittingHost(url=leaky))
+    domain_profile.register(SubmittingHostWithTheVerb(url=leaky))
     at_terminal(monkeypatch, f"{BRANCH}\n")
     status, out, err = land_verb(capsys, world.root)
     assert status == 0, err
     assert SECRET not in out + err and "forge.example/team/repo" in out
 
+    # (the rule over-redacts what follows a `token=` value, the safe way, so
+    # the refusal is held to its opening words and its host)
     for raised, said in (
             (session_pr.SubmissionRefused(f"push to {leaky} was rejected"),
-             "was rejected"),
+             "push to https://<redacted>@forge.example/team/repo"),
             (RuntimeError(f"broke at {leaky}"), "raised RuntimeError")):
         domain_profile.unregister()
-        domain_profile.register(SubmittingHost(raises=raised))
+        domain_profile.register(SubmittingHostWithTheVerb(raises=raised))
         at_terminal(monkeypatch, f"{BRANCH}\n")
         status, out, err = land_verb(capsys, world.root)
         assert status == 1, (out, err)
