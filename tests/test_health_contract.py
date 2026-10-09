@@ -1155,6 +1155,10 @@ AGAINST_OPENDOX = {"no-sandbox", "entry-refused", "manifest-refused", "dispositi
 #: is "" (the holder's `6072197564` (e); data-model.md:382).
 INSTALL_LEVEL = {"no-sandbox", "manifest-refused", "dispositions-refused"}
 
+#: The categories against the pack a valid manifest entry launched, whose
+#: entry is that pack's id, never "" (`6072086385` item 1).
+AGAINST_A_PACK = set(RULED_CATEGORIES) - AGAINST_OPENDOX
+
 
 def test_the_categories_are_the_ruled_ones_and_names() -> None:
     assert hc.CATEGORIES == RULED_CATEGORIES
@@ -1241,7 +1245,8 @@ def test_a_pathless_identity_names_an_engine_category_or_a_collision(category: s
     a pathless finding, so its category is one of the engine's, or
     `identity-collision` in the re-raise of a pathless collision's
     disappearance (option (D))."""
-    identity = {"category": category, "entry": ""}
+    entry = "house-style" if category in AGAINST_A_PACK else ""
+    identity = {"category": category, "entry": entry}
     finding = {**_example("no-sandbox"), "kind": "uncited-disappearance", "identity": identity,
                "id": _independent_id("opendox", "uncited-disappearance", "", identity)}
     found = [(v.rule, v.where) for v in hc.violations(finding)]
@@ -1249,6 +1254,34 @@ def test_a_pathless_identity_names_an_engine_category_or_a_collision(category: s
         assert found == []
     else:
         assert found == [("pathless-identity-is-category-and-entry", "/identity/category")]
+
+
+@pytest.mark.parametrize("category, entry, admitted", [
+    *[(category, "", False) for category in sorted(AGAINST_A_PACK)],
+    *[(category, "house-style", True) for category in sorted(AGAINST_A_PACK)],
+    ("identity-collision", "house-style", False),
+    ("identity-collision", "", True),
+    *[(category, "house-style", False) for category in sorted(INSTALL_LEVEL)],
+    *[(category, "", True) for category in sorted(INSTALL_LEVEL)],
+    ("entry-refused", "", True),
+    ("entry-refused", "house-style", True),
+])
+def test_a_pathless_entry_takes_its_categorys_form(category: str, entry: str,
+                                                   admitted: bool) -> None:
+    """Lane 3's REVIEW-W1 MINOR at `c620dacd` (`health_contract.py:693`), as the
+    holder ruled it: a category against a pack names that pack's entry, never
+    "", and an install-level category and a collision's re-raise take "";
+    `entry-refused` takes either. Before, `check_finding()` admitted
+    `{identity-collision, <an entry>}` and `{pack-crashed, ""}`, two forms
+    the engine never builds."""
+    identity = {"category": category, "entry": entry}
+    finding = {**_example("no-sandbox"), "kind": "uncited-disappearance", "identity": identity,
+               "id": _independent_id("opendox", "uncited-disappearance", "", identity)}
+    found = [(v.rule, v.where) for v in hc.violations(finding)]
+    if admitted:
+        assert found == []
+    else:
+        assert found == [("pathless-identity-is-category-and-entry", "/identity/entry")]
 
 
 def test_an_engine_finding_against_a_41_character_pack_is_refused() -> None:
@@ -1277,7 +1310,7 @@ def test_the_two_added_categories_are_admitted(category: str) -> None:
     ("not-a-category", ""), ("No-Sandbox", ""), ("", ""), (None, ""),
     ("entry-refused", "House"), ("entry-refused", "a" * 201), ("entry-refused", None),
     ("no-sandbox", "house-style"), ("manifest-refused", "house-style"),
-    ("dispositions-refused", "house-style")])
+    ("dispositions-refused", "house-style"), ("pack-crashed", ""), ("fetch-failed", "")])
 def test_the_pathless_identity_refuses_what_is_not_the_engines(category: Any,
                                                                  entry: Any) -> None:
     with pytest.raises(hc.FindingRefused) as refused:

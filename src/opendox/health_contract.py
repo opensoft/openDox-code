@@ -366,8 +366,9 @@ _CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\ud800-\udfff]")
 _NOT_ONE_LINE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")
 _NUL = "\x00"
 _NUL_DETAIL = "holds U+0000, which a stored finding cannot carry (jsonb refuses it)"
-_INSTALL_DETAIL = ("is not empty, though a run raises ONE install-level finding of its "
-                   "category, never one per entry")
+_ENTRY_FORM_DETAIL = ("does not take its category's form: a pack's id for a category "
+                      "against a pack, and empty for an install-level category or a "
+                      "collision")
 
 
 class Violation(NamedTuple):
@@ -464,8 +465,8 @@ def pathless_identity(category: str, entry: str = "") -> dict[str, str]:
             rule, _AT_ENTRY,
             "the entry is a manifest entry's id, of lowercase letters, digits and "
             f"hyphens and at most {STRING_MAX} characters, or the empty string"))
-    if entry and category in INSTALL_CATEGORIES:
-        raise FindingRefused(Violation(rule, _AT_ENTRY, _INSTALL_DETAIL))
+    if _entry_breaks_form(category, entry):
+        raise FindingRefused(Violation(rule, _AT_ENTRY, _ENTRY_FORM_DETAIL))
     return {"category": category, "entry": entry}
 
 
@@ -690,8 +691,21 @@ def _pathless_form(identity: dict[Any, Any]) -> Iterator[Violation]:
     if not isinstance(entry, str) or not _ENTRY.fullmatch(entry):
         yield Violation(rule, _AT_ENTRY, "is neither a manifest entry's id nor the "
                         "empty string")
-    elif entry and known and category in INSTALL_CATEGORIES:
-        yield Violation(rule, _AT_ENTRY, _INSTALL_DETAIL)
+    elif known and _entry_breaks_form(category, entry):
+        yield Violation(rule, _AT_ENTRY, _ENTRY_FORM_DETAIL)
+
+
+def _entry_breaks_form(category: str, entry: str) -> bool:
+    """Whether a pathless identity's entry breaks the form its category calls
+    for (the holder's ruling on lane 3's MINOR at `c620dacd`, refining
+    `6072197564` (e)). A category against a pack (`ENTRY_CATEGORIES`) names
+    that pack's entry, so its entry is never empty; an install-level category
+    and a collision's re-raise take entry ""; `entry-refused` takes either."""
+    if category in ENTRY_CATEGORIES:
+        return not entry
+    if category in INSTALL_CATEGORIES or category == IDENTITY_COLLISION:
+        return entry != ""
+    return False
 
 
 def _collision_form(identity: dict[Any, Any]) -> Iterator[Violation]:
