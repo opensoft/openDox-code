@@ -1352,8 +1352,8 @@ def _canonical_digest(entry_id: Any) -> str:
         text = json.dumps(entry_id, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
                           allow_nan=True, default=str)
     except (TypeError, ValueError):
-        text = repr(entry_id)
-    return "sha256-" + hashlib.sha256(text.encode("ascii", "backslashreplace")).hexdigest()
+        text = ascii(entry_id)
+    return "sha256-" + hashlib.sha256(text.encode("ascii")).hexdigest()
 
 
 _SELF: list[Any] = []
@@ -1380,6 +1380,11 @@ _REFUSED_IDS = {
         {1: "caf\u00e9", "b": 2},
         "sha256-" + hashlib.sha256(b"{1: 'caf\\xe9', 'b': 2}").hexdigest()),
     "a self-referencing list": (_SELF, "sha256-" + hashlib.sha256(b"[[...]]").hexdigest()),
+    # the holder's 6088732352 (b): the fallback is ascii(), so a non-ASCII key
+    # in a mixed-type mapping digests its escaped spelling
+    "a non-ASCII key among mixed-type keys": (
+        {"cl\u00e9": 1, 2: "b"},
+        "sha256-" + hashlib.sha256(b"{'cl\\xe9': 1, 2: 'b'}").hexdigest()),
 }
 
 
@@ -1388,7 +1393,8 @@ def test_refused_entry_builds_entry_refuseds_entry(name: str) -> None:
     """The holder's `6086098003` item 4 and `6088484643`: "" for no id, the id
     as written when it is `[a-z0-9-]+` of at most 200 characters, and otherwise
     `sha256-` and the SHA-256 of its canonical text, its JSON with sorted keys,
-    no whitespace and ASCII escapes (`repr()` when that raises). The entry is
+    no whitespace and ASCII escapes (`ascii()` when that raises, `6088732352`
+    (b)). The entry is
     one `pathless_identity()` admits, never truncated, and never a refusal."""
     entry_id, entry = _REFUSED_IDS[name]
     assert hc.refused_entry(entry_id) == entry

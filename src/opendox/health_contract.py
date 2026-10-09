@@ -508,7 +508,9 @@ def refused_entry(entry_id: Any) -> str:
       `json.dumps(entry_id, sort_keys=True, separators=(",", ":"),
       ensure_ascii=True, allow_nan=True, default=str)`; when that raises (a
       mapping whose keys JSON cannot spell or sort, a self-referencing value),
-      it is `repr(entry_id)`, with any non-ASCII character backslash-escaped.
+      it is `ascii(entry_id)`, Python's `repr()` with every non-ASCII
+      character escaped (the holder's `6088732352` (b)), so the text is always
+      ASCII and the digest never raises.
       A value nested past Python's recursion limit, which neither spelling
       reaches, takes the fixed text `<nested past the recursion limit>`.
 
@@ -525,10 +527,10 @@ def refused_entry(entry_id: Any) -> str:
                           ensure_ascii=True, allow_nan=True, default=str)
     except (TypeError, ValueError, RecursionError):
         try:
-            text = repr(entry_id)
+            text = ascii(entry_id)
         except RecursionError:
             text = "<nested past the recursion limit>"
-    digest = hashlib.sha256(text.encode("ascii", "backslashreplace")).hexdigest()
+    digest = hashlib.sha256(text.encode("ascii")).hexdigest()
     return f"sha256-{digest}"
 
 
