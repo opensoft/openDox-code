@@ -29,6 +29,7 @@ import pytest
 
 from opendox.runtime import identity
 from opendox.runtime.health_store import (
+    MAX_JSON_DEPTH,
     HealthStore,
     canonical_identity,
 )
@@ -853,3 +854,130 @@ def test_pids_max_admits_null_and_every_non_negative_integer(
         database: Any, pids_max: str) -> None:
     assert _raw(database, _RAW_RUN, _raw_run(
         sandbox=f'{{"live": true, "pids_max": {pids_max}}}')) is None
+
+
+# ---------------------------------------------------------------------------
+# Copilot's review of #99 at `fbf9e77e`, and the holder's ruling on it (#656
+# 6081875839): `RecursionError` never leaves the store
+# ---------------------------------------------------------------------------
+
+#: A string inside every unstorable value: a refusal that quoted the value
+#: would carry it.
+_NOT_QUOTED = "SENTINEL-NOT-QUOTED"
+
+
+def _cyclic_mapping() -> dict[str, Any]:
+    loop: dict[str, Any] = {"note": _NOT_QUOTED}
+    loop["self"] = loop
+    return loop
+
+
+def _cyclic_list() -> list[Any]:
+    loop: list[Any] = [_NOT_QUOTED]
+    loop.append(loop)
+    return loop
+
+
+def _nested(levels: int) -> list[Any]:
+    """`levels` lists, each the only item of the one around it."""
+    root: list[Any] = [_NOT_QUOTED]
+    for _ in range(levels - 1):
+        root = [root]
+    return root
+
+
+#: Every field the store keeps as JSON, and the name its refusal must give.
+_JSON_FIELDS = {
+    "identity": "finding 0's identity",
+    "evidence": "finding 0's evidence",
+    "locator": "finding 0's locator",
+    "pack_pins": "pack_pins",
+    "sandbox": "sandbox",
+}
+
+
+def _inside(field: str, value: Any) -> dict[str, Any]:
+    """`record_run`'s overrides that put `value` at level 2 of `field`, under
+    a key of the field's own object (level 1)."""
+    if field == "pack_pins":
+        return {"pack_pins": {"opendox": {"version": "0.2.0"}, "inner": value}}
+    if field == "sandbox":
+        return {"sandbox": {"live": True, "pids_max": None, "inner": value}}
+    return {"findings": [_finding(**{field: {"target": "a", "inner": value}})]}
+
+
+#: The unstorable shapes, and what the refusal says of each. `over-deep` puts
+#: the deepest list at level `MAX_JSON_DEPTH + 1`; `far-too-deep` is deeper
+#: than CPython's own `json` encoder goes (it raises `RecursionError` at about
+#: 10,000 levels, measured), so only the walk can name it.
+_UNSTORABLE_SHAPES = [
+    (_cyclic_mapping, "contains itself (a cycle)"),
+    (_cyclic_list, "contains itself (a cycle)"),
+    (lambda: _nested(MAX_JSON_DEPTH), f"nests deeper than {MAX_JSON_DEPTH} levels"),
+    (lambda: _nested(20_000), f"nests deeper than {MAX_JSON_DEPTH} levels"),
+]
+
+
+@pytest.mark.parametrize("field", list(_JSON_FIELDS))
+@pytest.mark.parametrize(("make", "reason"), _UNSTORABLE_SHAPES,
+                         ids=["cyclic-mapping", "cyclic-list", "over-deep",
+                              "far-too-deep"])
+def test_an_unstorable_value_is_refused_by_name_and_writes_nothing(
+        database: Any, field: str, make: Any, reason: str) -> None:
+    """The holder, #656 `6081875839`: a cyclic value, or one nested deeper
+    than the walk follows, in any field the store keeps as JSON, is a
+    `RefusedError` naming the field, raised before any statement, quoting
+    nothing, and writing no row.
+
+    Before this, the recursive NUL walk let each of them escape as
+    `RecursionError` (a cycle at once, a nesting past Python's recursion
+    limit), and `json.dumps`, which had refused a cycle by name, never ran.
+    """
+    over = _inside(field, make())
+    with pytest.raises(RefusedError) as caught:
+        HealthStore(_NoStatement()).record_run(**_run_kwargs(**over))
+    message = str(caught.value)
+    assert f"{_JSON_FIELDS[field]} {reason}" in message, message
+    assert "before any statement" in message, message
+    assert _NOT_QUOTED not in message, message
+    with pytest.raises(RefusedError) as caught:
+        _record(database, **over)
+    assert f"{_JSON_FIELDS[field]} {reason}" in str(caught.value)
+    assert _count(database, "health_runs") == 0
+    assert _count(database, "health_findings") == 0
+
+
+@pytest.mark.parametrize("field", list(_JSON_FIELDS))
+def test_a_value_nested_exactly_to_the_bound_is_kept_and_reads_back(
+        database: Any, field: str) -> None:
+    """The bound is `MAX_JSON_DEPTH` and not one level less: a field whose
+    deepest list is at level `MAX_JSON_DEPTH` is stored and reads back equal,
+    through `jsonb` and the driver's JSON decoder. The run's findings are
+    dumped whole after each field was walked, so the list they travel in does
+    not count against any one field's depth."""
+    over = _inside(field, _nested(MAX_JSON_DEPTH - 1))
+    run = _record(database, **over)
+    with database.connection() as conn:
+        store = HealthStore(conn)
+        if field in ("pack_pins", "sandbox"):
+            assert getattr(store.get_run(run.run_id), field) == over[field]
+            return
+        sent = over["findings"][0]
+        stored = store.get_finding(run_id=run.run_id, finding_id=sent["id"])
+    assert getattr(stored, field) == sent[field]
+
+
+def test_a_value_shared_by_two_branches_is_not_a_cycle(database: Any) -> None:
+    """A walk that remembered every container it had seen, rather than the
+    ones on its path, would call a shared value a cycle. `json.dumps` writes
+    it twice, and so does the store."""
+    shared = {"paths": ["a.md", "b.md"]}
+    sent = _finding(evidence={"first": shared, "second": shared})
+    run = _record(database, findings=[sent],
+                  pack_pins={"opendox": {"version": "0.2.0"},
+                             "twice": [shared, shared]})
+    with database.connection() as conn:
+        store = HealthStore(conn)
+        stored = store.get_finding(run_id=run.run_id, finding_id=sent["id"])
+        assert store.get_run(run.run_id).pack_pins["twice"] == [shared, shared]
+    assert stored.evidence == {"first": shared, "second": shared}

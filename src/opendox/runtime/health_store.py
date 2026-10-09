@@ -18,6 +18,13 @@ a column that silently dropped it. The FIELD BOUNDS — the id grammar,
 which the engine applies before it calls here; this store is not a second
 spelling of them, and imports nothing from it.
 
+WHAT POSTGRESQL OR JSON CANNOT KEEP IS REFUSED BY NAME, before any statement:
+a NUL anywhere in a field, a value that contains itself, and a value nested
+deeper than `MAX_JSON_DEPTH` (the holder, opensoft/openxFactory#656 comments
+6072086385 item 4 and 6081875839). These are not field bounds but what the
+store can hold at all, so the driver's NUL errors and `RecursionError` never
+leave it.
+
 PROVENANCE IS REFUSED HERE AND IN THE SCHEMA (box 15.7). A finding with no
 `pack_id` or no `pack_version` — absent, null or empty — is refused by
 `record_run` before any statement runs, and `0003_`'s `not null` and
@@ -87,6 +94,16 @@ OPTIONAL_FINDING_FIELDS: tuple[str, ...] = ("locator",)
 #: The provenance a finding must carry (box 15.7), refused by name.
 PROVENANCE_FIELDS: tuple[str, ...] = ("pack_id", "pack_version")
 
+#: How deep a JSON field the store keeps may nest, counting the field's own
+#: object as level 1. The data model's shapes nest two or three levels (an
+#: `identity` key, a locator span, `pack_pins`' per-pack object, a list of
+#: colliding paths in `evidence`). Every reader of the stored value meets a
+#: limit far deeper than this: CPython 3.12's `json` encoder and decoder raise
+#: `RecursionError` at about 10,000 levels (measured), and the decoder is what
+#: reads a `jsonb` column back. A deeper value is refused by name before any
+#: statement (the holder, opensoft/openxFactory#656 comment 6081875839).
+MAX_JSON_DEPTH = 64
+
 #: The required fields whose columns are `text`. `jsonb_to_recordset` would
 #: turn a JSON number into text without a word, so a non-string is refused here.
 _TEXT_FINDING_FIELDS: tuple[str, ...] = tuple(
@@ -117,46 +134,93 @@ _FINDING_RECORD = (
     "baseline_class text, message text, evidence jsonb")
 
 
-def _carries_nul(value: Any) -> bool:
-    """Whether U+0000 (NUL) is anywhere in `value`: a string, a key, or nested."""
-    if isinstance(value, str):
-        return "\x00" in value
-    if isinstance(value, Mapping):
-        return any(_carries_nul(key) or _carries_nul(item)
-                   for key, item in value.items())
-    if isinstance(value, (list, tuple)):
-        return any(_carries_nul(item) for item in value)
-    return False
+#: Why a value cannot be stored, by the name `_unstorable` gives it.
+_UNSTORABLE: dict[str, str] = {
+    "nul": (
+        "carries U+0000 (NUL), which PostgreSQL can store in neither text nor "
+        "jsonb"),
+    "cycle": (
+        "contains itself (a cycle), which JSON cannot represent"),
+    "depth": (
+        f"nests deeper than {MAX_JSON_DEPTH} levels, which is as deep as this "
+        "store follows a value"),
+}
 
 
-def _refuse_nul(value: Any, what: str) -> None:
-    """Refuse U+0000 anywhere in `value`, BY NAME and before any statement.
+def _unstorable(value: Any) -> str | None:
+    """What makes `value` unstorable (a key of `_UNSTORABLE`), or None.
 
-    PostgreSQL stores a NUL in neither `jsonb` (SQLSTATE 22P05, raised by the
-    server, whose message quotes the JSON around it) nor a `text` parameter (a
-    client-side `DataError`), both measured on postgres 16.15. Without this the
-    store raised a DRIVER error for a value it could have judged, and the
-    jsonb one put a slice of the finding's text in the exception (lane 3's
-    REVIEW-W1 of T042, MINOR 1). The holder, opensoft/openxFactory#656 comment
-    6072086385 item 4: the store refuses it itself, as a `RefusedError` that
-    names the field and quotes nothing, as defence in depth behind the contract
-    module's own refusal.
+    One walk over a string, or a mapping's keys and values, or a list's items,
+    at any depth: a NUL anywhere, a container that contains itself, or a
+    container nested deeper than `MAX_JSON_DEPTH`. The walk is ITERATIVE and
+    keeps only the containers on its current path, so no input can make it
+    recurse, a cycle is named rather than followed, and a value shared by two
+    branches (which is not a cycle, and which `json.dumps` writes twice) is
+    admitted (the holder, opensoft/openxFactory#656 comment 6081875839).
     """
-    if _carries_nul(value):
+    pending: list[tuple[Any, int, bool]] = [(value, 1, False)]
+    on_path: set[int] = set()
+    while pending:
+        item, depth, leaving = pending.pop()
+        if leaving:
+            on_path.discard(id(item))
+            continue
+        if isinstance(item, str):
+            if "\x00" in item:
+                return "nul"
+            continue
+        if isinstance(item, Mapping):
+            children = [part for pair in item.items() for part in pair]
+        elif isinstance(item, (list, tuple)):
+            children = list(item)
+        else:
+            continue
+        if id(item) in on_path:
+            return "cycle"
+        if depth > MAX_JSON_DEPTH:
+            return "depth"
+        on_path.add(id(item))
+        pending.append((item, depth, True))
+        pending.extend((child, depth + 1, False) for child in children)
+    return None
+
+
+def _refuse_unstorable(value: Any, what: str) -> None:
+    """Refuse what PostgreSQL or JSON cannot keep, BY NAME, before any statement.
+
+    A NUL: PostgreSQL stores one in neither `jsonb` (SQLSTATE 22P05, raised by
+    the server, whose message quotes the JSON around it) nor a `text`
+    parameter (a client-side `DataError`), both measured on postgres 16.15.
+    Without this the store raised a DRIVER error for a value it could have
+    judged, and the jsonb one put a slice of the finding's text in the
+    exception (lane 3's REVIEW-W1 of T042, MINOR 1). The holder,
+    opensoft/openxFactory#656 comment 6072086385 item 4: the store refuses it
+    itself, as a `RefusedError` that names the field and quotes nothing, as
+    defence in depth behind the contract module's own refusal.
+
+    A cycle, or a value nested past `MAX_JSON_DEPTH`: the holder,
+    opensoft/openxFactory#656 comment 6081875839 (Copilot's review of
+    openDox-code#99 at `fbf9e77e`). `json.dumps` refused a cycle by name
+    before the NUL walk was put in front of it, and that walk, recursive,
+    then let a cycle or a deep value escape as `RecursionError`. Both are a
+    `RefusedError` naming the field again, and `RecursionError` never leaves
+    the store.
+    """
+    reason = _unstorable(value)
+    if reason is not None:
         raise RefusedError(
-            f"{what} carries U+0000 (NUL), which PostgreSQL can store in "
-            "neither text nor jsonb; the store refuses it before any "
+            f"{what} {_UNSTORABLE[reason]}; the store refuses it before any "
             "statement, and the value is not repeated here")
 
 
-def _json_text(value: Any, what: str) -> str:
+def _dumps(value: Any, what: str) -> str:
     """Strict JSON text for a `%s::jsonb` parameter, or a refusal naming `what`.
 
     `allow_nan=False`, because `NaN` is Python's JSON and not JSON: Postgres
-    would refuse the cast, and the refusal belongs here, by name. A NUL is
-    refused here too (`_refuse_nul`), in a key or a value at any depth.
+    would refuse the cast, and the refusal belongs here, by name. It does NOT
+    walk `value`: `_json_text` walks a field first, and the run's findings are
+    dumped whole only after `_finding_record` walked each of their fields.
     """
-    _refuse_nul(value, what)
     try:
         return json.dumps(value, sort_keys=True, separators=(",", ":"),
                           ensure_ascii=False, allow_nan=False)
@@ -164,6 +228,13 @@ def _json_text(value: Any, what: str) -> str:
         raise RefusedError(
             f"{what} is not JSON this store can keep (a value JSON cannot "
             "represent); the value is not repeated here") from exc
+
+
+def _json_text(value: Any, what: str) -> str:
+    """One field's strict JSON text, walked first (`_refuse_unstorable`): a NUL
+    in a key or a value, a cycle and an over-deep value are refused by name."""
+    _refuse_unstorable(value, what)
+    return _dumps(value, what)
 
 
 def canonical_identity(identity: Mapping[str, Any]) -> str:
@@ -364,7 +435,7 @@ def _finding_record(index: int, finding: Any) -> dict[str, Any]:
             f"finding {index}'s {not_text} must be strings; the store does not "
             "turn another type into text for them")
     for field in (*REQUIRED_FINDING_FIELDS, *OPTIONAL_FINDING_FIELDS):
-        _refuse_nul(finding.get(field), f"finding {index}'s {field}")
+        _refuse_unstorable(finding.get(field), f"finding {index}'s {field}")
     evidence = finding["evidence"]
     if not isinstance(evidence, Mapping):
         raise RefusedError(
@@ -422,12 +493,15 @@ class HealthStore:
                             ("baseline_branch", baseline_branch),
                             ("outcome", outcome),
                             ("export_commit", export_commit)):
-            _refuse_nul(value, name)
+            _refuse_unstorable(value, name)
         records = [_finding_record(index, finding)
                    for index, finding in enumerate(findings)]
         pins_text = _json_text(dict(pack_pins), "pack_pins")
         sandbox_text = _json_text(dict(sandbox), "sandbox")
-        findings_text = _json_text(records, "the run's findings")
+        # Every field of every record was walked by `_finding_record`, so the
+        # records are dumped, not walked again: a walk from the list down
+        # would count two levels more than each field's own.
+        findings_text = _dumps(records, "the run's findings")
         run_id = str(uuid.uuid4())
         row = _refused_by_the_schema(
             lambda: self._conn.execute(
