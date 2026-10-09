@@ -116,7 +116,13 @@ holder's rulings `openxFactory#656` `6069024023`, items 1 and 2).
   the schema requires, `{category: <the original's kind>, entry: <its entry,
   or "">}` (option (D)). T046 raises it.
 * `ENGINE_KINDS` are the kinds only the engine raises, which T045 refuses in a
-  pack's declaration.
+  pack's declaration: the categories, `identity-collision`, and the PATHED
+  `uncited-disappearance` and `refused-patch` (`6086098003` item 1).
+* `refused_entry()` builds `entry-refused`'s `identity.entry` from a refused
+  entry's id (`6086098003` item 4, `6088484643`): "" for no id, the id as
+  written when it is a pack-id-shaped name of at most 200 characters, and
+  otherwise `sha256-` and the digest of its canonical text. That digest is no
+  finding id: every id is still `finding_id()`'s.
 * `IGNORED_FIELDS` and `STAMPED_FIELDS` split the fields a pack does not own
   by what happens to a pack's value (`6072197564` (d)): its `id` is ignored,
   and `pack_id`, `pack_version` and `baseline_class` are the engine's.
@@ -164,6 +170,7 @@ __all__ = [
     "OPTIONAL_FIELDS",
     "PATHLESS_CATEGORIES",
     "REFERENCE_RULES",
+    "REFUSED_PATCH",
     "REQUIRED_FIELDS",
     "RESOLUTION_CLASSES",
     "SEVERITIES",
@@ -182,6 +189,7 @@ __all__ = [
     "identity_json",
     "make_finding",
     "pathless_identity",
+    "refused_entry",
     "to_json",
     "violations",
 ]
@@ -216,6 +224,12 @@ IDENTITY_COLLISION = "identity-collision"
 #: The kind of the engine's once-only re-raise of an uncited disappearance
 #: (data-model.md § Baseline classes; T046 raises it).
 UNCITED_DISAPPEARANCE = "uncited-disappearance"
+
+#: The kind of the engine's finding against a pack whose patch it refused,
+#: naming `refused_patch` and `reason` (T049; data-model.md:209, :223, :369).
+#: A PATHED engine kind, like `uncited-disappearance`, and no category (the
+#: holder's `6086098003` item 1).
+REFUSED_PATCH = "refused-patch"
 
 #: A finding's fields, in the schema's order.
 REQUIRED_FIELDS: tuple[str, ...] = (
@@ -306,7 +320,8 @@ ENTRY_CATEGORIES: frozenset[str] = frozenset({
 #: re-raise of a disappearance. A pack declares none of them (T045 refuses
 #: one; the holder's `6069024023` item 1).
 ENGINE_KINDS: frozenset[str] = frozenset(CATEGORIES) | {IDENTITY_COLLISION,
-                                                       UNCITED_DISAPPEARANCE}
+                                                       UNCITED_DISAPPEARANCE,
+                                                       REFUSED_PATCH}
 
 #: The install-level categories: a run raises ONE such finding, never one per
 #: entry (data-model.md:382, "ONE install-level finding"; R2Q16 (a)), so its
@@ -477,6 +492,44 @@ def collision_identity(collided_id: str) -> dict[str, str]:
     if found:
         raise FindingRefused(found[0])
     return {"collided_id": collided_id}
+
+
+def refused_entry(entry_id: Any) -> str:
+    """`entry-refused`'s `identity.entry` for a refused manifest entry's id
+    (the holder's `6086098003` item 4 and `6088484643`). Deterministic, total
+    over every value the manifest's YAML parser yields, and it never raises.
+
+    * No id (`None`, as the parser gives an absent or null `id`): "".
+    * A string matching `[a-z0-9-]+` of at most `STRING_MAX` characters: the id
+      as written.
+    * Anything else (a malformed or over-long string, one carrying U+0000, a
+      non-string): `sha256-` and the lowercase SHA-256 hex of the ASCII bytes
+      of its CANONICAL TEXT, 71 characters. The canonical text is
+      `json.dumps(entry_id, sort_keys=True, separators=(",", ":"),
+      ensure_ascii=True, allow_nan=True, default=str)`; when that raises (a
+      mapping whose keys JSON cannot spell or sort, a self-referencing value),
+      it is `repr(entry_id)`, with any non-ASCII character backslash-escaped.
+      A value nested past Python's recursion limit, which neither spelling
+      reaches, takes the fixed text `<nested past the recursion limit>`.
+
+    The digest is no finding id (every id is `finding_id()`'s); it keeps a
+    refused id out of the stored identity while keeping two distinct ids
+    apart."""
+    if entry_id is None:
+        return ""
+    if (isinstance(entry_id, str) and len(entry_id) <= STRING_MAX
+            and _NAME.fullmatch(entry_id)):
+        return entry_id
+    try:
+        text = json.dumps(entry_id, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=True, allow_nan=True, default=str)
+    except (TypeError, ValueError, RecursionError):
+        try:
+            text = repr(entry_id)
+        except RecursionError:
+            text = "<nested past the recursion limit>"
+    digest = hashlib.sha256(text.encode("ascii", "backslashreplace")).hexdigest()
+    return f"sha256-{digest}"
 
 
 def disappearance_identity(original: dict[str, Any]) -> dict[str, str]:
@@ -700,11 +753,13 @@ def _entry_breaks_form(category: str, entry: str) -> bool:
     for (the holder's `6073087924`, on lane 3's MINOR at `c620dacd`, refining
     `6072197564` (e)), so `check_finding()` admits exactly what
     `engine_finding()` builds. A category against a pack (`ENTRY_CATEGORIES`)
-    names that pack's entry, so its entry is never empty; an install-level
-    category and a collision's re-raise take entry ""; `entry-refused` takes
-    either."""
+    names that pack's entry, which is that pack's id: never empty, never the
+    reserved `opendox` (contracts/health-packs-manifest.md:24) and a name of 1
+    to `NAME_MAX` characters (the holder's `6082100803`; the alphabet is
+    checked before this). An install-level category and a collision's re-raise
+    take entry ""; `entry-refused` takes either (`refused_entry()`)."""
     if category in ENTRY_CATEGORIES:
-        return not entry
+        return entry in ("", OPENDOX) or len(entry) > NAME_MAX
     if category in INSTALL_CATEGORIES or category == IDENTITY_COLLISION:
         return entry != ""
     return False
@@ -756,7 +811,8 @@ def _locator(value: Any) -> Iterator[Violation]:
         if key not in value:
             continue
         line = value[key]
-        if isinstance(line, int) and not isinstance(line, bool) and not _writable(line):
+        # a bool is an int Python can always write; `_line()` refuses it next
+        if isinstance(line, int) and not _writable(line):
             yield Violation(NOT_JSON, f"/locator/{key}", "is an integer too long to write "
                             "as text")
         elif not _line(line):
@@ -945,15 +1001,7 @@ def engine_finding(category: str, entry: str = "", *, pack_version: str, severit
     in `evidence`, so a run raises one such finding per category and entry,
     and it keeps one id across runs."""
     identity = pathless_identity(category, entry)
-    pack_id = OPENDOX
-    if category in ENTRY_CATEGORIES:
-        if entry in ("", OPENDOX):
-            raise FindingRefused(Violation(
-                "pathless-identity-is-category-and-entry", _AT_ENTRY,
-                f"a {category} finding is against the pack its manifest entry "
-                f"launched, so its entry is that pack's id, never empty and never "
-                f"{OPENDOX}"))
-        pack_id = entry
+    pack_id = entry if category in ENTRY_CATEGORIES else OPENDOX
     return make_finding(kind=category, pack_id=pack_id, pack_version=pack_version, path="",
                         identity=identity, severity=severity, resolution_class=HUMAN_ONLY,
                         message=message, evidence=evidence)

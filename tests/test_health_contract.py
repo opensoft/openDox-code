@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import datetime
 import hashlib
 import json
 import math
@@ -926,7 +927,7 @@ def test_evidence_of_any_size_is_judged_never_raised() -> None:
     ("/etc/passwd", False), ("C:notes.md", False), ("c:/notes.md", False),
     ("notes\\plan.md", False), ("../plan.md", False), ("notes/../plan.md", False),
     ("notes/..", False), ("..", False), ("a\nb", False), ("a\x7fb", False),
-    ("a\udc80b", False), (None, False), (3, False),
+    ("a\udc80b", False), ("a\x00b", False), (None, False), (3, False),
 ])
 def test_the_path_is_corpus_relative(path: Any, admitted: bool) -> None:
     finding = _example("orphan")
@@ -1169,7 +1170,8 @@ def test_the_categories_are_the_ruled_ones_and_names() -> None:
     assert set(hc.CATEGORIES) - hc.ENTRY_CATEGORIES == AGAINST_OPENDOX
     assert hc.ENTRY_CATEGORIES < set(hc.CATEGORIES)
     assert hc.ENGINE_KINDS == set(RULED_CATEGORIES) | {"identity-collision",
-                                                      "uncited-disappearance"}
+                                                      "uncited-disappearance",
+                                                      "refused-patch"}
     assert hc.INSTALL_CATEGORIES == INSTALL_LEVEL
     assert hc.PATHLESS_CATEGORIES == set(RULED_CATEGORIES) | {"identity-collision"}
 
@@ -1260,6 +1262,12 @@ def test_a_pathless_identity_names_an_engine_category_or_a_collision(category: s
 @pytest.mark.parametrize("category, entry, admitted", [
     *[(category, "", False) for category in sorted(AGAINST_A_PACK)],
     *[(category, "house-style", True) for category in sorted(AGAINST_A_PACK)],
+    # the holder's 6082100803: the reserved `opendox`, and the 40-character name
+    *[(category, "opendox", False) for category in sorted(AGAINST_A_PACK)],
+    *[(category, "p" * 41, False) for category in sorted(AGAINST_A_PACK)],
+    *[(category, "p" * 40, True) for category in sorted(AGAINST_A_PACK)],
+    ("entry-refused", "opendox", True),
+    ("entry-refused", "p" * 200, True),
     ("identity-collision", "house-style", False),
     ("identity-collision", "", True),
     *[(category, "house-style", False) for category in sorted(INSTALL_LEVEL)],
@@ -1285,13 +1293,132 @@ def test_a_pathless_entry_takes_its_categorys_form(category: str, entry: str,
         assert found == [("pathless-identity-is-category-and-entry", "/identity/entry")]
 
 
+#: Entries the exactness probe tries for every category.
+_PROBE_ENTRIES = ["", "opendox", "house-style", "p" * 40, "p" * 41, "p" * 200, "p" * 201,
+                  "House", "house style", "-", "a\x00b"]
+
+
+def test_check_finding_admits_exactly_what_engine_finding_builds() -> None:
+    """Lane 3's exactness probe (REVIEW-W1 MINOR at `4cc065ad`; the holder's
+    `6082100803`): for every category and every probed entry, `engine_finding()`
+    builds the finding exactly when `check_finding()` admits its identity in a
+    re-raise, whose `pack_id` is `opendox`. It found 21 mismatches at
+    `4cc065ad`; it reads 0 now."""
+    mismatches = []
+    for category in hc.CATEGORIES:
+        for entry in _PROBE_ENTRIES:
+            try:
+                hc.engine_finding(category, entry, pack_version="1.0.0", severity="error",
+                                  message="the probe")
+                built = True
+            except hc.FindingRefused:
+                built = False
+            identity = {"category": category, "entry": entry}
+            reraise = {**_example("no-sandbox"), "kind": "uncited-disappearance",
+                       "identity": identity,
+                       "id": _independent_id("opendox", "uncited-disappearance", "", identity)}
+            admitted = not hc.violations(reraise)
+            if built != admitted:
+                mismatches.append((category, entry[:12], built, admitted))
+    assert mismatches == []
+
+
+def test_refused_patch_is_a_pathed_engine_kind() -> None:
+    """The holder's `6086098003` item 1: only the engine raises `refused-patch`,
+    so T045 refuses a pack declaring it. It is PATHED, like
+    `uncited-disappearance`: no category, and no pathless identity names it."""
+    assert hc.REFUSED_PATCH == "refused-patch"
+    assert hc.REFUSED_PATCH in hc.ENGINE_KINDS
+    assert hc.REFUSED_PATCH not in hc.CATEGORIES
+    assert hc.REFUSED_PATCH not in hc.PATHLESS_CATEGORIES
+    finding = hc.make_finding(
+        kind=hc.REFUSED_PATCH, pack_id="house-style", pack_version="1.4.0",
+        path="notes/plan.md", identity={"refused_patch": "house-style.heading-case.1"},
+        severity="error", resolution_class="human-only",
+        message="the engine refused the pack's patch",
+        evidence={"reason": "it reaches outside its path"})
+    assert hc.violations(finding) == []
+    identity = {"category": "refused-patch", "entry": ""}
+    pathless = {**_example("no-sandbox"), "kind": "uncited-disappearance",
+                "identity": identity,
+                "id": _independent_id("opendox", "uncited-disappearance", "", identity)}
+    assert [(v.rule, v.where) for v in hc.violations(pathless)] == [
+        ("pathless-identity-is-category-and-entry", "/identity/category")]
+
+
+def _canonical_digest(entry_id: Any) -> str:
+    """The holder's `6088484643`, spelled independently of the module."""
+    try:
+        text = json.dumps(entry_id, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                          allow_nan=True, default=str)
+    except (TypeError, ValueError):
+        text = repr(entry_id)
+    return "sha256-" + hashlib.sha256(text.encode("ascii", "backslashreplace")).hexdigest()
+
+
+_SELF: list[Any] = []
+_SELF.append(_SELF)
+
+#: Each refused id, and the entry `refused_entry()` gives it.
+_REFUSED_IDS = {
+    "an absent id": (None, ""),
+    "a conforming id": ("house-style", "house-style"),
+    "a conforming id of 200 characters": ("p" * 200, "p" * 200),
+    "an uppercase id": ("House-Style", _canonical_digest("House-Style")),
+    "a spaced id": ("house style", _canonical_digest("house style")),
+    "an id with U+0000": ("house\x00style", _canonical_digest("house\x00style")),
+    "an empty string": ("", _canonical_digest("")),
+    "a non-string id": (5, _canonical_digest(5)),
+    "a boolean id": (True, _canonical_digest(True)),
+    "a float id, NaN": (float("nan"), "sha256-" + hashlib.sha256(b"NaN").hexdigest()),
+    "a date id": (datetime.date(2026, 10, 9), _canonical_digest("2026-10-09")),
+    "a list id": (["a", 1], _canonical_digest(["a", 1])),
+    "a 201-character id": ("p" * 201, _canonical_digest("p" * 201)),
+    "a mapping with mixed-type keys": (
+        {1: "a", "b": 2}, "sha256-" + hashlib.sha256(repr({1: "a", "b": 2}).encode()).hexdigest()),
+    "mixed-type keys with non-ASCII text": (
+        {1: "caf\u00e9", "b": 2},
+        "sha256-" + hashlib.sha256(b"{1: 'caf\\xe9', 'b': 2}").hexdigest()),
+    "a self-referencing list": (_SELF, "sha256-" + hashlib.sha256(b"[[...]]").hexdigest()),
+}
+
+
+@pytest.mark.parametrize("name", list(_REFUSED_IDS))
+def test_refused_entry_builds_entry_refuseds_entry(name: str) -> None:
+    """The holder's `6086098003` item 4 and `6088484643`: "" for no id, the id
+    as written when it is `[a-z0-9-]+` of at most 200 characters, and otherwise
+    `sha256-` and the SHA-256 of its canonical text, its JSON with sorted keys,
+    no whitespace and ASCII escapes (`repr()` when that raises). The entry is
+    one `pathless_identity()` admits, never truncated, and never a refusal."""
+    entry_id, entry = _REFUSED_IDS[name]
+    assert hc.refused_entry(entry_id) == entry
+    assert hc.refused_entry(entry_id) == entry  # deterministic
+    assert hc.pathless_identity("entry-refused", entry) == {"category": "entry-refused",
+                                                           "entry": entry}
+
+
+def test_refused_entry_keeps_distinct_ids_apart_and_never_raises() -> None:
+    entries = [hc.refused_entry(entry_id) for entry_id, _ in _REFUSED_IDS.values()]
+    assert len(set(entries)) == len(entries)
+    deep: Any = "x"
+    for _ in range(sys.getrecursionlimit() * 3):
+        deep = [deep]
+    deep_entry = hc.refused_entry(deep)
+    assert re.fullmatch(r"sha256-[0-9a-f]{64}", deep_entry)
+    assert hc.refused_entry({"b": 1, "a": [2, 1]}) == hc.refused_entry({"a": [2, 1], "b": 1})
+
+
 def test_an_engine_finding_against_a_41_character_pack_is_refused() -> None:
+    """The holder's `6082100803`: a per-entry category's entry is a pack id of
+    1 to 40 characters, judged at the identity, so `check_finding()` and
+    `engine_finding()` refuse the same entries."""
     hc.engine_finding("pack-crashed", "p" * 40, pack_version="1", severity="error",
                       message="the pack crashed")
     with pytest.raises(hc.FindingRefused) as refused:
         hc.engine_finding("pack-crashed", "p" * 41, pack_version="1", severity="error",
                           message="the pack crashed")
-    assert refused.value.rule == "name-is-at-most-40-characters"
+    assert refused.value.rule == "pathless-identity-is-category-and-entry"
+    assert refused.value.where == "/identity/entry"
 
 
 def test_engine_finding_rebuilds_openDox_specs_no_sandbox_example() -> None:
