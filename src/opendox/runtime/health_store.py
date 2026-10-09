@@ -147,6 +147,16 @@ _UNSTORABLE: dict[str, str] = {
 }
 
 
+def _json_children(item: Any) -> list[Any] | None:
+    """What the walk visits under `item`: a mapping's keys and values, or a
+    list's (or tuple's) items. None for a value that holds nothing."""
+    if isinstance(item, Mapping):
+        return [part for pair in item.items() for part in pair]
+    if isinstance(item, (list, tuple)):
+        return list(item)
+    return None
+
+
 def _unstorable(value: Any) -> str | None:
     """What makes `value` unstorable (a key of `_UNSTORABLE`), or None.
 
@@ -169,11 +179,8 @@ def _unstorable(value: Any) -> str | None:
             if "\x00" in item:
                 return "nul"
             continue
-        if isinstance(item, Mapping):
-            children = [part for pair in item.items() for part in pair]
-        elif isinstance(item, (list, tuple)):
-            children = list(item)
-        else:
+        children = _json_children(item)
+        if children is None:
             continue
         if id(item) in on_path:
             return "cycle"

@@ -934,8 +934,10 @@ def test_an_unstorable_value_is_refused_by_name_and_writes_nothing(
     limit), and `json.dumps`, which had refused a cycle by name, never ran.
     """
     over = _inside(field, make())
+    record_run = HealthStore(_NoStatement()).record_run
+    kwargs = _run_kwargs(**over)
     with pytest.raises(RefusedError) as caught:
-        HealthStore(_NoStatement()).record_run(**_run_kwargs(**over))
+        record_run(**kwargs)
     message = str(caught.value)
     assert f"{_JSON_FIELDS[field]} {reason}" in message, message
     assert "before any statement" in message, message
@@ -1021,22 +1023,25 @@ def test_a_nul_in_a_read_is_refused_by_name_never_by_the_driver(
     """A read's text parameter carrying U+0000 is a `RefusedError` naming the
     column, raised before any statement and quoting nothing, over a double
     that fails on any statement and over a real database alike."""
+    read = getattr(HealthStore(_NoStatement()), method)
     with pytest.raises(RefusedError) as caught:
-        getattr(HealthStore(_NoStatement()), method)(**arguments)
+        read(**arguments)
     message = str(caught.value)
     assert f"{column} carries U+0000" in message, message
     assert "\x00" not in message
     with database.connection() as conn:
+        read = getattr(HealthStore(conn), method)
         with pytest.raises(RefusedError) as caught:
-            getattr(HealthStore(conn), method)(**arguments)
+            read(**arguments)
     assert f"{column} carries U+0000" in str(caught.value)
 
 
 def test_a_nul_in_a_path_never_reaches_the_driver(database: Any) -> None:
     """The holder, #656 6086098003 item 3 (c), names `path`: over a real
     database a NUL in it is refused by name, and no row is written."""
+    findings = [_finding(path="notes/a\x00.md")]
     with pytest.raises(RefusedError) as caught:
-        _record(database, findings=[_finding(path="notes/a\x00.md")])
+        _record(database, findings=findings)
     assert "finding 0's path carries U+0000" in str(caught.value)
     assert "notes/a" not in str(caught.value)
     assert _count(database, "health_runs") == 0
