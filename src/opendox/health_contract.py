@@ -697,10 +697,12 @@ def _pathless_form(identity: dict[Any, Any]) -> Iterator[Violation]:
 
 def _entry_breaks_form(category: str, entry: str) -> bool:
     """Whether a pathless identity's entry breaks the form its category calls
-    for (the holder's ruling on lane 3's MINOR at `c620dacd`, refining
-    `6072197564` (e)). A category against a pack (`ENTRY_CATEGORIES`) names
-    that pack's entry, so its entry is never empty; an install-level category
-    and a collision's re-raise take entry ""; `entry-refused` takes either."""
+    for (the holder's `6073087924`, on lane 3's MINOR at `c620dacd`, refining
+    `6072197564` (e)), so `check_finding()` admits exactly what
+    `engine_finding()` builds. A category against a pack (`ENTRY_CATEGORIES`)
+    names that pack's entry, so its entry is never empty; an install-level
+    category and a collision's re-raise take entry ""; `entry-refused` takes
+    either."""
     if category in ENTRY_CATEGORIES:
         return not entry
     if category in INSTALL_CATEGORIES or category == IDENTITY_COLLISION:
