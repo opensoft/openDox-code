@@ -292,7 +292,7 @@ def parents_of(world: World, commit: str) -> list[str]:
 # F12.2's thirteen nodes
 # ==========================================================================
 
-def test_land_requires_an_explicit_human_act(world, monkeypatch):
+def test_land_requires_an_explicit_human_act(world, monkeypatch, capsys):
     """Every way of building a confirmation that is not a human act is refused:
     a flag, a configuration key, a stdin that is not a terminal. The human act
     itself, the branch name typed at the controlling terminal, lands."""
@@ -348,6 +348,16 @@ def test_land_requires_an_explicit_human_act(world, monkeypatch):
         refused = confirmation_refusal(landing_confirm.confirm_at_terminal,
                                        BRANCH, head)
         assert refused.code == "answer-mismatch", answer
+    assert world.refs() == before
+
+    # THE VERB (T016's surface; N-11): no flag stands in for the answer, and a
+    # stdin that is not a terminal is refused through `opendox land` itself.
+    assert verb_has_no_bypass_flag()
+    monkeypatch.setenv("OPENDOX_INSTALL_MODE", "local")
+    at_terminal(monkeypatch, f"{BRANCH}\n", stdin_tty=False)
+    status, out, err = land_verb(capsys, world.root)
+    assert (status, out) == (1, ""), err
+    assert "standard input is not a terminal" in err, err
     assert world.refs() == before
 
     # THE HUMAN ACT: the branch's name typed at the controlling terminal.
@@ -515,6 +525,8 @@ def test_a_governed_repository_binds_no_lander(world):
 
     assert landing.repository_governance(world.root, env=LOCAL) == GOVERNED
     assert landing.bound_lander(world.root, env=LOCAL) is None
+    # ...and the CLI's binding binds none either (T016's surface)
+    assert surface_binds_no_lander(world.root)
     # a lander built by hand lands nothing here either
     port, token = lander(world), mint(world)
     assert refusal(port.land, BRANCH, confirmation=token).code == "governed"
@@ -540,6 +552,7 @@ def test_an_unknown_governance_binds_no_lander(tmp_path):
     reading = landing.read_governance(world.root, env=LOCAL)
     assert (reading.governance, reading.code) == (UNKNOWN, "no-declaration")
     assert landing.bound_lander(world.root, env=LOCAL) is None
+    assert surface_binds_no_lander(world.root)
     port, token = lander(world), mint(world)
     assert refusal(port.land, BRANCH, confirmation=token).code == "no-declaration"
     token = mint(world)
@@ -556,6 +569,7 @@ def test_a_host_profile_that_fails_to_load_binds_no_lander(world):
     assert (reading.governance, reading.code) == (UNKNOWN, "host-failed-to-load")
     assert "the host's adapter module is not installed" in reading.reason
     assert landing.bound_lander(world.root, env=LOCAL) is None
+    assert surface_binds_no_lander(world.root)
     token = mint(world)
     refused = refusal(landing.request_landing, world.root, BRANCH,
                       confirmation=token, env=LOCAL)
@@ -595,6 +609,7 @@ def test_a_registered_host_outranks_any_declaration(world):
     reading = landing.read_governance(world.root, env=LOCAL)
     assert (reading.governance, reading.code) == (GOVERNED, "host-instrument")
     assert landing.bound_lander(world.root, env=LOCAL) is None
+    assert surface_binds_no_lander(world.root)
     landing.request_landing(world.root, BRANCH, confirmation=mint(world), env=LOCAL)
     assert host.ports[-1].submitted == [BRANCH]
 
@@ -2269,3 +2284,1160 @@ def test_the_conformance_corpus_is_born_on_main_whatever_git_defaults_to(
         held = subprocess.run(["git", "symbolic-ref", "HEAD"], cwd=built / state,
                               text=True, capture_output=True).stdout.strip()
         assert held == "refs/heads/main", state
+
+
+# ==========================================================================
+# T016: the surface. The `land` verb, the two routes, the `actions.land`
+# key and the confirm control (contracts/cli-http-submit-land.md; 12.6a;
+# R2Q1, R2Q3, R2Q4, R2Q5, R2Q9 (a) item 7; N-2, N-11, OQ-12-13, OQ-12-14)
+# ==========================================================================
+
+import contextlib  # noqa: E402
+import http.client  # noqa: E402
+import json  # noqa: E402
+import shutil  # noqa: E402
+import threading  # noqa: E402
+
+import route_extension  # noqa: E402
+from opendox import cli, cli_branch_actions, serve, serve_branch_actions  # noqa: E402
+
+WEB = PACKAGE / "web"
+NODE = shutil.which("node")
+#: The two routes, as the contract spells them (OQ-12-13).
+NONCE_ROUTE = "/actions/session/land-nonce"
+LAND_ROUTE = "/actions/session/land"
+#: The `Landed` object both doors answer (data-model.md § Landed).
+LANDED_FIELDS = {"branch", "merge_commit", "previous_main", "served_checkout",
+                 "pushed"}
+#: A credential a host's instrument carries, ASSEMBLED, never spelled whole.
+SECRET = "S3CRET-" + "from-the-instrument"
+
+
+def surface_binds_no_lander(root: Path) -> bool:
+    """T016's two bindings bind no lander for `root`: the CLI's `_landing_port`
+    with and without `--local`, and the server's default `landing_factory`."""
+    return (all(cli._landing_port(root, local=local) is None
+                for local in (True, False))
+            and serve.served_lander(root) is None)
+
+
+def _land_parser():
+    import argparse
+
+    from opendox import default_profile
+
+    parser = argparse.ArgumentParser(prog="opendox")
+    sub = parser.add_subparsers(dest="command", required=True)
+    for extension in default_profile.SUBCOMMAND_EXTENSIONS:
+        extension.register(sub)
+    return parser, sub.choices["land"]
+
+
+def verb_has_no_bypass_flag() -> bool:
+    """N-11: `land` takes exactly `--repo-root`, `--branch`, `--local` and
+    `--json`, and every flag that could stand in for the human's answer is
+    refused by the parser itself."""
+    parser, land = _land_parser()
+    options = {option for action in land._actions
+               for option in action.option_strings}
+    if options != {"-h", "--help", "--repo-root", "--branch", "--local", "--json"}:
+        return False
+    for flag in ("--yes", "-y", "--confirm", "--force", "--no-confirm",
+                 "--non-interactive", "--assume-yes", "--confirmation=sess-1"):
+        try:
+            with contextlib.redirect_stderr(io_sink()):
+                parser.parse_args(["land", "--repo-root", "r", "--branch", "b",
+                                   flag])
+        except SystemExit:
+            continue
+        return False
+    return True
+
+
+def io_sink():
+    import io
+
+    return io.StringIO()
+
+
+def land_verb(capsys, root: Path, *extra: str, branch: str = BRANCH):
+    """`opendox land` in this process: the exit status, stdout and stderr."""
+    status = cli.main(["land", "--repo-root", str(root), "--branch", branch,
+                       *extra])
+    out, err = capsys.readouterr()
+    return status, out, err
+
+
+@pytest.fixture
+def local_install(monkeypatch):
+    """The explicit local install, as the environment selects it."""
+    monkeypatch.setenv("OPENDOX_INSTALL_MODE", "local")
+
+
+class SubmittingPort:
+    """A governed host's instrument: a `SubmissionPort` whose `Submission`
+    names where the work went, or that raises what it is given."""
+
+    def __init__(self, root: Path, *, url: str = "https://forge.example/team/repo",
+                 raises: BaseException | None = None) -> None:
+        self.root = root
+        self.url = url
+        self.raises = raises
+        self.submitted: list[str] = []
+
+    def submit(self, branch: str):
+        self.submitted.append(branch)
+        if self.raises is not None:
+            raise self.raises
+        commit = subprocess.run(["git", "rev-parse", f"refs/heads/{branch}"],
+                                cwd=self.root, text=True,
+                                capture_output=True).stdout.strip()
+        return session_pr.Submission(remote="review", ref=f"refs/heads/{branch}",
+                                     url=self.url, branch=branch, commit=commit)
+
+
+class SubmittingHost:
+    """A registered TEST host that declares an instrument (R2Q3 (a))."""
+
+    SUBCOMMAND_EXTENSIONS: tuple = ()
+    ROUTE_EXTENSIONS: tuple = ()
+
+    def __init__(self, **port) -> None:
+        self.port_kwargs = port
+        self.ports: list[SubmittingPort] = []
+
+    def SUBMISSION_INSTRUMENT(self, root: Path) -> SubmittingPort:  # noqa: N802
+        port = SubmittingPort(Path(root), **self.port_kwargs)
+        self.ports.append(port)
+        return port
+
+    def submitted(self) -> list[str]:
+        return [branch for port in self.ports for branch in port.submitted]
+
+
+class SubmittingHostWithTheVerb(SubmittingHost):
+    """The same test host, carrying openDox's own branch verbs, so the host
+    side of `opendox land` runs (R2Q3 (a): no production host carries them)."""
+
+    SUBCOMMAND_EXTENSIONS: tuple = (cli_branch_actions.BranchActionSubcommands(),)
+
+
+class BranchActionsOnTop:
+    """openDox's own branch-action routes and their mixin, contributed ON TOP
+    of a test host, so the host side of the routes runs (R2Q3 (a))."""
+
+    HANDLER_CONTRIBUTIONS = (serve_branch_actions.BranchActionRoutes,)
+
+    def routes(self):
+        return serve_branch_actions.BranchActionRouteExtension().routes()
+
+
+@contextlib.contextmanager
+def serving(root: Path, tmp_path: Path, *, host: str = "127.0.0.1",
+            actor: str | None = "tester", **injected):
+    """`serve.build_server` over `root`, serving on a thread."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+    httpd = serve.build_server(WEB, snapshot, root, host=host, port=0,
+                               actor=actor, **injected)
+    worker = threading.Thread(target=httpd.serve_forever, daemon=True)
+    worker.start()
+    try:
+        yield httpd
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        worker.join(timeout=10)
+
+
+def ask(httpd, method: str, path: str, payload=None, *, token: str | None = None,
+        headers: dict | None = None, raw: bytes | None = None):
+    """One request over loopback: the status and the parsed JSON body."""
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", httpd.server_address[1], timeout=60)
+    try:
+        body = raw if raw is not None else (
+            None if payload is None else json.dumps(payload).encode())
+        sent = {"Content-Type": "application/json"} if body is not None else {}
+        if token:
+            sent[serve.CONSOLE_TOKEN_HEADER] = token
+        sent.update(headers or {})
+        connection.request(method, path, body=body, headers=sent)
+        response = connection.getresponse()
+        data = response.read()
+        return response.status, (json.loads(data) if data else None)
+    finally:
+        connection.close()
+
+
+def capabilities(httpd) -> dict:
+    status, caps = ask(httpd, "GET", serve.CAPABILITIES_ROUTE)
+    assert status == 200, caps
+    return caps
+
+
+def bound_class(httpd) -> type:
+    return getattr(httpd.RequestHandlerClass, "func", httpd.RequestHandlerClass)
+
+
+def nonce_for(httpd, branch: str = BRANCH) -> dict:
+    status, body = ask(httpd, "POST", NONCE_ROUTE, {"branch": branch},
+                       token=httpd.console_token)
+    assert status == 200, body
+    return body
+
+
+# ---- the verb --------------------------------------------------------------
+
+def test_the_land_verb_has_no_bypass_flag():
+    """N-11 (12.6a: "refuses when there is none"): the verb's options are the
+    ratified four, and no flag can answer for the human."""
+    assert verb_has_no_bypass_flag()
+
+
+def test_land_at_the_terminal_lands_and_names_the_revert(world, monkeypatch,
+                                                         capsys, local_install):
+    previous = world.head("refs/heads/main")
+    terminal = at_terminal(monkeypatch, f"{BRANCH}\n")
+
+    status, out, err = land_verb(capsys, world.root)
+
+    assert (status, err) == (0, ""), err
+    merge = world.head("refs/heads/main")
+    assert parents_of(world, merge) == [merge, previous, world.head(BRANCH)]
+    assert BRANCH in terminal.shown and world.head(BRANCH) in terminal.shown
+    assert f"git revert -m 1 {merge}" in out
+    assert "fast-forwarded" in out and previous in out
+    assert "pushed nothing" in out
+
+
+def test_land_json_prints_the_landed_object(world, monkeypatch, capsys,
+                                            local_install):
+    previous = world.head("refs/heads/main")
+    at_terminal(monkeypatch, f"{BRANCH}\n")
+
+    status, out, err = land_verb(capsys, world.root, "--json")
+
+    assert (status, err) == (0, ""), err
+    landed = json.loads(out)
+    assert set(landed) == LANDED_FIELDS
+    assert landed == {"branch": BRANCH,
+                      "merge_commit": world.head("refs/heads/main"),
+                      "previous_main": previous,
+                      "served_checkout": landing.SERVED_FAST_FORWARDED,
+                      "pushed": False}
+
+
+def test_land_with_a_piped_stdin_and_no_terminal_is_refused(world, tmp_path):
+    """The installed verb in a child with NO controlling terminal and the
+    branch name piped to stdin: refused by name, no traceback, nothing moved."""
+    before = world.refs()
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("GIT_", "XF_"))}
+    env["OPENDOX_INSTALL_MODE"] = "local"
+    done = subprocess.run(
+        [sys.executable, "-m", "opendox.cli", "land", "--repo-root",
+         str(world.root), "--branch", BRANCH],
+        input=f"{BRANCH}\n", text=True, capture_output=True, timeout=180,
+        start_new_session=True, env=env, cwd=tmp_path)
+    assert done.returncode == 1, (done.stdout, done.stderr)
+    assert "land refused:" in done.stderr
+    assert "standard input is not a terminal" in done.stderr
+    assert "Traceback" not in done.stderr
+    assert world.refs() == before
+
+
+def test_land_refuses_main_before_it_asks(world, monkeypatch, capsys,
+                                          local_install):
+    before = world.refs()
+    terminal = at_terminal(monkeypatch, "main\n")
+    status, out, err = land_verb(capsys, world.root, branch="main")
+    assert (status, out) == (1, ""), err
+    assert "does not take `main` itself" in err
+    assert terminal.shown == "", "the human was asked to confirm a refusal"
+    assert world.refs() == before
+
+
+def test_land_refuses_a_branch_that_does_not_exist_before_it_asks(
+        world, monkeypatch, capsys, local_install):
+    terminal = at_terminal(monkeypatch, "sess-9\n")
+    status, _out, err = land_verb(capsys, world.root, branch="sess-9")
+    assert status == 1
+    assert "no local branch 'sess-9'" in err
+    assert terminal.shown == ""
+
+
+def test_land_with_no_declaration_names_the_file_and_content_before_it_asks(
+        tmp_path, monkeypatch, capsys, local_install):
+    world = World(tmp_path, declaration=None)
+    world.branch_with(BRANCH, "notes/session.md", "work\n")
+    before = world.refs()
+    terminal = at_terminal(monkeypatch, f"{BRANCH}\n")
+    status, _out, err = land_verb(capsys, world.root)
+    assert status == 1
+    assert DECLARATION_PATH in err and DECLARATION_CONTENT in err
+    assert terminal.shown == ""
+    assert world.refs() == before
+
+
+def test_a_governed_declaration_with_no_host_is_refused_by_the_verb(
+        tmp_path, monkeypatch, capsys, local_install):
+    world = World(tmp_path,
+                  declaration=DECLARATION_CONTENT.replace(STANDALONE, GOVERNED))
+    world.branch_with(BRANCH, "notes/session.md", "work\n")
+    before = world.refs()
+    at_terminal(monkeypatch, f"{BRANCH}\n")
+    status, _out, err = land_verb(capsys, world.root)
+    assert status == 1
+    assert "governed-without-an-instrument" in err
+    assert world.refs() == before
+
+
+def test_land_local_beside_hosted_is_refused_naming_both(world, monkeypatch,
+                                                         capsys):
+    """R2Q9 (a) item 7: the flag and the setting disagree, so it is refused,
+    naming both, and nothing lands."""
+    monkeypatch.setenv("OPENDOX_INSTALL_MODE", "hosted")
+    before = world.refs()
+    terminal = at_terminal(monkeypatch, f"{BRANCH}\n")
+    status, _out, err = land_verb(capsys, world.root, "--local")
+    assert status == 1
+    assert "--local" in err and "OPENDOX_INSTALL_MODE=hosted" in err
+    assert terminal.shown == ""
+    assert world.refs() == before
+
+
+def test_land_without_the_local_install_is_refused(world, monkeypatch, capsys):
+    """A standalone declaration on the HOSTED install (unset is hosted) is
+    `unknown` (FR-007): no lander, and the verb names the local install."""
+    monkeypatch.delenv("OPENDOX_INSTALL_MODE", raising=False)
+    before = world.refs()
+    status, _out, err = land_verb(capsys, world.root)
+    assert status == 1
+    assert "OPENDOX_INSTALL_MODE=local or --local" in err
+    assert world.refs() == before
+    # ...and `--local` is exactly the setting
+    at_terminal(monkeypatch, f"{BRANCH}\n")
+    status, _out, err = land_verb(capsys, world.root, "--local")
+    assert (status, err) == (0, ""), err
+
+
+def test_land_shows_a_conflict_through_the_verb(tmp_path, monkeypatch, capsys,
+                                                local_install):
+    world = World(tmp_path)
+    world.branch_with(BRANCH, "doc.md", "the branch's words\n")
+    world.on_main("doc.md", "main's words\n")
+    before = world.refs()
+    at_terminal(monkeypatch, f"{BRANCH}\n")
+    status, out, err = land_verb(capsys, world.root)
+    assert (status, out) == (1, ""), err
+    assert "doc.md" in err and "bring `main` into sess-1" in err
+    assert world.refs() == before
+
+
+def test_land_under_a_governed_host_submits_through_the_instrument(
+        world, monkeypatch, capsys, local_install):
+    """R2Q4 (a): the verb submits through the host's instrument and reports
+    where the work went; nothing merges here."""
+    host = domain_profile.register(SubmittingHostWithTheVerb())
+    before = world.refs()
+    at_terminal(monkeypatch, f"{BRANCH}\n")
+    status, out, err = land_verb(capsys, world.root, "--json")
+    assert (status, err) == (0, ""), err
+    assert json.loads(out) == {"remote": "review", "ref": f"refs/heads/{BRANCH}",
+                               "url": "https://forge.example/team/repo",
+                               "branch": BRANCH, "commit": world.head(BRANCH)}
+    assert host.submitted() == [BRANCH]
+    assert world.refs() == before
+
+
+def test_an_instruments_words_are_redacted_by_the_verb(world, monkeypatch,
+                                                       capsys, local_install):
+    """12.1a at this boundary: an instrument's report URL, its refusal, and a
+    failure it did not name reach no output with the credential in them."""
+    leaky = f"https://alice:{SECRET}@forge.example/team/repo?token={SECRET}"
+    domain_profile.register(SubmittingHostWithTheVerb(url=leaky))
+    at_terminal(monkeypatch, f"{BRANCH}\n")
+    status, out, err = land_verb(capsys, world.root)
+    assert status == 0, err
+    assert SECRET not in out + err and "forge.example/team/repo" in out
+
+    # (the rule over-redacts what follows a `token=` value, the safe way, so
+    # the refusal is held to its opening words and its host)
+    for raised, said in (
+            (session_pr.SubmissionRefused(f"push to {leaky} was rejected"),
+             "push to https://<redacted>@forge.example/team/repo"),
+            (RuntimeError(f"broke at {leaky}"), "raised RuntimeError")):
+        domain_profile.unregister()
+        domain_profile.register(SubmittingHostWithTheVerb(raises=raised))
+        at_terminal(monkeypatch, f"{BRANCH}\n")
+        status, out, err = land_verb(capsys, world.root)
+        assert status == 1, (out, err)
+        assert SECRET not in out + err, err
+        assert said in err and "Traceback" not in err
+
+
+def test_the_cli_binding_is_the_neutral_lander_only_under_standalone(
+        world, tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENDOX_INSTALL_MODE", raising=False)
+    assert isinstance(cli._landing_port(world.root, local=True), NeutralLander)
+    assert cli._landing_port(world.root) is None       # the hosted install
+    monkeypatch.setenv("OPENDOX_INSTALL_MODE", "local")
+    assert isinstance(cli._landing_port(world.root), NeutralLander)
+    bare = World(tmp_path / "bare", declaration=None)
+    assert cli._landing_port(bare.root, local=True) is None
+
+
+def test_the_default_profile_contributes_land_beside_submit():
+    """N-2: the verb, the two routes and their mixin are the default profile's
+    contributions, and the mixin holds the routes' methods."""
+    from opendox import default_profile
+
+    _parser, land = _land_parser()
+    assert land.get_default("func") is cli_branch_actions.cmd_land
+    bindings = route_extension.collect_bindings(default_profile.ROUTE_EXTENSIONS)
+    assert [(b.method, b.pattern, b.is_prefix, b.handler) for b in bindings] == [
+        ("POST", "/actions/session/submit", False, "_handle_session_submit"),
+        ("POST", NONCE_ROUTE, False, "_handle_session_land_nonce"),
+        ("POST", LAND_ROUTE, False, "_handle_session_land"),
+    ]
+    assert (serve_branch_actions.ACTIONS_SESSION_LAND_NONCE_ROUTE,
+            serve_branch_actions.ACTIONS_SESSION_LAND_ROUTE) == (NONCE_ROUTE,
+                                                                 LAND_ROUTE)
+    mixin = serve_branch_actions.BranchActionRoutes
+    for binding in bindings:
+        assert callable(getattr(mixin, binding.handler))
+
+
+def test_a_host_profile_replacing_the_default_has_no_land_verb():
+    domain_profile.register(InstrumentedHost())
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit), contextlib.redirect_stderr(io_sink()):
+        parser.parse_args(["land", "--repo-root", "r", "--branch", "b"])
+
+
+# ---- the server's binding and the routes ------------------------------------
+
+def test_the_server_binding_is_the_neutral_lander_only_under_standalone(
+        world, tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENDOX_INSTALL_MODE", "local")
+    assert isinstance(serve.served_lander(world.root), NeutralLander)
+    with serving(world.root, tmp_path) as httpd:
+        handler = object.__new__(bound_class(httpd))
+        assert isinstance(handler._session_lander(), NeutralLander)
+    injected = object()
+    with serving(world.root, tmp_path / "i",
+                 landing_factory=lambda: injected) as httpd:
+        assert object.__new__(bound_class(httpd))._session_lander() is injected
+    # a hosted plane binds nothing, whatever the factory would build
+    with serving(world.root, tmp_path / "h", host="0.0.0.0",
+                 landing_factory=lambda: injected) as httpd:
+        assert object.__new__(bound_class(httpd))._session_lander() is None
+    monkeypatch.delenv("OPENDOX_INSTALL_MODE")
+    assert serve.served_lander(world.root) is None
+
+
+def test_the_routes_land_a_branch_once_with_the_views_nonce(world, tmp_path,
+                                                            local_install):
+    """OQ-12-13: `land-nonce` answers a nonce bound to the branch and its head;
+    `land` with it answers `Landed`; the same nonce a second time is refused."""
+    previous = world.head("refs/heads/main")
+    head = world.head(BRANCH)
+    with serving(world.root, tmp_path) as httpd:
+        issued = nonce_for(httpd)
+        assert set(issued) == {"nonce", "branch", "head"}
+        assert (issued["branch"], issued["head"]) == (BRANCH, head)
+        status, landed = ask(httpd, "POST", LAND_ROUTE,
+                             {"branch": BRANCH, "nonce": issued["nonce"]},
+                             token=httpd.console_token)
+        assert status == 200, landed
+        again = ask(httpd, "POST", LAND_ROUTE,
+                    {"branch": BRANCH, "nonce": issued["nonce"]},
+                    token=httpd.console_token)
+    merge = world.head("refs/heads/main")
+    assert landed == {"branch": BRANCH, "merge_commit": merge,
+                      "previous_main": previous,
+                      "served_checkout": landing.SERVED_FAST_FORWARDED,
+                      "pushed": False}
+    assert parents_of(world, merge) == [merge, previous, head]
+    assert again[0] == 409 and again[1]["error"] == "landing_refused", again
+    assert again[1]["code"] == "confirmation:no-nonce"
+    assert world.head("refs/heads/main") == merge
+
+
+@pytest.mark.parametrize("nonce", ["wrong", "", None, 7])
+def test_the_land_route_refuses_any_other_nonce_and_spends_the_live_one(
+        world, tmp_path, local_install, nonce):
+    before = world.refs()
+    with serving(world.root, tmp_path) as httpd:
+        issued = nonce_for(httpd)
+        status, body = ask(httpd, "POST", LAND_ROUTE,
+                           {"branch": BRANCH, "nonce": nonce},
+                           token=httpd.console_token)
+        if nonce in ("", None, 7):
+            assert (status, body["error"]) == (400, "invalid_body"), body
+            assert world.refs() == before
+            return
+        assert (status, body["error"]) == (409, "landing_refused"), body
+        assert body["code"] == "confirmation:nonce-mismatch"
+        status, body = ask(httpd, "POST", LAND_ROUTE,
+                           {"branch": BRANCH, "nonce": issued["nonce"]},
+                           token=httpd.console_token)
+    assert body["code"] == "confirmation:no-nonce", body
+    assert world.refs() == before
+
+
+def test_a_nonce_for_a_head_the_branch_has_left_is_refused(world, tmp_path,
+                                                           local_install):
+    with serving(world.root, tmp_path) as httpd:
+        issued = nonce_for(httpd)
+        world.branch_with(BRANCH, "notes/later.md", "a later commit\n")
+        main = world.head("refs/heads/main")
+        status, body = ask(httpd, "POST", LAND_ROUTE,
+                           {"branch": BRANCH, "nonce": issued["nonce"]},
+                           token=httpd.console_token)
+    assert (status, body["code"]) == (409, "confirmation:another-head"), body
+    assert world.head("refs/heads/main") == main
+
+
+@pytest.mark.parametrize("route", ["nonce", "land"])
+@pytest.mark.parametrize("clause", ["off-loopback", "no-actor", "no-token",
+                                    "foreign-origin"])
+def test_each_land_route_is_gated_like_submit(world, tmp_path, local_install,
+                                              route, clause):
+    """12.4a's three clauses on both routes, in order; nothing lands."""
+    before = world.refs()
+    kwargs = {"off-loopback": {"host": "0.0.0.0"}, "no-actor": {"actor": None}
+              }.get(clause, {})
+    expected = {"off-loopback": "loopback_only", "no-actor": "action_unavailable"
+                }.get(clause, "agent_invocation")
+    path = NONCE_ROUTE if route == "nonce" else LAND_ROUTE
+    payload = {"branch": BRANCH} if route == "nonce" else {
+        "branch": BRANCH, "nonce": "n" * 43}
+    with serving(world.root, tmp_path, **kwargs) as httpd:
+        token = None if clause == "no-token" else (httpd.console_token or "t")
+        headers = ({"Origin": "https://evil.example"}
+                   if clause == "foreign-origin" else None)
+        status, body = ask(httpd, "POST", path, payload, token=token,
+                           headers=headers)
+    assert (status, body["error"]) == (403, expected), body
+    assert world.refs() == before
+
+
+@pytest.mark.parametrize("payload, route, message", [
+    (["sess-1"], NONCE_ROUTE, "a land-nonce request is a JSON object naming `branch`"),
+    ("sess-1", NONCE_ROUTE, "a land-nonce request is a JSON object naming `branch`"),
+    (["sess-1"], LAND_ROUTE,
+     "a land request is a JSON object naming `branch` and `nonce`"),
+])
+def test_each_land_route_names_its_own_body_shape(world, tmp_path, local_install,
+                                                  payload, route, message):
+    """Copilot r4234726939 on #100: a body that is not an object is told the
+    shape of the route it was sent to, never the other route's."""
+    with serving(world.root, tmp_path) as httpd:
+        status, body = ask(httpd, "POST", route, payload,
+                           token=httpd.console_token)
+    assert (status, body["error"], body["message"]) == (400, "invalid_body",
+                                                        message), body
+
+
+@pytest.mark.parametrize("payload", [
+    {"branch": BRANCH, "repo_root": "/elsewhere"},
+    {"branch": BRANCH, "nonce": "n", "checkout_root": "/elsewhere"},
+    {"nonce": "n"}, {}, ["sess-1"], "sess-1",
+])
+def test_the_land_routes_take_no_repository_from_the_request(
+        world, tmp_path, local_install, payload):
+    before = world.refs()
+    with serving(world.root, tmp_path) as httpd:
+        for path in (NONCE_ROUTE, LAND_ROUTE):
+            status, body = ask(httpd, "POST", path, payload,
+                               token=httpd.console_token)
+            assert (status, body["error"]) == (400, "invalid_body"), (path, body)
+            assert "/elsewhere" not in json.dumps(body)
+    assert world.refs() == before
+
+
+@pytest.mark.parametrize("branch, code", [
+    ("main", "branch-is-main"), ("sess-9", "no-such-branch"),
+    ("-x", "no-such-branch"),
+    # a REVISION, not a branch name: git resolves it, so only the name check
+    # refuses it before a nonce is bound to its commit
+    ("sess-1~1", "no-such-branch"), ("sess-1^{commit}", "no-such-branch"),
+])
+def test_the_nonce_route_refuses_what_cannot_land(world, tmp_path, local_install,
+                                                  branch, code):
+    with serving(world.root, tmp_path) as httpd:
+        status, body = ask(httpd, "POST", NONCE_ROUTE, {"branch": branch},
+                           token=httpd.console_token)
+    assert (status, body["error"], body["code"]) == (409, "landing_refused",
+                                                     code), body
+
+
+def test_the_land_route_refuses_main_before_any_nonce_is_asked(
+        world, tmp_path, local_install):
+    before = world.refs()
+    with serving(world.root, tmp_path) as httpd:
+        status, body = ask(httpd, "POST", LAND_ROUTE,
+                           {"branch": "main", "nonce": "n" * 43},
+                           token=httpd.console_token)
+    assert (status, body["code"]) == (409, "branch-is-main"), body
+    assert world.refs() == before
+
+
+def test_the_nonce_route_refuses_where_nothing_can_land(tmp_path, local_install):
+    world = World(tmp_path, declaration=None)
+    world.branch_with(BRANCH, "notes/session.md", "work\n")
+    with serving(world.root, tmp_path / "s") as httpd:
+        status, body = ask(httpd, "POST", NONCE_ROUTE, {"branch": BRANCH},
+                           token=httpd.console_token)
+    assert (status, body["code"]) == (409, "no-declaration"), body
+    assert DECLARATION_PATH in body["message"]
+
+
+def test_a_reading_that_fails_unnamed_is_contained_by_both_routes(
+        world, tmp_path, local_install, capsys):
+    """A failure nobody named, here a `landing_factory` whose lander raises in
+    `land` and a governance read that raises at the nonce: a fixed 500, the
+    TYPE alone in the log, and nothing lands."""
+    before = world.refs()
+
+    class Exploding:
+        def land(self, branch, *, confirmation):
+            raise RuntimeError(f"broke with {SECRET}")
+
+    with serving(world.root, tmp_path / "land",
+                 landing_factory=lambda: Exploding()) as httpd:
+        issued = nonce_for(httpd)
+        status, body = ask(httpd, "POST", LAND_ROUTE,
+                           {"branch": BRANCH, "nonce": issued["nonce"]},
+                           token=httpd.console_token)
+    assert (status, body["error"]) == (500, "landing_failed"), body
+    with pytest.MonkeyPatch.context() as patch:
+        def broken(*_args, **_kwargs):
+            raise OSError(f"unreadable {SECRET}")
+        patch.setattr(cli_branch_actions, "landing_refusal", broken)
+        with serving(world.root, tmp_path / "nonce") as httpd:
+            status, body = ask(httpd, "POST", NONCE_ROUTE, {"branch": BRANCH},
+                               token=httpd.console_token)
+    assert (status, body["error"]) == (500, "landing_failed"), body
+    logged = capsys.readouterr().err
+    assert "raised RuntimeError" in logged and "raised OSError" in logged
+    assert SECRET not in logged
+    assert world.refs() == before
+
+
+def test_the_land_route_shows_a_conflict_and_lands_nothing(tmp_path,
+                                                           local_install):
+    world = World(tmp_path)
+    world.branch_with(BRANCH, "doc.md", "the branch's words\n")
+    world.on_main("doc.md", "main's words\n")
+    before = world.refs()
+    with serving(world.root, tmp_path / "s") as httpd:
+        issued = nonce_for(httpd)
+        status, body = ask(httpd, "POST", LAND_ROUTE,
+                           {"branch": BRANCH, "nonce": issued["nonce"]},
+                           token=httpd.console_token)
+    assert (status, body["error"], body["code"]) == (409, "merge_conflict",
+                                                     "merge-conflict"), body
+    assert body["paths"] == ["doc.md"]
+    assert "bring `main` into sess-1" in body["remedy"]
+    assert world.refs() == before
+
+
+def test_a_binding_that_answers_no_lander_is_no_lander(world, tmp_path,
+                                                      local_install, capsys,
+                                                      monkeypatch):
+    """Copilot at `1bba2b1c` (previously missed, `cli_branch_actions.py` 374
+    and 419): a binding whose answer has no callable `land` is NO lander, so
+    `actions.land` reads false, the nonce route refuses by name, the verb
+    refuses before it asks, and nothing answers 500."""
+    before = world.refs()
+    for answer in (object(), "a lander", type("NoLand", (), {"land": 7})()):
+        with serving(world.root, tmp_path / f"s{id(answer)}",
+                     landing_factory=lambda answer=answer: answer) as httpd:
+            assert capabilities(httpd)["actions"]["land"] is False
+            status, body = ask(httpd, "POST", NONCE_ROUTE, {"branch": BRANCH},
+                               token=httpd.console_token)
+            assert (status, body["code"]) == (409, "no-lander-bound"), body
+        monkeypatch.setattr(cli, "_landing_port",
+                            lambda root, *, local=False, answer=answer: answer)
+        terminal = at_terminal(monkeypatch, f"{BRANCH}\n")
+        status, _out, err = land_verb(capsys, world.root)
+        assert status == 1 and "no lander is bound" in err, err
+        assert terminal.shown == ""
+    assert world.refs() == before
+
+
+def test_the_landed_report_shows_a_branch_name_escaped(world):
+    """Copilot at `1bba2b1c` (previously missed): the verb's report prints a
+    branch name as the prompt shows it, escaped where it holds a character a
+    terminal acts on (a bidi override)."""
+    name = "sess\u202e1"
+    lines = cli_branch_actions._landed_lines({
+        "branch": name, "merge_commit": "a" * 40, "previous_main": "b" * 40,
+        "served_checkout": "left", "pushed": False})
+    assert "\u202e" not in "\n".join(lines)
+    assert repr(name) in lines[0]
+
+
+def test_a_conflict_answer_redacts_every_field_it_carries(tmp_path,
+                                                         local_install):
+    """Copilot r4234726885 on #100: `paths` and `remedy` carry repository text
+    (a path, the branch's name) and are redacted by the rule `message` is."""
+    branch = "sess&access_token=" + SECRET
+    path = "notes?token=" + SECRET + ".md"
+    world = World(tmp_path)
+    world.branch_with(branch, path, "the branch's words\n")
+    world.on_main(path, "main's words\n")
+    before = world.refs()
+    with serving(world.root, tmp_path / "s") as httpd:
+        issued = nonce_for(httpd, branch)
+        status, body = ask(httpd, "POST", LAND_ROUTE,
+                           {"branch": branch, "nonce": issued["nonce"]},
+                           token=httpd.console_token)
+    assert (status, body["error"]) == (409, "merge_conflict"), body
+    assert SECRET not in json.dumps(body), body
+    assert body["paths"] == ["notes?token=<redacted>"]
+    assert "bring `main` into" in body["remedy"]
+    assert world.refs() == before
+
+
+def test_the_land_route_under_a_governed_host_submits_through_the_instrument(
+        world, tmp_path, local_install):
+    """R2Q4 (a) through the route: the host's instrument receives the branch,
+    the answer is its `Submission`, and nothing merges."""
+    host = domain_profile.register(SubmittingHost())
+    before = world.refs()
+    with serving(world.root, tmp_path,
+                 route_extensions=(BranchActionsOnTop(),)) as httpd:
+        assert capabilities(httpd)["actions"]["land"] is True
+        issued = nonce_for(httpd)
+        status, body = ask(httpd, "POST", LAND_ROUTE,
+                           {"branch": BRANCH, "nonce": issued["nonce"]},
+                           token=httpd.console_token)
+    assert status == 200, body
+    assert body == {"remote": "review", "ref": f"refs/heads/{BRANCH}",
+                    "url": "https://forge.example/team/repo", "branch": BRANCH,
+                    "commit": world.head(BRANCH)}
+    assert host.submitted() == [BRANCH]
+    assert world.refs() == before
+
+
+def test_an_instruments_words_are_redacted_by_the_route(world, tmp_path,
+                                                        local_install, capsys):
+    leaky = f"https://alice:{SECRET}@forge.example/team/repo?token={SECRET}"
+    for host, status, error in (
+            (SubmittingHost(url=leaky), 200, None),
+            (SubmittingHost(raises=session_pr.SubmissionRefused(
+                f"push to {leaky} was rejected")), 409, "submission_refused"),
+            (SubmittingHost(raises=RuntimeError(f"broke at {leaky}")), 500,
+             "landing_failed")):
+        domain_profile.unregister()
+        domain_profile.register(host)
+        with serving(world.root, tmp_path / str(status),
+                     route_extensions=(BranchActionsOnTop(),)) as httpd:
+            issued = nonce_for(httpd)
+            answer = ask(httpd, "POST", LAND_ROUTE,
+                         {"branch": BRANCH, "nonce": issued["nonce"]},
+                         token=httpd.console_token)
+        assert answer[0] == status, answer
+        assert error is None or answer[1]["error"] == error, answer
+        assert SECRET not in json.dumps(answer[1])
+    logged = capsys.readouterr().err
+    assert SECRET not in logged and "raised RuntimeError" in logged
+
+
+# ---- `actions.land`: present only under openDox's own profile, its value
+# ---- where `land` can act (ADV-14; OQ-12-14; contracts § /capabilities) ------
+
+def test_a_host_profile_sees_no_land_key(world, tmp_path, local_install):
+    """The falsifier's node (R2Q3 (a)): a host profile that replaces the
+    default carries no `actions.land` key and no land route."""
+    domain_profile.register(SubmittingHost())
+    with serving(world.root, tmp_path) as httpd:
+        caps = capabilities(httpd)
+        assert caps["actions"]["session"] is True, "not a local human's plane"
+        for path in (NONCE_ROUTE, LAND_ROUTE):
+            status, body = ask(httpd, "POST", path, {"branch": BRANCH},
+                               token=httpd.console_token)
+            assert (status, body["error"]) == (404, "unknown_action"), body
+        assert not hasattr(bound_class(httpd), "_handle_session_land")
+    assert "land" not in caps["actions"]
+    assert set(caps["actions"]) == set(serve._DEFAULT_CAPABILITIES["actions"])
+
+
+def test_the_land_key_is_true_where_land_can_act_and_false_otherwise(
+        tmp_path, monkeypatch):
+    """The falsifier's capability test: TRUE for `standalone` with a lander and
+    for `governed` with an instrument; FALSE under `unknown`, under `governed`
+    with no instrument, on the hosted plane, and with no local human."""
+    def land_key(world, *, local=True, profile=None, **serve_kwargs):
+        if local:
+            monkeypatch.setenv("OPENDOX_INSTALL_MODE", "local")
+        else:
+            monkeypatch.delenv("OPENDOX_INSTALL_MODE", raising=False)
+        domain_profile.unregister()
+        if profile is not None:
+            domain_profile.register(profile)
+            serve_kwargs["route_extensions"] = (BranchActionsOnTop(),)
+        with serving(world.root, world.tmp / f"s{len(seen)}",
+                     **serve_kwargs) as httpd:
+            seen.append(1)
+            return capabilities(httpd)["actions"]["land"]
+
+    seen: list[int] = []
+    standalone = World(tmp_path / "standalone")
+    standalone.branch_with(BRANCH, "notes/a.md", "a\n")
+    assert land_key(standalone) is True
+    assert land_key(standalone, profile=SubmittingHost()) is True    # governed + instrument
+    assert land_key(standalone, profile=HostWithoutAnInstrument()) is False
+    assert land_key(standalone, profile=HostThatFailsToLoad()) is False
+    assert land_key(standalone, local=False) is False                 # not the local install
+    assert land_key(standalone, actor=None) is False                  # no local human
+    assert land_key(standalone, host="0.0.0.0") is False              # the hosted plane
+    unknown = World(tmp_path / "unknown", declaration=None)
+    assert land_key(unknown) is False
+    declared = World(tmp_path / "declared",
+                     declaration=DECLARATION_CONTENT.replace(STANDALONE, GOVERNED))
+    assert land_key(declared) is False                                # governed, no instrument
+    # an injected factory that binds nothing binds nothing
+    assert land_key(standalone, landing_factory=lambda: None) is False
+
+
+def test_the_land_key_follows_main_while_the_server_runs(tmp_path,
+                                                         local_install):
+    """The value is read where `land` can act NOW: committing the declaration
+    to `main` makes the key true at the next `/capabilities`, no restart."""
+    world = World(tmp_path, declaration=None)
+    world.branch_with(BRANCH, "notes/a.md", "a\n")
+    with serving(world.root, tmp_path / "s") as httpd:
+        assert capabilities(httpd)["actions"]["land"] is False
+        world.on_main(DECLARATION_PATH, DECLARATION_CONTENT)
+        assert capabilities(httpd)["actions"]["land"] is True
+        # the handler's own verdict object is never rewritten by a request
+        assert bound_class(httpd).capabilities["actions"]["land"] is False
+
+
+_LAND = route_extension.RouteBinding("POST", LAND_ROUTE, False, "h")
+_NONCE = route_extension.RouteBinding("POST", NONCE_ROUTE, False, "h")
+
+
+@pytest.mark.parametrize("binding, land, nonce", [
+    (_LAND, True, False), (_NONCE, False, True),
+    (route_extension.RouteBinding("POST", "/actions/session/", True, "h"),
+     True, True),
+    (route_extension.RouteBinding("GET", LAND_ROUTE, False, "h"), False, False),
+    (route_extension.RouteBinding("POST", LAND_ROUTE + "x", False, "h"),
+     False, False),
+    (route_extension.RouteBinding("POST", "/actions/session/submit", False, "h"),
+     False, False),
+])
+def test_what_answers_the_land_routes(binding, land, nonce):
+    assert serve.answers_the_land(binding) is land
+    assert serve.answers_the_land_nonce(binding) is nonce
+
+
+def test_compute_capabilities_derives_the_land_key_from_the_bindings():
+    base = dict(nlm_present=False, checkout_real=True, loopback=True, actor="a")
+    assert "land" not in serve.compute_capabilities(**base)["actions"]
+    for only in ((_LAND,), (_NONCE,)):
+        assert "land" not in serve.compute_capabilities(
+            route_bindings=only, landing_acts=True, **base)["actions"]
+    both = (_LAND, _NONCE)
+    assert serve.compute_capabilities(route_bindings=both, landing_acts=True,
+                                      **base)["actions"]["land"] is True
+    assert serve.compute_capabilities(route_bindings=both,
+                                      **base)["actions"]["land"] is False
+    for actor, loopback, real in ((None, True, True), ("a", False, True),
+                                  ("a", True, False)):
+        off = serve.compute_capabilities(
+            nlm_present=False, checkout_real=real, loopback=loopback,
+            actor=actor, route_bindings=both, landing_acts=True)
+        assert off["actions"]["land"] is False, (actor, loopback, real)
+    assert "land" not in serve._DEFAULT_CAPABILITIES["actions"]
+
+
+def test_generate_and_open_local_binds_the_lander_without_the_setting(
+        world, monkeypatch):
+    """`generate-and-open --local` with no `OPENDOX_INSTALL_MODE`: the entry
+    point declares the server's `landing_factory` with the install it
+    resolved, so the served plane can land (quickstart § 3)."""
+    import argparse
+
+    monkeypatch.delenv("OPENDOX_INSTALL_MODE", raising=False)
+    local = argparse.Namespace(install_mode="local")
+    hosted = argparse.Namespace(install_mode="hosted")
+    assert isinstance(cli._served_landing_factory(world.root, local)(),
+                      NeutralLander)
+    assert cli._served_landing_factory(world.root, hosted)() is None
+
+
+# ---- R2Q5 (a): a live session whose branch lands ends by the merge observation
+
+def test_a_live_session_whose_branch_lands_ends_by_the_merge_observation(world):
+    from opendox import branch_session
+
+    worktree = branch_session.sessions_root(world.root) / "sess-1"
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    world.git("worktree", "add", "-q", str(worktree), BRANCH)
+    git = session_git.SessionGit(world.root)
+    assert branch_session.merge_state(git, BRANCH).merged is False
+
+    landed = lander(world).land(BRANCH, confirmation=mint(world))
+
+    observed = branch_session.merge_state(git, BRANCH)
+    assert observed.merged is True, observed.reason
+    assert observed.landed_by == landed.merge_commit
+    session = branch_session.SessionOpen(
+        repository="plain", tile=None, branch=BRANCH, worktree=worktree,
+        joined=True, entry=None, notebook_alias="")
+    ended = branch_session.reconcile_merged_session(git, session,
+                                                    checkout_root=world.root)
+    assert ended.merged is True
+    assert world.git("branch", "--list", BRANCH) == ""
+    assert not worktree.exists()
+
+
+# ---- the confirm control (`web/views/branch-actions.js`), run in node ------
+
+_CONTROL_HARNESS = r"""
+const out = {};
+function node(tag) {
+  return { tag, children: [], attrs: {}, listeners: {}, textContent: "",
+           value: "", disabled: false, className: "", type: "", placeholder: "",
+           setAttribute(k, v) { this.attrs[k] = v; },
+           addEventListener(k, f) { this.listeners[k] = f; },
+           append(...c) { this.children.push(...c); } };
+}
+const doc = { createElement: node };
+function host() { const h = node("span"); h.ownerDocument = doc; return h; }
+const m = await import("./branch-actions.js");
+const TOKEN = "Tk_" + "b".repeat(40);
+const HEAD = "0123456789abcdef0123456789abcdef01234567";
+const MERGE = "fedcba9876543210fedcba9876543210fedcba98";
+const SERVED = "served-repo";
+const live = { actions: { land: true, session: true }, console_token: TOKEN,
+               repository: SERVED };
+const calls = [];
+function scripted(answers) {
+  return async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body), headers: options.headers,
+                 method: options.method });
+    const [status, payload] = answers.shift();
+    return { ok: status < 400, status, json: async () => payload };
+  };
+}
+out.capable = {
+  live: m.landCapable(live),
+  sessionOnly: m.landCapable({ actions: { session: true, submit: true },
+                               console_token: TOKEN }),
+  falseKey: m.landCapable({ actions: { land: false }, console_token: TOKEN }),
+  truthy: m.landCapable({ actions: { land: 1 }, console_token: TOKEN }),
+  noToken: m.landCapable({ actions: { land: true } }),
+  nothing: m.landCapable(undefined),
+};
+let h = host();
+let c = m.mountLandConfirm(h, { caps: { actions: { session: true, submit: true },
+                                        console_token: TOKEN } });
+out.unoffered = { enabled: c.enabled, children: h.children.length,
+                  asked: await c.ask(), confirmed: await c.confirm() };
+h = host();
+c = m.mountLandConfirm(h, { caps: live, branch: "sess-1", repository: SERVED,
+                            composed: true });
+out.composed = { enabled: c.enabled, children: h.children.length };
+h = host();
+c = m.mountLandConfirm(h, { caps: live, branch: "sess-1",
+                            repository: "other-repo" });
+out.otherRepository = { enabled: c.enabled, children: h.children.length };
+
+// the whole act: ask, see the branch and head, confirm ONCE
+h = host();
+c = m.mountLandConfirm(h, { caps: live, branch: "sess-1", repository: SERVED,
+  fetcher: scripted([
+    [200, { nonce: "N1", branch: "sess-1", head: HEAD }],
+    [200, { branch: "sess-1", merge_commit: MERGE, previous_main: HEAD,
+            served_checkout: "fast-forwarded", pushed: false }]]) });
+const [input, askButton, confirmButton, message] = h.children;
+out.mounted = { enabled: c.enabled, count: h.children.length, value: input.value,
+                ask: askButton.textContent, confirm: confirmButton.textContent,
+                confirmDisabled: confirmButton.disabled, role: message.attrs.role };
+out.question = await c.ask();
+out.confirmEnabledAfterAsk = !confirmButton.disabled;
+out.landed = await c.confirm();
+out.confirmDisabledAfter = confirmButton.disabled;
+out.again = await c.confirm();
+out.requests = calls.map(r => ({ url: r.url, body: r.body, method: r.method,
+                                 token: r.headers["X-XF-Console-Token"] }));
+
+// main is never asked for
+calls.length = 0;
+h = host();
+c = m.mountLandConfirm(h, { caps: live, branch: "main", repository: SERVED,
+                            fetcher: scripted([]) });
+out.mainValue = h.children[0].value;
+h.children[0].value = "main";
+out.mainAsked = await c.ask();
+out.mainCalls = calls.length;
+
+// a nonce bound to ANOTHER branch, or with no full head, is not offered
+h = host();
+c = m.mountLandConfirm(h, { caps: live, branch: "sess-1", repository: SERVED,
+  fetcher: scripted([[200, { nonce: "N2", branch: "sess-2", head: HEAD }],
+                     [200, { nonce: "N3", branch: "sess-1", head: "abc" }]]) });
+out.otherBranch = await c.ask();
+out.otherBranchConfirm = !h.children[2].disabled;
+out.shortHead = await c.ask();
+
+// refusals, in the server's own words; a governed landing's report
+h = host();
+c = m.mountLandConfirm(h, { caps: live, branch: "sess-1", repository: SERVED,
+  fetcher: scripted([
+    [409, { ok: false, error: "landing_refused", code: "no-declaration",
+            message: "main carries no .opendox/governance.yaml" }],
+    [200, { nonce: "N4", branch: "sess-1", head: HEAD }],
+    [409, { ok: false, error: "merge_conflict", code: "merge-conflict",
+            message: "sess-1 conflicts with main in: doc.md" }],
+    [200, { nonce: "N5", branch: "sess-1", head: HEAD }],
+    [200, { remote: "review", ref: "refs/heads/sess-1", url: "https://f.example/r",
+            branch: "sess-1", commit: HEAD }]]) });
+out.refusedAsk = await c.ask();
+await c.ask();
+out.conflict = await c.confirm();
+await c.ask();
+out.governed = await c.confirm();
+out.thrown = await m.mountLandConfirm(host(), { caps: live, branch: "sess-1",
+  repository: SERVED, fetcher: async () => { throw new Error("offline"); } }).ask();
+out.routes = [m.ACTIONS_SESSION_LAND_NONCE_ROUTE, m.ACTIONS_SESSION_LAND_ROUTE];
+// a bidi override in a branch name is SHOWN escaped, never rendered
+const BIDI = "sess\u202e1";
+out.bidi = {
+  shown: m.shownName(BIDI), plain: m.shownName("sess-1"),
+  question: m.confirmQuestion({ branch: BIDI, head: HEAD, nonce: "N" }),
+  landed: m.describeLanding({ ok: true, status: 200, payload: {
+    branch: BIDI, merge_commit: MERGE, previous_main: HEAD,
+    served_checkout: "left", pushed: false } }),
+  submitted: m.describeLanding({ ok: true, status: 200, payload: {
+    remote: "review", ref: "refs/heads/" + BIDI, url: "https://f.example/r",
+    branch: BIDI, commit: HEAD } }),
+};
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+@pytest.fixture(scope="module")
+def confirm_control(tmp_path_factory):
+    if NODE is None:
+        pytest.skip("node not available for the confirm control's probe")
+    root = tmp_path_factory.mktemp("land-confirm")
+    shutil.copy(WEB / "views" / "branch-actions.js", root / "branch-actions.js")
+    (root / "package.json").write_text('{"type": "module"}', encoding="utf-8")
+    (root / "harness.mjs").write_text(_CONTROL_HARNESS, encoding="utf-8")
+    done = subprocess.run([NODE, str(root / "harness.mjs")], capture_output=True,
+                          text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+def test_the_confirm_control_is_keyed_on_land_and_the_token(confirm_control):
+    """OQ-12-14 refined by ADV-14: `actions.land` exactly true, never
+    `session` or `submit`, and a console token to send; a composed render and
+    another repository on screen offer none."""
+    assert confirm_control["capable"] == {
+        "live": True, "sessionOnly": False, "falseKey": False, "truthy": False,
+        "noToken": False, "nothing": False}
+    assert confirm_control["unoffered"] == {"enabled": False, "children": 0,
+                                            "asked": None, "confirmed": None}
+    assert confirm_control["composed"] == {"enabled": False, "children": 0}
+    assert confirm_control["otherRepository"] == {"enabled": False,
+                                                  "children": 0}
+
+
+def test_the_confirm_control_shows_the_branch_and_head_and_posts_once(
+        confirm_control):
+    """OQ-12-13 and the contract's § The view: it fetches a nonce, shows the
+    branch and head it is bound to, and posts it ONCE."""
+    head = "0123456789abcdef0123456789abcdef01234567"
+    merge = "fedcba9876543210fedcba9876543210fedcba98"
+    assert confirm_control["routes"] == [NONCE_ROUTE, LAND_ROUTE]
+    assert confirm_control["mounted"] == {
+        "enabled": True, "count": 4, "value": "sess-1", "ask": "land",
+        "confirm": "confirm", "confirmDisabled": True, "role": "status"}
+    assert confirm_control["question"] == (
+        f"land sess-1 at {head} onto main with a merge commit?")
+    assert confirm_control["confirmEnabledAfterAsk"] is True
+    assert confirm_control["landed"] == (
+        f"landed sess-1 as {merge[:12]}; nothing pushed; undo with git revert "
+        f"-m 1 {merge}")
+    assert confirm_control["confirmDisabledAfter"] is True
+    assert confirm_control["again"] == "ask to land a branch first"
+    token = "Tk_" + "b" * 40
+    assert confirm_control["requests"] == [
+        {"url": NONCE_ROUTE, "body": {"branch": "sess-1"}, "method": "POST",
+         "token": token},
+        {"url": LAND_ROUTE, "body": {"branch": "sess-1", "nonce": "N1"},
+         "method": "POST", "token": token}]
+
+
+def test_the_confirm_control_never_offers_main_or_a_foreign_nonce(
+        confirm_control):
+    assert confirm_control["mainValue"] == ""
+    assert confirm_control["mainAsked"] == "name a branch other than main"
+    assert confirm_control["mainCalls"] == 0
+    assert confirm_control["otherBranch"].startswith("not landed")
+    assert confirm_control["otherBranchConfirm"] is False
+    assert confirm_control["shortHead"].startswith("not landed")
+
+
+def test_the_confirm_control_states_each_answer_in_the_servers_words(
+        confirm_control):
+    assert confirm_control["refusedAsk"] == (
+        "not landed: main carries no .opendox/governance.yaml")
+    assert confirm_control["conflict"] == (
+        "not landed: sess-1 conflicts with main in: doc.md")
+    assert confirm_control["governed"] == (
+        "submitted sess-1 to review (https://f.example/r) as refs/heads/sess-1; "
+        "the merge stays its governance's act")
+    assert confirm_control["thrown"] == "not landed: offline"
+
+
+def test_the_confirm_control_shows_a_branch_name_escaped(confirm_control):
+    """Copilot at `1bba2b1c` (previously missed, `branch-actions.js` 198): the
+    browser's question shows the branch as the terminal's prompt does, so a
+    bidi override cannot reorder the name the human confirms."""
+    bidi = confirm_control["bidi"]
+    assert bidi["plain"] == "sess-1"
+    assert bidi["shown"] == "'sess\\u202e1'"
+    for sentence in ("question", "landed", "submitted"):
+        assert "\u202e" not in bidi[sentence], sentence
+        assert "'sess\\u202e1'" in bidi[sentence], (sentence, bidi[sentence])
+
+
+_MENU_PROBE = r"""
+const am = await import("./account-menu.js");
+process.stdout.write(JSON.stringify({
+  standalone: am.accessLevel({ actions: { gate: true, edit: true, session: true,
+                                          submit: true, land: true } }),
+  notGranted: am.accessLevel({ actions: { session: true, land: false } }),
+  hostPlane: am.accessLevel({ actions: { session: true } }),
+}));
+"""
+
+
+def test_the_account_menu_names_land_where_it_is_granted(tmp_path):
+    """`land` is a write-class verb of its own (the chain T015 -> T016,
+    `6069024568` item 2): the access line names it where `actions.land` is
+    true, and a host's plane, which carries no key, reads as it did."""
+    if NODE is None:
+        pytest.skip("node not available for the account menu's probe")
+    for name in ("account-menu.js", "helpers.js"):
+        shutil.copy(WEB / "views" / name, tmp_path / name)
+    (tmp_path / "package.json").write_text('{"type": "module"}', encoding="utf-8")
+    (tmp_path / "probe.mjs").write_text(_MENU_PROBE, encoding="utf-8")
+    done = subprocess.run([NODE, str(tmp_path / "probe.mjs")],
+                          capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout) == {
+        "standalone": "gate, edit, session, submit, land",
+        "notGranted": "session", "hostPlane": "session"}

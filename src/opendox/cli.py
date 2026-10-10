@@ -895,7 +895,11 @@ def _generate_and_serve(args: argparse.Namespace, run_dir: Path, *,
                                    # `/capabilities` (plan 034 T073; #1144
                                    # 13.4a): the settings it loaded, and the
                                    # bundled server it started as its child.
-                                   install_report=_install_report(args))
+                                   install_report=_install_report(args),
+                                   # and the LANDER, bound with the install
+                                   # this run resolved (plan 038 T016; FR-007)
+                                   landing_factory=_served_landing_factory(
+                                       checkout_root, args))
     url = serve_mod.server_url(httpd, "/index.html")
     # THE CONSOLE TOKEN, ON A STANDALONE PLANE (plan 034 T104; RULED
     # openxFactory#656 `5963851934`). `/capabilities` no longer carries it, so
@@ -1321,6 +1325,42 @@ def _submission_port(repo_root: Path):
     from opendox.session_pr import LocalGitSubmissions
 
     return LocalGitSubmissions(repo_root)
+
+
+def _landing_port(repo_root: Path, *, local: bool = False):
+    """The CLI's LANDER (plan 038 T016; #1144 12.6a), or None.
+
+    The neutral lander (`landing.NeutralLander`) where the repository is
+    `standalone`: the explicit local install (`--local`, which `local` is, or
+    `OPENDOX_INSTALL_MODE=local`) and `main`'s committed declaration. NOTHING
+    otherwise: under `governed` no lander is bound and `land` submits through
+    the host's instrument (R2Q4 (a)), and under `unknown` none is bound and
+    `land` refuses (`landing.bound_lander`). The lander re-reads the
+    governance at the moment it lands, so a lander bound here lands nothing in
+    a repository that has stopped being standalone.
+
+    A named seam, as `_submission_port` is, so a test may inject one."""
+    from opendox.landing import bound_lander
+
+    return bound_lander(repo_root, local=local)
+
+
+def _served_landing_factory(checkout_root: Path, args: argparse.Namespace):
+    """The served plane's `landing_factory` (plan 038 T016): `_landing_port`
+    for the checkout, with the install THIS entry point resolved.
+
+    `generate-and-open --local` selects the local install without setting
+    `OPENDOX_INSTALL_MODE`, and `standalone` needs it (FR-007), so the
+    entry point declares it to the server, as it declares the notebook
+    adapter and the install report: the server never reads a flag it was not
+    handed. Resolved per call, so a landing reads the repository as it is."""
+    local = (getattr(args, "install_mode", None)
+             == runtime_config.INSTALL_MODE_LOCAL)
+
+    def landing_factory():
+        return _landing_port(checkout_root, local=local)
+
+    return landing_factory
 
 
 def _stats(snapshot: dict) -> dict[str, int]:

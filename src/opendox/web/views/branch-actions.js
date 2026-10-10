@@ -3,6 +3,15 @@
 // the route openDox's default profile contributes
 // (`opendox/serve_branch_actions.py`), and shows where the work went.
 //
+// And the LAND CONFIRM CONTROL (plan 038 T016; #1144 12.6a; OQ-12-13), the
+// view's half of the second confirmation issuer: it fetches a nonce for one
+// branch from `POST /actions/session/land-nonce`, SHOWS the branch and the
+// head that nonce is bound to, and posts it ONCE to `POST
+// /actions/session/land`, which answers what landed. It is keyed on
+// `actions.land`, present only under openDox's own profile and true only
+// where `land` can act. Its own mount (`mountLandConfirm`), beside the submit
+// control's and never inside it.
+//
 // KEYED ON `actions.submit`, NEVER ON `session` (OQ-12-14, refined by ADV-14).
 // The key is present only where openDox's own profile contributed the route,
 // and true only where that route answers for a local human, so the control is
@@ -138,4 +147,181 @@ export function mountBranchActions(
   // handler has nothing to await and marks the promise as handled.
   button.addEventListener("click", () => { void submit(); });
   return { enabled: true, submit };
+}
+
+// ---------------------------------------------------------------------------
+// The land confirm control (plan 038 T016; #1144 12.6a; OQ-12-13)
+// ---------------------------------------------------------------------------
+
+export const ACTIONS_SESSION_LAND_NONCE_ROUTE = "/actions/session/land-nonce";
+export const ACTIONS_SESSION_LAND_ROUTE = "/actions/session/land";
+
+// Whether this plane offers the land act at all: `actions.land` exactly true
+// (present only under openDox's own profile, true only where `land` can act),
+// and a console token to send, since both routes refuse a request without it.
+export function landCapable(caps) {
+  return Boolean(caps?.actions?.land === true
+    && typeof caps?.console_token === "string"
+    && caps.console_token.length > 0);
+}
+
+async function postLanding(route, body, caps, fetcher) {
+  const options = {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      [CONSOLE_TOKEN_HEADER]: caps.console_token,
+    },
+    body: JSON.stringify(body),
+  };
+  const doFetch = fetcher || fetch;
+  const response = await doFetch(route, options);
+  const payload = await response.json().catch(() => null);
+  return { ok: response.ok, status: response.status, payload };
+}
+
+// The nonce answer, accepted only when it is bound to the branch asked for and
+// names a full head: `{ nonce, branch, head }`, else null.
+export function issuedNonce(answer, branch) {
+  const p = answer?.payload;
+  if (!answer?.ok || !p || p.branch !== branch) return null;
+  if (typeof p.nonce !== "string" || !p.nonce) return null;
+  if (typeof p.head !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(p.head)) {
+    return null;
+  }
+  return { nonce: p.nonce, branch: p.branch, head: p.head };
+}
+
+// A branch name as the `land` prompt at the terminal shows it
+// (`session_git.shown`): as it is, or quoted with each character a display
+// acts on escaped (a control, a format character such as a bidi override, a
+// separator other than the space), so the name the human confirms cannot be
+// reordered on screen (Copilot at `1bba2b1c` on openDox-code#100).
+const ACTED_ON = /[\p{C}\p{Z}]/u;
+function escapedChar(ch) {
+  if (ch === "\\") return "\\\\";
+  if (ch === "'") return "\\'";
+  if (ch === " " || !ACTED_ON.test(ch)) return ch;
+  const cp = ch.codePointAt(0);
+  const hex = (width) => cp.toString(16).padStart(width, "0");
+  if (cp < 0x100) return "\\x" + hex(2);
+  return cp < 0x10000 ? "\\u" + hex(4) : "\\U" + hex(8);
+}
+export function shownName(text) {
+  const name = String(text ?? "");
+  if (![...name].some((ch) => ch !== " " && ACTED_ON.test(ch))) return name;
+  return "'" + [...name].map(escapedChar).join("") + "'";
+}
+
+// The question the control asks: the branch and the head the nonce is bound to.
+export function confirmQuestion(issued) {
+  return "land " + shownName(issued.branch) + " at " + issued.head
+    + " onto " + DEFAULT_BRANCH + " with a merge commit?";
+}
+
+// The sentence for a landing's answer: what landed and the command that undoes
+// it (`Landed`), where a governed landing went (the instrument's report), or
+// the refusal the server named. The two success shapes are told apart by their
+// fields (`merge_commit` is the landing's alone).
+export function describeLanding(answer) {
+  const p = answer?.payload;
+  if (answer?.ok && p && typeof p.merge_commit === "string") {
+    return "landed " + shownName(p.branch) + " as " + p.merge_commit.slice(0, 12)
+      + "; nothing pushed; undo with git revert -m 1 " + p.merge_commit;
+  }
+  if (answer?.ok && p && typeof p.remote === "string" && typeof p.ref === "string") {
+    return "submitted " + shownName(p.branch) + " to " + p.remote + " (" + p.url
+      + ") as " + shownName(p.ref) + "; the merge stays its governance's act";
+  }
+  const why = (p && (p.message || p.error)) || ("HTTP " + (answer?.status ?? "?"));
+  return "not landed: " + why;
+}
+
+// Mount the land confirm control into `host`, or leave `host` empty where this
+// plane offers no land act, where the render is composed (D10), or where
+// ANOTHER repository than the served one is on screen (the routes land a
+// branch of the served checkout alone). Returns a controller: `ask()` fetches
+// a nonce and shows what it is bound to; `confirm()` posts that nonce, once.
+// Each resolves to the sentence it showed (null when nothing is offered).
+export function mountLandConfirm(
+    host, { caps, branch, repository, composed, fetcher } = {}) {
+  const none = { enabled: false, ask: async () => null, confirm: async () => null };
+  if (!host) return none;
+  host.textContent = "";
+  if (composed || !landCapable(caps)
+      || anotherRepositoryIsActive(caps, repository)) {
+    return none;
+  }
+  const doc = host.ownerDocument;
+  const input = doc.createElement("input");
+  input.type = "text";
+  input.className = "search";
+  input.value = proposedBranch(branch);
+  input.placeholder = "branch to land";
+  input.setAttribute("aria-label", "branch to land");
+  const askButton = doc.createElement("button");
+  askButton.type = "button";
+  askButton.className = "cbtn";
+  askButton.textContent = "land";
+  const confirmButton = doc.createElement("button");
+  confirmButton.type = "button";
+  confirmButton.className = "cbtn";
+  confirmButton.textContent = "confirm";
+  confirmButton.disabled = true;
+  const message = doc.createElement("span");
+  message.setAttribute("role", "status");
+  host.append(input, askButton, confirmButton, message);
+
+  // The nonce the human is looking at, or null. It is let go BEFORE it is
+  // posted, so the control can never post one nonce twice.
+  let pending = null;
+
+  function show(ok, text) {
+    message.className = ok ? "" : "repopick-msg";
+    message.textContent = text;
+    return text;
+  }
+
+  async function ask() {
+    pending = null;
+    confirmButton.disabled = true;
+    const name = String(input.value || "").trim();
+    if (!name || name === DEFAULT_BRANCH) {
+      return show(false, "name a branch other than " + DEFAULT_BRANCH);
+    }
+    askButton.disabled = true;
+    show(true, "");
+    try {
+      const answer = await postLanding(ACTIONS_SESSION_LAND_NONCE_ROUTE,
+                                       { branch: name }, caps, fetcher);
+      const issued = issuedNonce(answer, name);
+      if (!issued) return show(false, describeLanding(answer));
+      pending = issued;
+      confirmButton.disabled = false;
+      return show(true, confirmQuestion(issued));
+    } catch (err) {
+      return show(false, "not landed: " + (err?.message || "error"));
+    } finally {
+      askButton.disabled = false;
+    }
+  }
+
+  async function confirm() {
+    const issued = pending;
+    pending = null;
+    confirmButton.disabled = true;
+    if (!issued) return show(false, "ask to land a branch first");
+    try {
+      const answer = await postLanding(
+        ACTIONS_SESSION_LAND_ROUTE,
+        { branch: issued.branch, nonce: issued.nonce }, caps, fetcher);
+      return show(answer.ok, describeLanding(answer));
+    } catch (err) {
+      return show(false, "not landed: " + (err?.message || "error"));
+    }
+  }
+  // Each settles every outcome itself, so a click has nothing to await.
+  askButton.addEventListener("click", () => { void ask(); });
+  confirmButton.addEventListener("click", () => { void confirm(); });
+  return { enabled: true, ask, confirm };
 }

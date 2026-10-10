@@ -445,9 +445,13 @@ def test_the_lens_of_a_real_standalone_serve_offers_neither_seed_action(
     capabilities, snapshot = served["capabilities"], served["snapshot"]
     assert capabilities["views"]["contributed_routes"] == [
         {"method": "POST", "pattern": "/actions/session/submit",
+         "is_prefix": False},
+        {"method": "POST", "pattern": "/actions/session/land-nonce",
+         "is_prefix": False},
+        {"method": "POST", "pattern": "/actions/session/land",
          "is_prefix": False}], (
         "a serve with no host contributes only openDox's own submit route "
-        "(plan 038 T015), and no seed route")
+        "(plan 038 T015) and its two land routes (T016), and no seed route")
     # SINCE T084 (plan 034; RULED openxFactory#656 `5920216845`, item 1) the
     # gate flag is true only where a contributed binding answers a gate verb,
     # and a serve with no host contributes none. So it reads false in both

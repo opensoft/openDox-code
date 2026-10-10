@@ -476,12 +476,18 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 # offering two affordances that would answer `404 unknown_action`.
 ACTIONS_GATE_PREFIX = "/actions/gate/"
 ACTIONS_REFRESH_ROUTE = "/actions/refresh"
-# AND THE ONE ROUTE THE `actions` MAP NAMES THAT openDox's OWN DEFAULT PROFILE
-# CONTRIBUTES (plan 038 T015; #1144 12.4a): `POST /actions/session/submit`,
-# declared beside its handler in `serve_branch_actions`, which imports only the
-# standard library. Not a fixed core arm either, so `actions.submit` is present
-# only where a binding the assembly collected answers it (`compute_capabilities`).
-from opendox.serve_branch_actions import ACTIONS_SESSION_SUBMIT_ROUTE  # noqa: E402
+# AND THE ROUTES THE `actions` MAP NAMES THAT openDox's OWN DEFAULT PROFILE
+# CONTRIBUTES (plan 038 T015, T016; #1144 12.4a, 12.6a): `POST
+# /actions/session/submit`, and `POST /actions/session/land-nonce` with `POST
+# /actions/session/land` (OQ-12-13), declared beside their handlers in
+# `serve_branch_actions`, which imports only the standard library. Not fixed
+# core arms either, so `actions.submit` and `actions.land` are present only
+# where bindings the assembly collected answer them (`compute_capabilities`).
+from opendox.serve_branch_actions import (  # noqa: E402
+    ACTIONS_SESSION_LAND_NONCE_ROUTE,
+    ACTIONS_SESSION_LAND_ROUTE,
+    ACTIONS_SESSION_SUBMIT_ROUTE,
+)
 
 # THE STATIC BUNDLE'S CONTENT TYPES, PINNED (plan 034 T084, the holder's
 # addition for #1144 10.2, "reachable in a browser from an openDox-only
@@ -537,6 +543,63 @@ def answers_the_submit(binding) -> bool:
     /actions/session/submit` (plan 038 T015; #1144 12.4a)."""
     return binding.matches("POST", ACTIONS_SESSION_SUBMIT_ROUTE)
 
+
+def answers_the_land(binding) -> bool:
+    """Whether a contributed route binding answers `POST /actions/session/land`
+    (plan 038 T016; #1144 12.6a)."""
+    return binding.matches("POST", ACTIONS_SESSION_LAND_ROUTE)
+
+
+def answers_the_land_nonce(binding) -> bool:
+    """Whether a contributed route binding answers `POST
+    /actions/session/land-nonce` (plan 038 T016; OQ-12-13)."""
+    return binding.matches("POST", ACTIONS_SESSION_LAND_NONCE_ROUTE)
+
+
+def served_lander(checkout_root, landing_factory=None):
+    """The lander a server binds for `checkout_root` (plan 038 T016; #1144
+    12.6a: "the neutral lander is bound through `landing_factory`"), or None.
+
+    The injected `landing_factory` where there is one (the entry point
+    declares it with the install it resolved, `cli._served_landing_factory`;
+    a test injects its own). Unset, the neutral lander under `standalone`
+    (`landing.bound_lander`, with the install mode read from the environment)
+    and NOTHING otherwise: under `governed` and `unknown` no lander is bound.
+    """
+    if landing_factory is not None:
+        return landing_factory()
+    from opendox.landing import bound_lander
+
+    return bound_lander(Path(checkout_root))
+
+
+def landing_can_act(checkout_root, landing_factory=None) -> bool:
+    """Whether `land` can act on `checkout_root` NOW: a lander is bound, or the
+    repository is `governed` and a host's instrument is contributed, through
+    which `land` submits (R2Q4 (a); contracts § /capabilities). False under
+    `unknown`, under `governed` with no instrument, and wherever the reading
+    itself fails: a flag must never offer a landing the route would refuse.
+    A binding that cannot be built is no lander, as `_session_lander` reads it.
+    """
+    from opendox.cli_branch_actions import landing_refusal
+
+    try:
+        lander = served_lander(checkout_root, landing_factory)
+    except Exception:  # noqa: BLE001 - absence is a capability verdict
+        lander = None
+    try:
+        return landing_refusal(lander, Path(checkout_root)) is None
+    except Exception:  # noqa: BLE001 - a reading that fails offers nothing
+        return False
+
+def lands_here(bindings) -> bool:
+    """Whether `bindings` answer BOTH land routes, the nonce and the landing:
+    the confirm control needs the two, so one alone offers no landing."""
+    bindings = tuple(bindings or ())
+    return (any(answers_the_land_nonce(b) for b in bindings)
+            and any(answers_the_land(b) for b in bindings))
+
+
 _DEFAULT_CAPABILITIES = {"actions": {"notebook": False, "gate": False, "refresh": False,
                                     "session": False, "edit": False,
                                     "intent": False},
@@ -548,7 +611,8 @@ _DEFAULT_CAPABILITIES = {"actions": {"notebook": False, "gate": False, "refresh"
 def compute_capabilities(*, nlm_present: bool, checkout_real: bool, loopback: bool,
                          actor: str | None = None,
                          refresh_binding: str | None = None,
-                         route_bindings: tuple = ()) -> dict:
+                         route_bindings: tuple = (),
+                         landing_acts: bool = False) -> dict:
     """The startup capability verdict. The notebook action is available only on
     a loopback bind with `nlm` reachable and a real checkout — the served static
     image satisfies none of these, so the UI hides the affordance there. GATE
@@ -639,7 +703,20 @@ def compute_capabilities(*, nlm_present: bool, checkout_real: bool, loopback: bo
     present its VALUE is the local human's verdict, the route's own first two
     clauses, so it is never true where the route would refuse: false on a
     hosted plane, and false with no resolved actor or no real checkout. The
-    submit control keys on it and never on `session` (OQ-12-14)."""
+    submit control keys on it and never on `session` (OQ-12-14).
+
+    LAND (plan 038 T016; #1144 12.6a; OQ-12-13, OQ-12-14 refined by ADV-14)
+    is the second such key. It is PRESENT only where the assembly collected
+    bindings answering BOTH of its routes, `POST /actions/session/land-nonce`
+    and `POST /actions/session/land` (`answers_the_land_nonce`,
+    `answers_the_land`), which only openDox's own default profile contributes,
+    so a host's map is unchanged (R2Q3 (a)). Its VALUE is the local human's
+    verdict AND `landing_acts`, whether `land` can act on the served checkout
+    (`landing_can_act`: a lander is bound, or the repository is `governed`
+    with an instrument). So it reads false under `unknown`, under `governed`
+    with no instrument, and on the hosted plane. The repository can change
+    while a server runs (a declaration committed to `main`), so the
+    `/capabilities` arm reads that half again on each request."""
     binding = refresh_binding
     if binding == registry_mod.BINDING_REGENERATE and not (loopback and checkout_real):
         binding = None
@@ -662,6 +739,8 @@ def compute_capabilities(*, nlm_present: bool, checkout_real: bool, loopback: bo
     }
     if any(answers_the_submit(b) for b in bindings):
         actions["submit"] = local_human
+    if lands_here(bindings):
+        actions["land"] = local_human and bool(landing_acts)
     return {
         "actions": actions,
         "actor": actor if (actor and checkout_real and loopback) else None,
@@ -1092,6 +1171,12 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
     # neutral `LocalGitSubmissions` for this checkout"; a host contributes its
     # own `SubmissionPort` here, and a test injects one.
     submission_factory = None
+    # The LANDER supplier (plan 038 T016; #1144 12.6a: "the neutral lander is
+    # bound through `landing_factory`, declared beside `pull_request_factory`").
+    # None means "the neutral lander for this checkout where it is
+    # standalone, and nothing otherwise" (`served_lander`); the entry point
+    # declares one with the install it resolved, and a test injects its own.
+    landing_factory = None
     # The doxBench `WorkbenchModelPort` supplier (T024, research R6). None means
     # NO model port at all — the honest empty-catalog/editor-only posture
     # (FR-025), not an error. The injection boundary stays DUCK-TYPED; see
@@ -1290,6 +1375,24 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
         except Exception:  # noqa: BLE001 - absence is a capability verdict
             return None
 
+    def _session_lander(self):
+        """The `LandingPort` the product's own land act lands through (plan
+        038 T016; #1144 12.6a), or None.
+
+        Declared ONLY when the `session` capability is TRUE, for the reason
+        the submission port is: a landing writes the served checkout's `main`
+        for its local human, which a hosted plane never serves. Built through
+        `landing_factory` (`served_lander`): the neutral lander where the
+        repository is `standalone`, and NOTHING under `governed` (whose
+        landing goes through the host's instrument) or `unknown`. A lander
+        that cannot be built is absence, not an error."""
+        if not self.capabilities.get("actions", {}).get("session"):
+            return None
+        try:
+            return served_lander(self.checkout_root, self.landing_factory)
+        except Exception:  # noqa: BLE001 - absence is a capability verdict
+            return None
+
     def _session_repository(self):
         """The repository half of the `(repository, session-branch)` key.
 
@@ -1373,6 +1476,16 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
             # asked: a child that has gone is reported as gone.
             if self.install_report is not None:
                 payload["install"] = self.install_report()
+            # WHETHER `land` CAN ACT, read PER REQUEST where the key is
+            # present (plan 038 T016): the repository decides it, and a
+            # declaration committed to `main` while this server runs changes
+            # it. A copy of the map, so the startup verdict is never
+            # rewritten by a request.
+            actions = payload.get("actions", {})
+            if "land" in actions:
+                payload["actions"] = {**actions, "land": bool(
+                    actions.get("session")) and landing_can_act(
+                        self.checkout_root, self.landing_factory)}
             self._serve_bytes(json.dumps(payload).encode("utf-8"),
                               JSON_CTYPE, head_only)
             return True
@@ -2181,6 +2294,7 @@ def build_server(
     adapter_factory=None,
     pull_request_factory=None,
     submission_factory=None,
+    landing_factory=None,
     model_port_factory=None,
     schema_validator_factory=_UNSET_VALIDATOR_FACTORY,
     actor: str | None = None,
@@ -2219,6 +2333,11 @@ def build_server(
     `git push` that names no platform, and a governed host may contribute its
     own `SubmissionPort` through it (see `_session_submissions`).
     `pull_request_factory` keeps `GhPullRequests` for `gate open-pr`.
+    `landing_factory` is the LANDER seam beside them (plan 038 T016; #1144
+    12.6a): unset binds the neutral lander where the checkout is
+    `standalone` and nothing otherwise (`served_lander`), reading the install
+    mode from the environment; the entry point declares one with the install
+    it resolved, so `generate-and-open --local` lands without the setting.
     `model_port_factory` is the SAME kind of seam for the
     doxBench `WorkbenchModelPort` (T024, research R6): unset means NO model
     port at all — the honest empty-catalog/editor-only posture (FR-025), not
@@ -2473,6 +2592,12 @@ def build_server(
         # THE ROUTES THIS ASSEMBLY COLLECTED, so a flag whose affordance is a
         # contributed route is true only where one answers (T084; batch L).
         route_bindings=route_bindings,
+        # and whether `land` can act here at startup (plan 038 T016), read
+        # only where the land routes are bound for a local human; the
+        # `/capabilities` arm reads it again on each request
+        landing_acts=bool(
+            lands_here(route_bindings) and loopback and resolved_actor
+            and landing_can_act(checkout_root, landing_factory)),
     )
     # The human console's per-serve token (FR-019's third clause, review finding
     # 2). Minted only where session verbs exist at all.
@@ -2625,6 +2750,8 @@ def build_server(
                                 if pull_request_factory is not None else None),
         "submission_factory": (staticmethod(submission_factory)
                               if submission_factory is not None else None),
+        "landing_factory": (staticmethod(landing_factory)
+                           if landing_factory is not None else None),
         "model_port_factory": (staticmethod(model_port_factory)
                               if model_port_factory is not None else None),
         # UNSET defaults to the pinned loader; an EXPLICIT None is a caller
