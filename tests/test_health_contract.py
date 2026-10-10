@@ -79,6 +79,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import pytest
+import yaml
 
 from opendox import contracts
 from opendox import health_contract as hc
@@ -1346,14 +1347,24 @@ def test_refused_patch_is_a_pathed_engine_kind() -> None:
         ("pathless-identity-is-category-and-entry", "/identity/category")]
 
 
+def _default(value: Any) -> Any:
+    """`6090537166` item 8 (b): a set by its members in `ascii()` order."""
+    return sorted(value, key=ascii) if isinstance(value, (set, frozenset)) else str(value)
+
+
 def _canonical_digest(entry_id: Any) -> str:
     """The holder's `6088484643`, spelled independently of the module."""
     try:
         text = json.dumps(entry_id, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-                          allow_nan=True, default=str)
+                          allow_nan=True, default=_default)
     except (TypeError, ValueError):
         text = ascii(entry_id)
     return "sha256-" + hashlib.sha256(text.encode("ascii")).hexdigest()
+
+
+#: The one text an id takes when neither spelling can write it (item 8 (a)).
+_PAST_THE_LIMITS = "sha256-" + hashlib.sha256(
+    b"<past the int-digit or recursion limit>").hexdigest()
 
 
 _SELF: list[Any] = []
@@ -1380,6 +1391,9 @@ _REFUSED_IDS = {
         {1: "caf\u00e9", "b": 2},
         "sha256-" + hashlib.sha256(b"{1: 'caf\\xe9', 'b': 2}").hexdigest()),
     "a self-referencing list": (_SELF, "sha256-" + hashlib.sha256(b"[[...]]").hexdigest()),
+    # 6090537166 item 8 (b): a YAML !!set, its members in ascii() order
+    "a set id": (yaml.safe_load("id: !!set {beta: null, alpha: null}")["id"],
+                 "sha256-" + hashlib.sha256(b'["alpha","beta"]').hexdigest()),
     # the holder's 6088732352 (b): the fallback is ascii(), so a non-ASCII key
     # in a mixed-type mapping digests its escaped spelling
     "a non-ASCII key among mixed-type keys": (
@@ -1409,9 +1423,59 @@ def test_refused_entry_keeps_distinct_ids_apart_and_never_raises() -> None:
     deep: Any = "x"
     for _ in range(50_000):  # past the C recursion limit json.dumps and repr() share
         deep = [deep]
-    deep_entry = hc.refused_entry(deep)
-    assert re.fullmatch(r"sha256-[0-9a-f]{64}", deep_entry)
+    assert hc.refused_entry(deep) == _PAST_THE_LIMITS
     assert hc.refused_entry({"b": 1, "a": [2, 1]}) == hc.refused_entry({"a": [2, 1], "b": 1})
+
+
+#: The four ids lane 3 reproduced at `471b7231`: integers YAML yields past
+#: Python's 4300-digit conversion limit, which neither `json.dumps` nor
+#: `ascii()` can write.
+_PAST_THE_DIGIT_LIMIT = {
+    "a long 0x literal": "id: 0x" + "f" * 4000,
+    "a long 0b literal": "id: 0b" + "1" * 15000,
+    "a long 0x literal in a list": "id: [0x" + "f" * 4000 + "]",
+    "a long 0x literal in a mixed-key mapping": "id: {1: 0x" + "f" * 4000 + ", b: 2}",
+}
+
+
+@pytest.mark.parametrize("name", list(_PAST_THE_DIGIT_LIMIT))
+def test_refused_entry_never_raises_past_the_int_digit_limit(name: str) -> None:
+    """Lane 3's MAJOR at `471b7231`, as the holder ruled it (`6090537166` item
+    8 (a)): an id neither spelling can write takes ONE fixed text, so it is a
+    `sha256-` entry and never a `ValueError`. Two such ids share it, an
+    accepted limit that `identity-collision` reports."""
+    entry_id = yaml.safe_load(_PAST_THE_DIGIT_LIMIT[name])["id"]
+    assert hc.refused_entry(entry_id) == _PAST_THE_LIMITS
+
+
+_SET_UNDER_A_SEED = """
+import json
+from opendox import health_contract as hc
+members = {members!r}
+print(json.dumps([hc.refused_entry(set(members)), str(set(members))]))
+"""
+
+
+def test_a_set_id_is_one_entry_under_every_hash_seed() -> None:
+    """Lane 3's MINOR at `471b7231`, as the holder ruled it (`6090537166` item
+    8 (b)): a set's `str()` follows hash order, which `PYTHONHASHSEED` moves,
+    so the default hook spells a set by its members in `ascii()` order. The
+    same set id, digested in four interpreters with four seeds, is one entry;
+    its `str()` there is not one spelling, so the row bites."""
+    members = ["delta", "alpha", "kilo", "echo", "bravo", "juliet", "golf", "india",
+               "charlie", "hotel", "foxtrot", "lima"]
+    entries, spellings = set(), set()
+    for seed in ("0", "1", "2", "3"):
+        env = {**os.environ, "PYTHONHASHSEED": seed,
+               "PYTHONPATH": os.pathsep.join([str(SRC), os.environ.get("PYTHONPATH", "")])}
+        done = subprocess.run(
+            [sys.executable, "-c", _SET_UNDER_A_SEED.format(members=members)],
+            env=env, capture_output=True, text=True, timeout=60, check=True)
+        entry, spelling = json.loads(done.stdout)
+        entries.add(entry)
+        spellings.add(spelling)
+    assert len(spellings) > 1
+    assert entries == {_canonical_digest(set(members))}
 
 
 def test_an_engine_finding_against_a_41_character_pack_is_refused() -> None:
