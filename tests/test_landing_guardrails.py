@@ -2946,6 +2946,42 @@ def test_the_land_route_shows_a_conflict_and_lands_nothing(tmp_path,
     assert world.refs() == before
 
 
+def test_a_binding_that_answers_no_lander_is_no_lander(world, tmp_path,
+                                                      local_install, capsys,
+                                                      monkeypatch):
+    """Copilot at `1bba2b1c` (previously missed, `cli_branch_actions.py` 374
+    and 419): a binding whose answer has no callable `land` is NO lander, so
+    `actions.land` reads false, the nonce route refuses by name, the verb
+    refuses before it asks, and nothing answers 500."""
+    before = world.refs()
+    for answer in (object(), "a lander", type("NoLand", (), {"land": 7})()):
+        with serving(world.root, tmp_path / f"s{id(answer)}",
+                     landing_factory=lambda answer=answer: answer) as httpd:
+            assert capabilities(httpd)["actions"]["land"] is False
+            status, body = ask(httpd, "POST", NONCE_ROUTE, {"branch": BRANCH},
+                               token=httpd.console_token)
+            assert (status, body["code"]) == (409, "no-lander-bound"), body
+        monkeypatch.setattr(cli, "_landing_port",
+                            lambda root, *, local=False, answer=answer: answer)
+        terminal = at_terminal(monkeypatch, f"{BRANCH}\n")
+        status, _out, err = land_verb(capsys, world.root)
+        assert status == 1 and "no lander is bound" in err, err
+        assert terminal.shown == ""
+    assert world.refs() == before
+
+
+def test_the_landed_report_shows_a_branch_name_escaped(world):
+    """Copilot at `1bba2b1c` (previously missed): the verb's report prints a
+    branch name as the prompt shows it, escaped where it holds a character a
+    terminal acts on (a bidi override)."""
+    name = "sess\u202e1"
+    lines = cli_branch_actions._landed_lines({
+        "branch": name, "merge_commit": "a" * 40, "previous_main": "b" * 40,
+        "served_checkout": "left", "pushed": False})
+    assert "\u202e" not in "\n".join(lines)
+    assert repr(name) in lines[0]
+
+
 def test_a_conflict_answer_redacts_every_field_it_carries(tmp_path,
                                                          local_install):
     """Copilot r4234726885 on #100: `paths` and `remedy` carry repository text
@@ -3274,6 +3310,18 @@ out.governed = await c.confirm();
 out.thrown = await m.mountLandConfirm(host(), { caps: live, branch: "sess-1",
   repository: SERVED, fetcher: async () => { throw new Error("offline"); } }).ask();
 out.routes = [m.ACTIONS_SESSION_LAND_NONCE_ROUTE, m.ACTIONS_SESSION_LAND_ROUTE];
+// a bidi override in a branch name is SHOWN escaped, never rendered
+const BIDI = "sess\u202e1";
+out.bidi = {
+  shown: m.shownName(BIDI), plain: m.shownName("sess-1"),
+  question: m.confirmQuestion({ branch: BIDI, head: HEAD, nonce: "N" }),
+  landed: m.describeLanding({ ok: true, status: 200, payload: {
+    branch: BIDI, merge_commit: MERGE, previous_main: HEAD,
+    served_checkout: "left", pushed: false } }),
+  submitted: m.describeLanding({ ok: true, status: 200, payload: {
+    remote: "review", ref: "refs/heads/" + BIDI, url: "https://f.example/r",
+    branch: BIDI, commit: HEAD } }),
+};
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -3352,6 +3400,18 @@ def test_the_confirm_control_states_each_answer_in_the_servers_words(
         "submitted sess-1 to review (https://f.example/r) as refs/heads/sess-1; "
         "the merge stays its governance's act")
     assert confirm_control["thrown"] == "not landed: offline"
+
+
+def test_the_confirm_control_shows_a_branch_name_escaped(confirm_control):
+    """Copilot at `1bba2b1c` (previously missed, `branch-actions.js` 198): the
+    browser's question shows the branch as the terminal's prompt does, so a
+    bidi override cannot reorder the name the human confirms."""
+    bidi = confirm_control["bidi"]
+    assert bidi["plain"] == "sess-1"
+    assert bidi["shown"] == "'sess\\u202e1'"
+    for sentence in ("question", "landed", "submitted"):
+        assert "\u202e" not in bidi[sentence], sentence
+        assert "'sess\\u202e1'" in bidi[sentence], (sentence, bidi[sentence])
 
 
 _MENU_PROBE = r"""

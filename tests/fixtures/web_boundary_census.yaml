@@ -191,7 +191,7 @@ measured_at: "opensoft/openDox-code main a99eba03e31a0aee1cc15a061fdf718cc88a2c4
 # shape and `test_the_declared_totals_are_re_derived_from_the_rows` can refuse a
 # drift between the two. Measured at slice S4 (see the S4 block above).
 totals:
-  A: {files: 27, loc: 19083}
+  A: {files: 27, loc: 19104}
   B: {files: 1, loc: 73}
   C: {files: 14, loc: 12795}
   "?": {files: 1, loc: 1586}
@@ -233,8 +233,8 @@ files:
 
   - path: views/branch-actions.js
     class: A
-    loc: 306
-    note: "plan 038 T015 ADDITION (created, no manifest row -- RULED OQ-C): openDox's OWN submit control (#1144 12.4a). Its one route, ACTIONS_SESSION_SUBMIT_ROUTE (`/actions/session/submit`), is answered by openDox's own `serve_branch_actions.py`, contributed by openDox's default profile, so it addresses no route another column declares. Keyed on `actions.submit` and never on `session` (OQ-12-14, refined by ADV-14); never in the `doxbench-*.js` files; a composed render offers no control (D10). Import-free, no governance word. loc 141 -> 306 on plan 038 T016 (#1144 12.6a; OQ-12-13): the LAND CONFIRM CONTROL, `mountLandConfirm`, a separate mount beside the submit control's. Its two routes, ACTIONS_SESSION_LAND_NONCE_ROUTE (`/actions/session/land-nonce`) and ACTIONS_SESSION_LAND_ROUTE (`/actions/session/land`), are answered by the same `serve_branch_actions.py`, contributed by the same default profile. Keyed on `actions.land` and never on `session`; it fetches a nonce, shows the branch and head it is bound to, and posts it once; a composed render, or another repository on screen, offers none."
+    loc: 327
+    note: "plan 038 T015 ADDITION (created, no manifest row -- RULED OQ-C): openDox's OWN submit control (#1144 12.4a). Its one route, ACTIONS_SESSION_SUBMIT_ROUTE (`/actions/session/submit`), is answered by openDox's own `serve_branch_actions.py`, contributed by openDox's default profile, so it addresses no route another column declares. Keyed on `actions.submit` and never on `session` (OQ-12-14, refined by ADV-14); never in the `doxbench-*.js` files; a composed render offers no control (D10). Import-free, no governance word. loc 141 -> 306 on plan 038 T016 (#1144 12.6a; OQ-12-13): the LAND CONFIRM CONTROL, `mountLandConfirm`, a separate mount beside the submit control's. Its two routes, ACTIONS_SESSION_LAND_NONCE_ROUTE (`/actions/session/land-nonce`) and ACTIONS_SESSION_LAND_ROUTE (`/actions/session/land`), are answered by the same `serve_branch_actions.py`, contributed by the same default profile. Keyed on `actions.land` and never on `session`; it fetches a nonce, shows the branch and head it is bound to, and posts it once; a composed render, or another repository on screen, offers none. loc 306 -> 327 on T016's review round (Copilot at 1bba2b1c on openDox-code#100): `shownName` shows a branch name as the terminal's prompt does, escaped where it holds a character a display acts on (a bidi override), in the question and in both answers."
 
   - path: views/bullseye.js
     class: A

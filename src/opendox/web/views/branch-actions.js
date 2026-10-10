@@ -192,9 +192,30 @@ export function issuedNonce(answer, branch) {
   return { nonce: p.nonce, branch: p.branch, head: p.head };
 }
 
+// A branch name as the `land` prompt at the terminal shows it
+// (`session_git.shown`): as it is, or quoted with each character a display
+// acts on escaped (a control, a format character such as a bidi override, a
+// separator other than the space), so the name the human confirms cannot be
+// reordered on screen (Copilot at `1bba2b1c` on openDox-code#100).
+const ACTED_ON = /[\p{C}\p{Z}]/u;
+function escapedChar(ch) {
+  if (ch === "\\") return "\\\\";
+  if (ch === "'") return "\\'";
+  if (ch === " " || !ACTED_ON.test(ch)) return ch;
+  const cp = ch.codePointAt(0);
+  const hex = (width) => cp.toString(16).padStart(width, "0");
+  if (cp < 0x100) return "\\x" + hex(2);
+  return cp < 0x10000 ? "\\u" + hex(4) : "\\U" + hex(8);
+}
+export function shownName(text) {
+  const name = String(text ?? "");
+  if (![...name].some((ch) => ch !== " " && ACTED_ON.test(ch))) return name;
+  return "'" + [...name].map(escapedChar).join("") + "'";
+}
+
 // The question the control asks: the branch and the head the nonce is bound to.
 export function confirmQuestion(issued) {
-  return "land " + issued.branch + " at " + issued.head
+  return "land " + shownName(issued.branch) + " at " + issued.head
     + " onto " + DEFAULT_BRANCH + " with a merge commit?";
 }
 
@@ -205,12 +226,12 @@ export function confirmQuestion(issued) {
 export function describeLanding(answer) {
   const p = answer?.payload;
   if (answer?.ok && p && typeof p.merge_commit === "string") {
-    return "landed " + p.branch + " as " + p.merge_commit.slice(0, 12)
+    return "landed " + shownName(p.branch) + " as " + p.merge_commit.slice(0, 12)
       + "; nothing pushed; undo with git revert -m 1 " + p.merge_commit;
   }
   if (answer?.ok && p && typeof p.remote === "string" && typeof p.ref === "string") {
-    return "submitted " + p.branch + " to " + p.remote + " (" + p.url + ") as "
-      + p.ref + "; the merge stays its governance's act";
+    return "submitted " + shownName(p.branch) + " to " + p.remote + " (" + p.url
+      + ") as " + shownName(p.ref) + "; the merge stays its governance's act";
   }
   const why = (p && (p.message || p.error)) || ("HTTP " + (answer?.status ?? "?"));
   return "not landed: " + why;

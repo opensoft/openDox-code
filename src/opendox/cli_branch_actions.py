@@ -359,6 +359,19 @@ def branch_head(checkout_root, branch: str) -> str:
     return head
 
 
+def _usable(lander):
+    """`lander` where it can land (a callable `land`), else None. A binding's
+    answer is a host's or a test's, so one with no `land` operation is NO
+    lander: it must neither offer the act nor fail it with a 500 (Copilot at
+    `1bba2b1c` on #100)."""
+    if lander is None:
+        return None
+    try:
+        return lander if callable(getattr(lander, "land", None)) else None
+    except Exception:  # noqa: BLE001 - a binding that cannot be read lands nothing
+        return None
+
+
 def landing_refusal(lander, checkout_root, *, local: bool = False):
     """None where `land` can act on `checkout_root`, else the refusal that
     names why not (contracts § /capabilities, the `actions.land` row).
@@ -370,7 +383,7 @@ def landing_refusal(lander, checkout_root, *, local: bool = False):
     """
     from opendox import landing
 
-    if lander is not None:
+    if _usable(lander) is not None:
         return None
     reading = landing.read_governance(checkout_root, local=local)
     if reading.governance == landing.GOVERNED:
@@ -403,6 +416,7 @@ def land_branch(lander, checkout_root, branch: str, confirmation, *,
 
     if branch == landing.DEFAULT_BRANCH:
         raise main_refused()
+    lander = _usable(lander)
     if lander is not None:
         return landed_object(lander.land(branch, confirmation=confirmation))
     refused = landing_refusal(None, checkout_root, local=local)
@@ -414,9 +428,14 @@ def land_branch(lander, checkout_root, branch: str, confirmation, *,
 
 
 def _landed_lines(landed: dict) -> list[str]:
-    """The printed report: the merge commit, and the command that undoes it."""
+    """The printed report: the merge commit, and the command that undoes it.
+    The branch name is shown as the prompt shows it, escaped where it holds a
+    character a terminal acts on (`session_git.shown`; Copilot at `1bba2b1c`)."""
+    from opendox.session_git import shown
+
     merge = landed["merge_commit"]
-    return [f"landed `{landed['branch']}` on `main` with the merge commit {merge}",
+    return [f"landed `{shown(landed['branch'])}` on `main` with the merge commit "
+            f"{merge}",
             f"  previous main:   {landed['previous_main']}",
             f"  served checkout: {landed['served_checkout']}",
             "  pushed nothing:  `git push` publishes `main` when you choose",
