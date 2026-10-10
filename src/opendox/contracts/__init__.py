@@ -4,19 +4,27 @@ WHY THIS PACKAGE EXISTS. Plan 034's T057 realizes #1144's 7.1, which T007's
 batch G amends on R1Q11 (a) and R1Q12 (a) (`openxFactory#656` comment
 `5850003126`): *"openDox's validator validates its spec leg's FOUR kinds ...
 The code leg carries digest-checked copies of the four, which a test holds to
-the spec-leg commit the openDox root pins."* 7.1 also settles how the four
+the spec-leg commit the openDox root pins."* 7.1 also settles how the copies
 reach an install. They ship as PACKAGE DATA, *"so `pip install openDox-code`
 puts them on disk beside the validator and the assembly root remains their
 source of truth for editing"*. So a code-leg checkout with no assembly root
 around it still has them, and so does an install. `opendox.validator` reads
-them from here, and so do its doxBench validators
+the validator's copies from here, and so do its doxBench validators
 (`opendox.validator.doxbench_validators`, the default T085 registers).
+
+T005's batch Q adds to batch G's text on R2Q22 (a) (`6003486656`) and N-15
+(`6013547504`): openDox-spec's three health schemas travel as the four do,
+and the finding's neutral shape is *"a copy the engine reads and NOT a
+validator kind"*, because a finding's `kind` is its family and no `kind`
+constant can name the schema. Plan 038's T041 carries that copy here, at the
+spec-leg commit T060 pinned (`dox-v1.2`), and `opendox.health_contract`
+mirrors it. T047 and T054 add the two file kinds after it.
 
 WHAT IS HERE.
 
-* `schemas/`: the four copies. Each one is byte for byte the spec leg's file
-  of the same name, `contracts/schemas/<id>.schema.yaml` in
-  opensoft/openDox-spec.
+* `schemas/`: the copies, the validator's four and the finding shape. Each one
+  is byte for byte the spec leg's file of the same name,
+  `contracts/schemas/<id>.schema.yaml` in opensoft/openDox-spec.
 * `copies.yaml`: the record. It names the spec-leg commit the copies were taken
   at, and each copy's id, spec-leg path and sha256.
 
@@ -29,7 +37,7 @@ leaves empty. That is `neutral-product-pin`'s rule for a vendored contract
 recomputed digest can never equal an empty recorded one, so an empty digest is
 drift, and a file that merely exists proves nothing.
 
-CONSUMED, NOT OWNED. openDox-spec owns these four schemas. The code leg
+CONSUMED, NOT OWNED. openDox-spec owns these schemas. The code leg
 releases none of them, and a copy is changed in the spec leg and then copied
 here again, never edited here. The copies, the record, and the `commit` it
 names move together, in one commit.
@@ -78,11 +86,13 @@ SPEC_LEG = "opensoft/openDox-spec"
 SCHEMA_DIR = "schemas"
 
 #: THE INPUT SET, as a record must hold it: openDox's own spec leg's four
-#: schemas (7.1, as T007's batch G amends it). A record that names any other
+#: validated schemas (7.1, as T007's batch G amends it), and the finding's
+#: neutral shape, which the health engine reads and no validator kind names
+#: (batch Q's addendum; N-15; plan 038 T041). A record that names any other
 #: copy, or leaves one of these out, is refused, like a record naming another
 #: leg. So no edit to the record lets a copy of `gate-intent` or of the
 #: possibles register (7.1b) be served, even with its file beside the others.
-COPY_IDS = frozenset({"ideation-workbench", "opendox-snapshot",
+COPY_IDS = frozenset({"ideation-workbench", "opendox-health-finding", "opendox-snapshot",
                       "xfactory-workbench-chat-turn", "xfactory-workbench-model-catalog"})
 
 _ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -214,8 +224,9 @@ def record() -> Record:
         copies.append(PackagedCopy(copy_id, path, digest))
     recorded = {copy.id for copy in copies}
     if recorded != COPY_IDS:
-        raise _refuse(f"it records {sorted(recorded)}, not openDox's four, "
-                      f"{sorted(COPY_IDS)} (7.1; 7.1b keeps every other schema out)")
+        raise _refuse(f"it records {sorted(recorded)}, not the copies openDox carries, "
+                      f"{sorted(COPY_IDS)} (7.1, as batches G and Q amend it; 7.1b keeps "
+                      "every other schema out)")
     return Record(SPEC_LEG, commit, tuple(copies))
 
 
