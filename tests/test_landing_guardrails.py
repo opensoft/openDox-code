@@ -321,7 +321,9 @@ def test_land_requires_an_explicit_human_act(world, monkeypatch, capsys):
         import sys
         from opendox import landing_confirm
         try:
-            landing_confirm.confirm_at_terminal({BRANCH!r}, {head!r})
+            landing_confirm.confirm_at_terminal(
+                {BRANCH!r}, {head!r},
+                operation=landing_confirm.OPERATION_MERGE)
         except landing_confirm.ConfirmationRefused as refused:
             print(refused.code)
             sys.exit(3)
@@ -334,19 +336,21 @@ def test_land_requires_an_explicit_human_act(world, monkeypatch, capsys):
         done.stdout, done.stderr)
     # the same in process, and the two other ways the prompt refuses
     at_terminal(monkeypatch, f"{BRANCH}\n", stdin_tty=False)
-    refused = confirmation_refusal(landing_confirm.confirm_at_terminal, BRANCH, head)
+    refused = confirmation_refusal(landing_confirm.confirm_at_terminal, BRANCH, head,
+                                   operation=landing_confirm.OPERATION_MERGE)
     assert refused.code == "stdin-not-a-terminal"
 
     def no_terminal():
         raise OSError(6, "No such device or address")
     monkeypatch.setattr(landing_confirm, "_stdin_is_a_terminal", lambda: True)
     monkeypatch.setattr(landing_confirm, "_open_controlling_terminal", no_terminal)
-    refused = confirmation_refusal(landing_confirm.confirm_at_terminal, BRANCH, head)
+    refused = confirmation_refusal(landing_confirm.confirm_at_terminal, BRANCH, head,
+                                   operation=landing_confirm.OPERATION_MERGE)
     assert refused.code == "no-terminal"
     for answer in ("y\n", "yes\n", "\n", f"{BRANCH} \n", "main\n"):
         at_terminal(monkeypatch, answer)
         refused = confirmation_refusal(landing_confirm.confirm_at_terminal,
-                                       BRANCH, head)
+                                       BRANCH, head, operation=landing_confirm.OPERATION_MERGE)
         assert refused.code == "answer-mismatch", answer
     assert world.refs() == before
 
@@ -362,7 +366,8 @@ def test_land_requires_an_explicit_human_act(world, monkeypatch, capsys):
 
     # THE HUMAN ACT: the branch's name typed at the controlling terminal.
     terminal = at_terminal(monkeypatch, f"{BRANCH}\n")
-    confirmation = landing_confirm.confirm_at_terminal(BRANCH, head)
+    confirmation = landing_confirm.confirm_at_terminal(
+        BRANCH, head, operation=landing_confirm.OPERATION_MERGE)
     assert BRANCH in terminal.shown
     assert head in terminal.shown
     assert confirmation.issuer == landing_confirm.ISSUER_TTY
@@ -2153,7 +2158,8 @@ def test_a_branch_name_ending_in_a_no_break_space_can_be_confirmed(
     head = world.head(f"refs/heads/{name}")
     if issuer == "terminal":
         at_terminal(monkeypatch, name + "\n")
-        token = landing_confirm.confirm_at_terminal(name, head)
+        token = landing_confirm.confirm_at_terminal(
+            name, head, operation=landing_confirm.OPERATION_MERGE)
     else:
         nonces = landing_confirm.LandingNonces()
         token = nonces.confirm_nonce(name, nonces.issue_nonce(name, head))
@@ -2172,13 +2178,15 @@ def test_the_prompt_shows_a_branch_name_escaped(world, monkeypatch):
     head = world.head(f"refs/heads/{name}")
     terminal = at_terminal(monkeypatch, name + "\n")
 
-    token = landing_confirm.confirm_at_terminal(name, head)
+    token = landing_confirm.confirm_at_terminal(
+        name, head, operation=landing_confirm.OPERATION_MERGE)
 
     assert "\u202e" not in terminal.shown
     assert repr(name) in terminal.shown
     assert (token.branch, token.head) == (name, head)
     at_terminal(monkeypatch, repr(name) + "\n")
-    refused = confirmation_refusal(landing_confirm.confirm_at_terminal, name, head)
+    refused = confirmation_refusal(landing_confirm.confirm_at_terminal, name, head,
+                                   operation=landing_confirm.OPERATION_MERGE)
     assert refused.code == "answer-mismatch"
 
 
@@ -2746,8 +2754,9 @@ def test_the_routes_land_a_branch_once_with_the_views_nonce(world, tmp_path,
     head = world.head(BRANCH)
     with serving(world.root, tmp_path) as httpd:
         issued = nonce_for(httpd)
-        assert set(issued) == {"nonce", "branch", "head"}
-        assert (issued["branch"], issued["head"]) == (BRANCH, head)
+        assert set(issued) == {"nonce", "branch", "head", "operation"}
+        assert (issued["branch"], issued["head"], issued["operation"]) == (
+            BRANCH, head, "merge")
         status, landed = ask(httpd, "POST", LAND_ROUTE,
                              {"branch": BRANCH, "nonce": issued["nonce"]},
                              token=httpd.console_token)
@@ -3014,6 +3023,7 @@ def test_the_land_route_under_a_governed_host_submits_through_the_instrument(
                  route_extensions=(BranchActionsOnTop(),)) as httpd:
         assert capabilities(httpd)["actions"]["land"] is True
         issued = nonce_for(httpd)
+        assert issued["operation"] == "submit", issued
         status, body = ask(httpd, "POST", LAND_ROUTE,
                            {"branch": BRANCH, "nonce": issued["nonce"]},
                            token=httpd.console_token)
@@ -3047,6 +3057,351 @@ def test_an_instruments_words_are_redacted_by_the_route(world, tmp_path,
         assert SECRET not in json.dumps(answer[1])
     logged = capsys.readouterr().err
     assert SECRET not in logged and "raised RuntimeError" in logged
+
+
+# ---- a HOSTILE lander through every print path, under one trust model
+# ---- (lane 3's MAJOR on #100 at `99c4e079`; the T015 lesson) ----------------
+
+#: A credential a binding's lander carries, ASSEMBLED, never spelled whole.
+LANDER_SECRET = "S3CRET-" + "from-a-lander"
+
+
+def _with_userinfo(scheme: str, userinfo: str, rest: str) -> str:
+    """`scheme://userinfo@rest`, assembled, so no credential-shaped URL is
+    spelled whole in this tree's source."""
+    return f"{scheme}://{userinfo}@{rest}"
+
+
+#: THE FIXED CREDENTIAL CORPUS: each shape a credential takes in text a
+#: lander might answer, with the secret in a different place in each.
+CREDENTIAL_CORPUS = {
+    "userinfo": _with_userinfo("https", "alice:" + LANDER_SECRET,
+                               "forge.example/team/repo.git"),
+    "token-as-username": _with_userinfo("https", LANDER_SECRET,
+                                        "forge.example/team/repo.git"),
+    "x-access-token": _with_userinfo("https", "x-access-token:" + LANDER_SECRET,
+                                     "forge.example/team/repo.git"),
+    "unknown-query-name": ("https://forge.example/team/repo.git?ticket="
+                           + LANDER_SECRET),
+    "fragment": "https://forge.example/team/repo.git#" + LANDER_SECRET,
+    "scp-like": "alice:" + LANDER_SECRET + "@forge.example:team/repo.git",
+    "in-prose": ("merged and pushed to " + _with_userinfo(
+        "https", "x-access-token:" + LANDER_SECRET,
+        "forge.example/team/repo.git") + " as asked"),
+}
+
+#: The `Landed` object's fields in its order, and an answer every field of
+#: which is well formed (data-model.md § Landed).
+LANDED_ORDER = ("branch", "merge_commit", "previous_main", "served_checkout",
+                "pushed")
+GOOD_LANDED = {"branch": BRANCH, "merge_commit": "a" * 40,
+               "previous_main": "b" * 40, "served_checkout": "left",
+               "pushed": False}
+
+
+class HostileLander:
+    """A binding's lander (a host's or a test's) that answers what it is
+    given, or raises it. Nothing it says may be printed on trust."""
+
+    def __init__(self, *, answer=None, raises: BaseException | None = None):
+        self.answer = answer
+        self.raises = raises
+        self.landed: list[str] = []
+
+    def land(self, branch, *, confirmation):
+        self.landed.append(branch)
+        if self.raises is not None:
+            raise self.raises
+        return self.answer
+
+
+def landed_answer(**overrides):
+    """A `Landed`-shaped answer: `GOOD_LANDED`, with `overrides`."""
+    import types
+
+    return types.SimpleNamespace(**{**GOOD_LANDED, **overrides})
+
+
+def every_door(world, tmp_path, monkeypatch, capsys, lander) -> list[dict]:
+    """`lander` driven through EVERY door that prints what it says: the land
+    route (its answer AND the server's log), the verb's text, the verb's
+    `--json`. One record per door: its name, status, the route's parsed
+    answer, and every character it printed."""
+    doors = []
+    with serving(world.root, tmp_path, landing_factory=lambda: lander) as httpd:
+        issued = nonce_for(httpd)
+        status, body = ask(httpd, "POST", LAND_ROUTE,
+                           {"branch": BRANCH, "nonce": issued["nonce"]},
+                           token=httpd.console_token)
+    logged = capsys.readouterr()
+    doors.append({"door": "route", "status": status, "body": body,
+                  "printed": json.dumps(body) + logged.out + logged.err})
+    monkeypatch.setattr(cli, "_landing_port",
+                        lambda root, *, local=False: lander)
+    for extra in ((), ("--json",)):
+        at_terminal(monkeypatch, f"{BRANCH}\n")
+        status, out, err = land_verb(capsys, world.root, *extra)
+        doors.append({"door": " ".join(("verb", *extra)), "status": status,
+                      "out": out, "err": err, "printed": out + err})
+    return doors
+
+
+def test_a_well_formed_landed_answer_is_answered_as_it_is(
+        world, tmp_path, monkeypatch, capsys, local_install):
+    """The check refuses only what is not the landing's: a well-formed answer
+    reaches every door whole."""
+    lander = HostileLander(answer=landed_answer())
+    route, text, as_json = every_door(world, tmp_path / "s", monkeypatch,
+                                      capsys, lander)
+    assert (route["status"], route["body"]) == (200, GOOD_LANDED), route
+    assert (text["status"], as_json["status"]) == (0, 0), (text, as_json)
+    assert json.loads(as_json["out"]) == GOOD_LANDED
+    assert "served checkout: left" in text["out"]
+    assert lander.landed == [BRANCH] * 3
+
+
+@pytest.mark.parametrize("field", LANDED_ORDER)
+def test_a_landed_answer_is_checked_field_by_field_at_every_door(
+        world, tmp_path, monkeypatch, capsys, local_install, field):
+    """Lane 3's MAJOR on #100 at `99c4e079`, its first half: the five `Landed`
+    fields are CHECKED against data-model.md § Landed, the way
+    `submission_object` checks a report, never printed on trust. An answer
+    one field of which carries the fixed credential corpus, or is merely not
+    the landing's, is refused at every door (the route's 409 and its log, the
+    verb's text, the verb's `--json`) by a fixed sentence naming the field
+    alone, and nothing of the answer is printed."""
+    not_the_landings = {
+        "branch": ["sess-2", BRANCH + " ", None],
+        "merge_commit": ["a" * 39, "A" * 40, "a" * 41, 40],
+        "previous_main": ["b" * 39, "B" * 40, None],
+        "served_checkout": ["Left", "fast-forwarded ", "", None],
+        "pushed": [True, 0, "", None],
+    }[field]
+    for n, value in enumerate([*CREDENTIAL_CORPUS.values(), *not_the_landings]):
+        lander = HostileLander(answer=landed_answer(**{field: value}))
+        doors = every_door(world, tmp_path / f"s{n}", monkeypatch, capsys,
+                           lander)
+        assert lander.landed == [BRANCH] * 3, (field, value)
+        for door in doors:
+            assert LANDER_SECRET not in door["printed"], (field, door)
+            assert "Traceback" not in door["printed"], (field, door)
+            if door["door"] == "route":
+                assert (door["status"], door["body"]["error"],
+                        door["body"]["code"]) == (
+                    409, "landing_refused", "answer-not-the-landing"), door
+                said = door["body"]["message"]
+            else:
+                assert (door["status"], door["out"]) == (1, ""), door
+                said = door["err"]
+            assert f"a `Landed` whose `{field}` is not the landing's" in said, (
+                field, value, said)
+            if isinstance(value, str) and len(value) > 4:
+                assert value not in said, (field, value, said)
+
+
+@pytest.mark.parametrize("shape", sorted(CREDENTIAL_CORPUS))
+def test_a_landers_refusal_reaches_no_door_with_its_credential(
+        world, tmp_path, monkeypatch, capsys, local_install, shape):
+    """Lane 3's MAJOR on #100 at `99c4e079`, its second half: a lander's
+    refusal whose CODE and sentence both carry the corpus reaches every door
+    with neither: the route answers a code from the set it lists (`unlisted`
+    for any other) and the sentence redacted, and the verb prints the
+    sentence redacted. The same for a conflict and for a confirmation
+    refusal a lander raises."""
+    leaky = CREDENTIAL_CORPUS[shape]
+    conflict = MergeConflict(BRANCH, ("doc.md",))
+    conflict.code = leaky
+    for n, raised in enumerate((
+            LandingRefused(f"the landing stopped at {leaky}", code=leaky),
+            conflict,
+            ConfirmationRefused(f"not confirmed at {leaky}", code=leaky))):
+        doors = every_door(world, tmp_path / f"s{n}", monkeypatch, capsys,
+                           HostileLander(raises=raised))
+        for door in doors:
+            assert LANDER_SECRET not in door["printed"], (shape, door)
+            assert "Traceback" not in door["printed"], (shape, door)
+            if door["door"] == "route":
+                assert door["status"] == 409, door
+                assert door["body"]["code"] == "unlisted", door
+            else:
+                assert (door["status"], door["out"]) == (1, ""), door
+                assert door["err"].startswith("land refused: "), door
+
+
+def test_a_listed_code_is_answered_as_it_is(world, tmp_path, monkeypatch,
+                                            capsys, local_install):
+    """The mapping keeps every code the route lists: a lander's own named
+    refusal, and a confirmation refusal, keep theirs."""
+    for n, (raised, code) in enumerate((
+            (LandingRefused("main moved", code="main-moved"), "main-moved"),
+            (ConfirmationRefused("spent", code="spent"), "confirmation:spent"),
+            (MergeConflict(BRANCH, ("doc.md",)), "merge-conflict"))):
+        route = every_door(world, tmp_path / f"s{n}", monkeypatch, capsys,
+                           HostileLander(raises=raised))[0]
+        assert (route["status"], route["body"]["code"]) == (409, code), route
+
+
+def _codes_named_in(module: Path) -> set[str]:
+    """Every refusal code `module` spells: each `code="..."` keyword, each
+    `_unknown("...")` reading, and each code `_read_declaration` returns.
+    `landing_confirm`'s are the route's `confirmation:<case>`."""
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    prefix = "confirmation:" if module.name == "landing_confirm.py" else ""
+    codes: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            for keyword in node.keywords:
+                if keyword.arg == "code" and isinstance(keyword.value, ast.Constant):
+                    codes.add(prefix + keyword.value.value)
+            if (getattr(node.func, "id", None) == "_unknown" and node.args
+                    and isinstance(node.args[0], ast.Constant)):
+                codes.add(node.args[0].value)
+        if isinstance(node, ast.FunctionDef) and node.name == "_read_declaration":
+            for returned in ast.walk(node):
+                if (isinstance(returned, ast.Return)
+                        and isinstance(returned.value, ast.Tuple)
+                        and isinstance(returned.value.elts[1], ast.Constant)
+                        and returned.value.elts[1].value):
+                    codes.add(returned.value.elts[1].value)
+    return codes
+
+
+def test_the_codes_the_route_answers_are_the_codes_the_seam_names():
+    """The route's list is the seam's own, both ways: every code the lander,
+    the governance reading, the confirmation and the verb name is answered as
+    it is, and the list names no code nobody raises."""
+    named: set[str] = set()
+    for name in ("landing.py", "landing_confirm.py", "cli_branch_actions.py"):
+        named |= _codes_named_in(PACKAGE / name)
+    assert "no-such-branch" in named and "confirmation:spent" in named
+    assert "answer-not-the-landing" in named and "operation-changed" in named
+    assert named == set(serve_branch_actions.LANDING_CODES)
+    assert serve_branch_actions.UNLISTED_CODE not in named
+
+
+# ---- HOLDER RULING item 10 (#656 `6103915259`): each issuer states the
+# ---- operation THIS landing performs, decided before it asks ----------------
+
+#: The two questions at the terminal, exactly as a human reads them.
+TERMINAL_QUESTIONS = {
+    "merge": "Land branch {branch} at {head} onto main with a merge commit?",
+    "submit": ("Submit branch {branch} at {head} to the host's instrument? "
+               "Nothing merges here: the merge stays the governance's act."),
+}
+
+
+@pytest.mark.parametrize("path", ["standalone", "governed"])
+def test_the_terminal_prompt_states_the_operation_land_performs(
+        world, monkeypatch, capsys, local_install, path):
+    """The terminal issuer states the operation THIS invocation performs,
+    decided before the prompt from the reading `landing_refusal()` uses: a
+    merge commit onto `main` where a lander is bound (standalone), and a
+    submission to the host's instrument where the repository is governed and
+    one is contributed. Never the other one's words."""
+    host = (domain_profile.register(SubmittingHostWithTheVerb())
+            if path == "governed" else None)
+    head = world.head(BRANCH)
+    previous = world.head("refs/heads/main")
+    terminal = at_terminal(monkeypatch, f"{BRANCH}\n")
+
+    status, _out, err = land_verb(capsys, world.root)
+
+    assert (status, err) == (0, ""), err
+    operation = "merge" if path == "standalone" else "submit"
+    question = TERMINAL_QUESTIONS[operation].format(branch=BRANCH, head=head)
+    assert terminal.shown == question + "\nType the branch name to confirm: "
+    if path == "standalone":
+        assert world.head("refs/heads/main") != previous
+        assert "instrument" not in terminal.shown
+    else:
+        assert host.submitted() == [BRANCH]
+        assert world.head("refs/heads/main") == previous
+        assert "merge commit" not in terminal.shown
+        assert "onto main" not in terminal.shown
+
+
+def test_the_terminal_issuer_states_the_operation_it_is_given_and_no_other(
+        world, monkeypatch):
+    """The issuer's wording, one row per operation; an operation it does not
+    know is refused before the terminal is opened; and the operation is a
+    REQUIRED keyword, so no caller can leave the wording to a default."""
+    head = world.head(BRANCH)
+    assert landing_confirm.OPERATIONS == (landing_confirm.OPERATION_MERGE,
+                                          landing_confirm.OPERATION_SUBMIT)
+    for operation in landing_confirm.OPERATIONS:
+        terminal = at_terminal(monkeypatch, f"{BRANCH}\n")
+        token = landing_confirm.confirm_at_terminal(BRANCH, head,
+                                                    operation=operation)
+        assert terminal.shown.startswith(
+            TERMINAL_QUESTIONS[operation].format(branch=BRANCH, head=head) + "\n")
+        assert (token.branch, token.head, token.issuer) == (
+            BRANCH, head, landing_confirm.ISSUER_TTY)
+    for operation in ("", "land", "MERGE", None, 1):
+        terminal = at_terminal(monkeypatch, f"{BRANCH}\n")
+        with pytest.raises(ValueError):
+            landing_confirm.confirm_at_terminal(BRANCH, head, operation=operation)
+        assert terminal.shown == "", operation
+    import inspect
+
+    parameter = inspect.signature(
+        landing_confirm.confirm_at_terminal).parameters["operation"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
+
+
+@pytest.mark.parametrize("path", ["standalone", "governed"])
+def test_the_nonce_states_the_operation_the_land_route_performs(
+        world, tmp_path, local_install, path):
+    """The browser issuer's half on the server: the nonce is issued with the
+    operation the land route will perform, decided from the reading
+    `landing_refusal()` uses, and the land route performs exactly it."""
+    kwargs = {}
+    if path == "governed":
+        host = domain_profile.register(SubmittingHost())
+        kwargs["route_extensions"] = (BranchActionsOnTop(),)
+    with serving(world.root, tmp_path, **kwargs) as httpd:
+        issued = nonce_for(httpd)
+        status, body = ask(httpd, "POST", LAND_ROUTE,
+                           {"branch": BRANCH, "nonce": issued["nonce"]},
+                           token=httpd.console_token)
+    assert status == 200, body
+    if path == "standalone":
+        assert issued["operation"] == "merge" and "merge_commit" in body
+    else:
+        assert issued["operation"] == "submit" and "merge_commit" not in body
+        assert host.submitted() == [BRANCH]
+
+
+def test_a_landing_whose_operation_changed_after_the_question_lands_nothing(
+        world, tmp_path, local_install):
+    """The question the human answered is the act: a binding that changes
+    between the nonce and the landing (a lander bound when the question named
+    a merge, gone when the act would submit, or the other way round) is
+    refused by name, and neither the instrument nor the lander is asked."""
+    host = domain_profile.register(SubmittingHost())
+    before = world.refs()
+    bound: dict = {"lander": HostileLander(answer=landed_answer())}
+    with serving(world.root, tmp_path, route_extensions=(BranchActionsOnTop(),),
+                 landing_factory=lambda: bound["lander"]) as httpd:
+        issued = nonce_for(httpd)
+        assert issued["operation"] == "merge", issued
+        bound["lander"] = None
+        status, body = ask(httpd, "POST", LAND_ROUTE,
+                           {"branch": BRANCH, "nonce": issued["nonce"]},
+                           token=httpd.console_token)
+        assert (status, body["code"]) == (409, "operation-changed"), body
+        assert host.submitted() == []
+
+        issued = nonce_for(httpd)
+        assert issued["operation"] == "submit", issued
+        lander = HostileLander(answer=landed_answer())
+        bound["lander"] = lander
+        status, body = ask(httpd, "POST", LAND_ROUTE,
+                           {"branch": BRANCH, "nonce": issued["nonce"]},
+                           token=httpd.console_token)
+        assert (status, body["code"]) == (409, "operation-changed"), body
+        assert lander.landed == [] and host.submitted() == []
+    assert world.refs() == before
 
 
 # ---- `actions.land`: present only under openDox's own profile, its value
@@ -3256,7 +3611,7 @@ out.otherRepository = { enabled: c.enabled, children: h.children.length };
 h = host();
 c = m.mountLandConfirm(h, { caps: live, branch: "sess-1", repository: SERVED,
   fetcher: scripted([
-    [200, { nonce: "N1", branch: "sess-1", head: HEAD }],
+    [200, { nonce: "N1", branch: "sess-1", head: HEAD, operation: "merge" }],
     [200, { branch: "sess-1", merge_commit: MERGE, previous_main: HEAD,
             served_checkout: "fast-forwarded", pushed: false }]]) });
 const [input, askButton, confirmButton, message] = h.children;
@@ -3284,11 +3639,20 @@ out.mainCalls = calls.length;
 // a nonce bound to ANOTHER branch, or with no full head, is not offered
 h = host();
 c = m.mountLandConfirm(h, { caps: live, branch: "sess-1", repository: SERVED,
-  fetcher: scripted([[200, { nonce: "N2", branch: "sess-2", head: HEAD }],
-                     [200, { nonce: "N3", branch: "sess-1", head: "abc" }]]) });
+  fetcher: scripted([
+    [200, { nonce: "N2", branch: "sess-2", head: HEAD, operation: "merge" }],
+    [200, { nonce: "N3", branch: "sess-1", head: "abc", operation: "merge" }],
+    [200, { nonce: "N6", branch: "sess-1", head: HEAD }],
+    [200, { nonce: "N7", branch: "sess-1", head: HEAD, operation: "rebase" }],
+    [200, { nonce: "N8", branch: "sess-1", head: HEAD,
+            operation: "hasOwnProperty" }]]) });
 out.otherBranch = await c.ask();
 out.otherBranchConfirm = !h.children[2].disabled;
 out.shortHead = await c.ask();
+// a nonce that states no operation this control knows is not offered: the
+// question would have to guess what the server will do
+out.unstated = [await c.ask(), await c.ask(), await c.ask()];
+out.unstatedConfirm = !h.children[2].disabled;
 
 // refusals, in the server's own words; a governed landing's report
 h = host();
@@ -3296,17 +3660,21 @@ c = m.mountLandConfirm(h, { caps: live, branch: "sess-1", repository: SERVED,
   fetcher: scripted([
     [409, { ok: false, error: "landing_refused", code: "no-declaration",
             message: "main carries no .opendox/governance.yaml" }],
-    [200, { nonce: "N4", branch: "sess-1", head: HEAD }],
+    [200, { nonce: "N4", branch: "sess-1", head: HEAD, operation: "merge" }],
     [409, { ok: false, error: "merge_conflict", code: "merge-conflict",
             message: "sess-1 conflicts with main in: doc.md" }],
-    [200, { nonce: "N5", branch: "sess-1", head: HEAD }],
+    [200, { nonce: "N5", branch: "sess-1", head: HEAD, operation: "submit" }],
     [200, { remote: "review", ref: "refs/heads/sess-1", url: "https://f.example/r",
             branch: "sess-1", commit: HEAD }]]) });
 out.refusedAsk = await c.ask();
 await c.ask();
 out.conflict = await c.confirm();
-await c.ask();
+out.governedQuestion = await c.ask();
 out.governed = await c.confirm();
+// HOLDER RULING item 10: the question states the operation the nonce names
+out.questions = Object.fromEntries(["merge", "submit"].map((operation) => [
+  operation, m.confirmQuestion({ branch: "sess-1", head: HEAD, nonce: "N",
+                                 operation })]));
 out.thrown = await m.mountLandConfirm(host(), { caps: live, branch: "sess-1",
   repository: SERVED, fetcher: async () => { throw new Error("offline"); } }).ask();
 out.routes = [m.ACTIONS_SESSION_LAND_NONCE_ROUTE, m.ACTIONS_SESSION_LAND_ROUTE];
@@ -3314,7 +3682,8 @@ out.routes = [m.ACTIONS_SESSION_LAND_NONCE_ROUTE, m.ACTIONS_SESSION_LAND_ROUTE];
 const BIDI = "sess\u202e1";
 out.bidi = {
   shown: m.shownName(BIDI), plain: m.shownName("sess-1"),
-  question: m.confirmQuestion({ branch: BIDI, head: HEAD, nonce: "N" }),
+  question: m.confirmQuestion({ branch: BIDI, head: HEAD, nonce: "N",
+                                operation: "merge" }),
   landed: m.describeLanding({ ok: true, status: 200, payload: {
     branch: BIDI, merge_commit: MERGE, previous_main: HEAD,
     served_checkout: "left", pushed: false } }),
@@ -3412,6 +3781,26 @@ def test_the_confirm_control_shows_a_branch_name_escaped(confirm_control):
     for sentence in ("question", "landed", "submitted"):
         assert "\u202e" not in bidi[sentence], sentence
         assert "'sess\\u202e1'" in bidi[sentence], (sentence, bidi[sentence])
+
+
+def test_the_confirm_control_states_the_operation_the_server_will_perform(
+        confirm_control):
+    """HOLDER RULING item 10 (#656 `6103915259`), the browser issuer: the
+    question states the operation the nonce was issued for, a merge commit
+    onto `main` or a submission to the host's instrument, never the other
+    one's words; a nonce that states no operation the control knows is not
+    offered at all."""
+    head = "0123456789abcdef0123456789abcdef01234567"
+    assert confirm_control["questions"] == {
+        "merge": f"land sess-1 at {head} onto main with a merge commit?",
+        "submit": (f"submit sess-1 at {head} to the host's instrument? nothing "
+                   "merges here: the merge stays its governance's act"),
+    }
+    assert confirm_control["question"] == confirm_control["questions"]["merge"]
+    assert confirm_control["governedQuestion"] == (
+        confirm_control["questions"]["submit"])
+    assert confirm_control["unstated"] == ["not landed: HTTP 200"] * 3
+    assert confirm_control["unstatedConfirm"] is False
 
 
 _MENU_PROBE = r"""

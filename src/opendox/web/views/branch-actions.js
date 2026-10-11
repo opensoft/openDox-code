@@ -5,9 +5,11 @@
 //
 // And the LAND CONFIRM CONTROL (plan 038 T016; #1144 12.6a; OQ-12-13), the
 // view's half of the second confirmation issuer: it fetches a nonce for one
-// branch from `POST /actions/session/land-nonce`, SHOWS the branch and the
-// head that nonce is bound to, and posts it ONCE to `POST
-// /actions/session/land`, which answers what landed. It is keyed on
+// branch from `POST /actions/session/land-nonce`, SHOWS the branch, the head
+// that nonce is bound to and the operation the server states it will perform
+// (a merge commit onto main, or a submission to the host's instrument), and
+// posts it ONCE to `POST /actions/session/land`, which answers what landed.
+// It is keyed on
 // `actions.land`, present only under openDox's own profile and true only
 // where `land` can act. Its own mount (`mountLandConfirm`), beside the submit
 // control's and never inside it.
@@ -180,8 +182,25 @@ async function postLanding(route, body, caps, fetcher) {
   return { ok: response.ok, status: response.status, payload };
 }
 
-// The nonce answer, accepted only when it is bound to the branch asked for and
-// names a full head: `{ nonce, branch, head }`, else null.
+// The question for each operation a landing performs, as the land-nonce route
+// states it from the reading that decides whether `land` can act (holder
+// ruling item 10, #656 `6103915259`): a merge commit onto main where a lander
+// is bound, or a submission to the host's instrument where the repository is
+// governed. The control asks exactly the one the server will perform.
+const OPERATION_QUESTIONS = {
+  merge: (what) => "land " + what + " onto " + DEFAULT_BRANCH
+    + " with a merge commit?",
+  submit: (what) => "submit " + what + " to the host's instrument? nothing "
+    + "merges here: the merge stays its governance's act",
+};
+function statedOperation(operation) {
+  return typeof operation === "string"
+    && Object.prototype.hasOwnProperty.call(OPERATION_QUESTIONS, operation);
+}
+
+// The nonce answer, accepted only when it is bound to the branch asked for,
+// names a full head and states an operation this control can ask about:
+// `{ nonce, branch, head, operation }`, else null.
 export function issuedNonce(answer, branch) {
   const p = answer?.payload;
   if (!answer?.ok || !p || p.branch !== branch) return null;
@@ -189,7 +208,9 @@ export function issuedNonce(answer, branch) {
   if (typeof p.head !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(p.head)) {
     return null;
   }
-  return { nonce: p.nonce, branch: p.branch, head: p.head };
+  if (!statedOperation(p.operation)) return null;
+  return { nonce: p.nonce, branch: p.branch, head: p.head,
+           operation: p.operation };
 }
 
 // A branch name as the `land` prompt at the terminal shows it
@@ -213,10 +234,15 @@ export function shownName(text) {
   return "'" + [...name].map(escapedChar).join("") + "'";
 }
 
-// The question the control asks: the branch and the head the nonce is bound to.
+// The question the control asks: the operation the server stated, for the
+// branch and the head the nonce is bound to. An operation it cannot name is
+// never guessed at.
 export function confirmQuestion(issued) {
-  return "land " + shownName(issued.branch) + " at " + issued.head
-    + " onto " + DEFAULT_BRANCH + " with a merge commit?";
+  if (!statedOperation(issued?.operation)) {
+    throw new Error("the server stated no operation this control can ask about");
+  }
+  return OPERATION_QUESTIONS[issued.operation](
+    shownName(issued.branch) + " at " + issued.head);
 }
 
 // The sentence for a landing's answer: what landed and the command that undoes

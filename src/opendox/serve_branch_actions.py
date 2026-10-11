@@ -55,16 +55,23 @@ three clauses and the console token, and both taking no repository from the
 request (12.4a):
 
   * `land-nonce` takes `{"branch": ...}` and answers `{"nonce", "branch",
-    "head"}`: a nonce bound to that branch and its head, single-use, from
-    THIS server's `landing_confirm.LandingNonces`, the second of the two
-    issuers. It refuses, by name and before any nonce is issued, `main`, a
+    "head", "operation"}`: a nonce bound to that branch and its head,
+    single-use, from THIS server's `landing_confirm.LandingNonces`, the
+    second of the two issuers, and the OPERATION the landing performs
+    (`merge`, a merge commit onto `main`, or `submit`, a submission to the
+    host's instrument), decided from the reading that decides whether `land`
+    can act (`cli_branch_actions.landing_operation`), which the confirm
+    control's question states (holder ruling item 10, #656 `6103915259`).
+    It refuses, by name and before any nonce is issued, `main`, a
     branch that does not exist, and a repository where `land` cannot act
     (`cli_branch_actions.landing_refusal`: governed-without-an-instrument, or
     why the governance is `unknown`), so the view never asks a human to
     confirm a landing that cannot happen;
   * `land` takes `{"branch": ..., "nonce": ...}` and redeems the nonce, which
     the first attempt spends, matching or not, and lands through the act both
-    doors share (`cli_branch_actions.land_branch`): the `Landed` object under
+    doors share (`cli_branch_actions.land_branch`), which performs the
+    operation that nonce was issued with or refuses (`operation-changed`):
+    the `Landed` object under
     `standalone` (the server's `landing_factory`), or the host instrument's
     `Submission` under `governed`, with no merge (R2Q4 (a)).
 
@@ -74,7 +81,11 @@ issuer. The nonces live on the server's own handler class, so each server
 has one store and two servers never share one.
 
 A land refusal answers `{"ok": false, "error": "landing_refused", "code":
-<the refusal's code>, "message": <its sentence, redacted>}`; a conflict
+<the refusal's code>, "message": <its sentence, redacted>}`. The code is
+one this module LISTS (`LANDING_CODES`, the codes the seam, the governance
+reading, the confirmation and the verb name), else `unlisted`: a lander is a
+binding's, so a code it names is text this route cannot vet (lane 3's MAJOR
+on #100 at `99c4e079`). A conflict
 answers `"error": "merge_conflict"` with its `paths` and `remedy` (OQ-038-1);
 an instrument's refusal answers as `submit`'s does; a failure nobody named
 answers a fixed sentence, and only its type reaches the server log.
@@ -93,8 +104,9 @@ import threading
 __all__ = [
     "ACTIONS_SESSION_LAND_NONCE_ROUTE", "ACTIONS_SESSION_LAND_ROUTE",
     "ACTIONS_SESSION_SUBMIT_ROUTE", "BRANCH_FIELD", "BranchActionRouteExtension",
-    "BranchActionRoutes", "NONCE_FIELD", "requested_branch",
-    "requested_landing", "requested_nonce_branch",
+    "BranchActionRoutes", "LANDING_CODES", "NONCE_FIELD", "UNLISTED_CODE",
+    "answered_code", "requested_branch", "requested_landing",
+    "requested_nonce_branch",
 ]
 
 #: The submit route (12.4a).
@@ -147,8 +159,51 @@ LAND_NO_NONCE = ("a land request carries the nonce `land-nonce` issued for its "
 LAND_FAILED = ("the landing failed for a reason it did not name; nothing is "
                "reported as landed. See the server log")
 
+#: Every refusal code the land routes answer as it is: the seam's
+#: (`landing.LandingRefused`), the governance reading's, the confirmation's
+#: (`confirmation:<case>`, `landing_confirm.ConfirmationRefused`) and the
+#: verb's own. `tests/test_landing_guardrails.py` holds this list equal to
+#: the codes those modules spell.
+LANDING_CODES = frozenset({
+    "already-landed", "answer-not-the-landing", "branch-is-main",
+    "dirty-served-checkout", "fast-forward-no-longer-applies", "governed",
+    "governed-without-an-instrument", "host-failed-to-load",
+    "ignored-files-in-the-way", "install-mode-disagrees",
+    "install-mode-refused", "instrument-failed", "invalid-declaration",
+    "landing-worktree", "main-checked-out-elsewhere", "main-moved",
+    "merge-conflict", "merge-driver", "merge-failed", "no-declaration",
+    "no-lander-bound", "no-main", "no-such-branch", "not-a-merge-commit",
+    "not-a-repository", "operation-changed", "remote-main-not-contained",
+    "remote-transport", "remote-unreadable", "several-push-urls",
+    "confirmation:another-branch", "confirmation:another-head",
+    "confirmation:answer-mismatch", "confirmation:bad-binding",
+    "confirmation:constructed-directly", "confirmation:no-nonce",
+    "confirmation:no-terminal", "confirmation:nonce-mismatch",
+    "confirmation:not-a-confirmation", "confirmation:spent",
+    "confirmation:stdin-not-a-terminal",
+})
+#: The code answered for any other: a fixed word, repeating nothing.
+UNLISTED_CODE = "unlisted"
+
 #: One lock for the lazy creation of each server's nonce store.
 _NONCES_LOCK = threading.Lock()
+#: One lock that keeps a nonce and the operation it was issued with together:
+#: issued together, and taken together when the land route redeems it.
+_STATED_LOCK = threading.Lock()
+
+
+def answered_code(exc) -> str:
+    """The code a land route answers for the refusal `exc`: its own where the
+    route lists it (`LANDING_CODES`), else `UNLISTED_CODE`. A refused
+    confirmation is named as the lander names one, `confirmation:<case>`."""
+    from opendox.landing_confirm import ConfirmationRefused
+
+    code = getattr(exc, "code", None)
+    if type(code) is not str:
+        return UNLISTED_CODE
+    if isinstance(exc, ConfirmationRefused):
+        code = "confirmation:" + code
+    return code if code in LANDING_CODES else UNLISTED_CODE
 
 
 def requested_landing(body) -> tuple[str | None, str | None, str | None]:
@@ -289,27 +344,38 @@ class BranchActionRoutes:
                 bound._branch_action_nonce_store = nonces
         return nonces
 
+    def _branch_action_stated(self) -> dict:
+        """THIS server's record of the operation each live nonce was issued
+        with, by branch, as the nonce store keys its nonces: one per bound
+        handler class, created on first use under a lock."""
+        bound = type(self)
+        with _NONCES_LOCK:
+            stated = bound.__dict__.get("_branch_action_stated_store")
+            if stated is None:
+                stated = {}
+                bound._branch_action_stated_store = stated
+        return stated
+
     def _send_landing_refusal(self, exc) -> None:
         """A NAMED landing refusal, its sentence redacted (12.1a): a conflict
         with its paths and remedy, or any other with its code. EVERY text field
         a conflict carries is redacted by the same rule as its sentence, since
         a path and a branch name are the repository's text (Copilot on #100,
-        r4234726885)."""
+        r4234726885). The code is one this module lists, or `unlisted`
+        (`answered_code`): a lander's code is a binding's text (lane 3's
+        MAJOR on #100 at `99c4e079`)."""
         from opendox import cli_branch_actions
         from opendox.landing import MergeConflict
-        from opendox.landing_confirm import ConfirmationRefused
 
         message = cli_branch_actions.redacted_text(str(exc))
+        code = answered_code(exc)
         if isinstance(exc, MergeConflict):
             redact = cli_branch_actions.redacted_text
             self._send_json(409, {
-                "ok": False, "error": "merge_conflict", "code": exc.code,
+                "ok": False, "error": "merge_conflict", "code": code,
                 "paths": [redact(path) for path in exc.paths],
                 "remedy": redact(exc.remedy), "message": message})
             return
-        # A refused NONCE is named as the lander names a refused confirmation.
-        code = (f"confirmation:{exc.code}" if isinstance(exc, ConfirmationRefused)
-                else exc.code)
         self._send_json(409, {"ok": False, "error": "landing_refused",
                               "code": code, "message": message})
 
@@ -330,10 +396,9 @@ class BranchActionRoutes:
 
         try:
             head = cli_branch_actions.branch_head(self.checkout_root, branch)
-            refused = cli_branch_actions.landing_refusal(
+            # what the landing performs, decided BEFORE the view asks
+            operation = cli_branch_actions.landing_operation(
                 self._session_lander(), self.checkout_root)
-            if refused is not None:
-                raise refused
         except LandingRefused as exc:
             self._send_landing_refusal(exc)
             return
@@ -345,8 +410,11 @@ class BranchActionRoutes:
             self._send_json(500, {"ok": False, "error": "landing_failed",
                                   "message": LAND_FAILED})
             return
-        nonce = self._branch_action_nonces().issue_nonce(branch, head)
-        self._send_json(200, {"nonce": nonce, "branch": branch, "head": head})
+        with _STATED_LOCK:
+            nonce = self._branch_action_nonces().issue_nonce(branch, head)
+            self._branch_action_stated()[branch] = operation
+        self._send_json(200, {"nonce": nonce, "branch": branch, "head": head,
+                              "operation": operation})
 
     def _handle_session_land(self) -> None:
         """`POST /actions/session/land`: redeem the nonce, land, and answer
@@ -368,11 +436,15 @@ class BranchActionRoutes:
             # `main` first, before the nonce store is asked (R2Q5 (a))
             if branch == DEFAULT_BRANCH:
                 raise cli_branch_actions.main_refused()
-            confirmation = self._branch_action_nonces().confirm_nonce(
-                branch, nonce)
+            # the operation the nonce was issued with goes with it, whatever
+            # follows: a nonce is single-use, and so is what it stated
+            with _STATED_LOCK:
+                stated = self._branch_action_stated().pop(branch, None)
+                confirmation = self._branch_action_nonces().confirm_nonce(
+                    branch, nonce)
             answer = cli_branch_actions.land_branch(
                 self._session_lander(), self.checkout_root, branch,
-                confirmation)
+                confirmation, operation=stated)
         except (LandingRefused, ConfirmationRefused) as exc:
             self._send_landing_refusal(exc)
             return

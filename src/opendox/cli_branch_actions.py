@@ -72,7 +72,13 @@ confirmed act, through the seam T012 declared (`opendox.landing`):
   `landing.read_governance` names it.
 * THE CONFIRMATION. The verb asks at the CONTROLLING TERMINAL
   (`landing_confirm.confirm_at_terminal`, the first of the two issuers),
-  showing the branch and its head; the human types the branch's name. There
+  showing the branch, its head and the OPERATION this landing performs: a
+  merge commit onto `main` where a lander is bound, a submission to the
+  host's instrument where the repository is governed (`landing_operation`,
+  decided before the prompt from the reading `landing_refusal` uses; holder
+  ruling item 10, #656 `6103915259`). The act performs exactly the
+  operation the question named, or refuses (`operation-changed`). The
+  human types the branch's name. There
   is NO flag that answers for the human (decision N-11; 12.6a: "refuses when
   there is none"), so a piped or scripted `land` is refused. This module and
   `opendox.serve_branch_actions` are the two interactive layers
@@ -80,7 +86,10 @@ confirmed act, through the seam T012 declared (`opendox.landing`):
   issuer.
 * THE ANSWER (`land_branch`): the `Landed` object (`landed_object`) under
   `standalone`, or the instrument's `Submission` (`submission_object`) under
-  `governed`; the two are told apart by their fields. The printed report
+  `governed`; the two are told apart by their fields. A lander is a
+  binding's answer (a host's or a test's), so its `Landed` is CHECKED field
+  by field against data-model.md § Landed, as a report is, and never
+  printed on trust (lane 3's MAJOR on #100 at `99c4e079`). The printed report
   names the merge commit and the `git revert -m 1` that undoes it. `land`
   pushes nothing.
 * `--local` IS READ HERE, unlike `submit`'s: `standalone` needs the explicit
@@ -112,11 +121,12 @@ from pathlib import Path
 
 
 __all__ = [
-    "LANDED_FIELDS", "LOCAL_BESIDE_HOSTED", "NO_LANDER", "SUBMISSION_FIELDS",
+    "LANDED_FIELDS", "LANDED_NOT_THE_LANDINGS", "LOCAL_BESIDE_HOSTED",
+    "NO_LANDER", "OPERATION_CHANGED", "SUBMISSION_FIELDS",
     "UNNAMED_FAILURE", "UNNAMED_LANDING_FAILURE",
     "BranchActionSubcommands", "branch_head", "cmd_land", "cmd_submit",
-    "land_branch", "landed_object", "landing_refusal", "main_refused",
-    "redacted_text",
+    "land_branch", "landed_object", "landing_operation", "landing_refusal",
+    "main_refused", "redacted_text",
     "refusal_text", "submission_object", "submit_branch",
 ]
 
@@ -155,6 +165,22 @@ LANDED_FIELDS = ("branch", "merge_commit", "previous_main", "served_checkout",
 NO_LANDER = (
     "no lander is bound for this checkout, so nothing lands: the binding that "
     "supplies one (`landing_factory`, or `_landing_port`) answered none")
+
+#: The refusal of a `Landed` answer that is not the landing's. `{field}` is
+#: the field's NAME, and nothing the answer carried is repeated (12.1a).
+#: The lander may have merged before it answered, so it says where to look.
+LANDED_NOT_THE_LANDINGS = (
+    "the lander answered a `Landed` whose `{field}` is not the landing's "
+    "(data-model.md § Landed), so nothing is reported as landed. Whether "
+    "`main` moved is git's to say: `git log -1 main`")
+
+#: The refusal of an act that would not be the operation its confirmation
+#: named (holder ruling item 10): the binding changed after the question.
+OPERATION_CHANGED = (
+    "the landing would not be the operation the confirmation named: what "
+    "this checkout binds changed after the question was asked, so nothing "
+    "landed and nothing was submitted. Ask again, and confirm what the new "
+    "question names")
 
 #: The refusal of a failure the landing did not name. `{kind}` is the
 #: exception's type, and nothing else of it is printed (12.1a).
@@ -396,14 +422,75 @@ def landing_refusal(lander, checkout_root, *, local: bool = False):
     return landing.LandingRefused(NO_LANDER, code="no-lander-bound")
 
 
-def landed_object(landed) -> dict:
-    """The `Landed` object's five fields, read by name (data-model.md)."""
-    return {name: getattr(landed, name) for name in LANDED_FIELDS}
+def landing_operation(lander, checkout_root, *, local: bool = False) -> str:
+    """The operation `land` performs on `checkout_root`, decided from the
+    reading `landing_refusal` makes, or that refusal raised.
+
+    `landing_confirm.OPERATION_MERGE` where a lander is bound (a merge commit
+    onto `main`), `OPERATION_SUBMIT` where the repository is `governed` and a
+    host's instrument is contributed (R2Q4 (a)). Each issuer states it BEFORE
+    it asks (holder ruling item 10, #656 `6103915259`), and `land_branch`
+    performs it or refuses.
+    """
+    from opendox.landing_confirm import OPERATION_MERGE, OPERATION_SUBMIT
+
+    # The binding is read ONCE, and that one reading decides the operation.
+    usable = _usable(lander)
+    refused = landing_refusal(usable, checkout_root, local=local)
+    if refused is not None:
+        raise refused
+    return OPERATION_MERGE if usable is not None else OPERATION_SUBMIT
+
+
+def landed_object(landed, branch: str) -> dict:
+    """The `Landed` object's five fields, read by name and CHECKED.
+
+    A lander is a binding's answer, a host's or a test's, so nothing it says
+    is printed on trust (lane 3's MAJOR on #100 at `99c4e079`; one trust
+    model, as `submission_object` holds a port's report to): each field is
+    held to data-model.md § Landed. `branch` must be the branch landed,
+    `merge_commit` and `previous_main` full object names (40 hex digits, or
+    64), `served_checkout` `fast-forwarded` or `left`, and `pushed` exactly
+    False. Each must be exactly that type, never a subclass that could print
+    otherwise than it compares. Any other answer is refused by a fixed
+    sentence that names the field and repeats nothing it carried.
+    """
+    from opendox import landing
+
+    fields = {name: getattr(landed, name, None) for name in LANDED_FIELDS}
+
+    def text(name: str) -> str | None:
+        value = fields[name]
+        return value if type(value) is str else None
+
+    def object_name(name: str) -> bool:
+        value = text(name)
+        return value is not None and _OBJECT_NAME.fullmatch(value) is not None
+
+    for name, matches in (
+            ("branch", text("branch") == branch),
+            ("merge_commit", object_name("merge_commit")),
+            ("previous_main", object_name("previous_main")),
+            ("served_checkout", text("served_checkout") in (
+                landing.SERVED_FAST_FORWARDED, landing.SERVED_LEFT)),
+            ("pushed", fields["pushed"] is False)):
+        if not matches:
+            raise landing.LandingRefused(
+                LANDED_NOT_THE_LANDINGS.format(field=name),
+                code="answer-not-the-landing")
+    return fields
 
 
 def land_branch(lander, checkout_root, branch: str, confirmation, *,
-                local: bool = False) -> dict:
+                operation: str, local: bool = False) -> dict:
     """THE LAND ACT, SHARED BY BOTH DOORS: land `branch` with `confirmation`.
+
+    `operation` is the one the confirmation's question named
+    (`landing_operation`, decided before the human was asked). The act
+    performs exactly it: where the operation it would perform now is another
+    (the binding changed after the question), it is refused by name
+    (`operation-changed`), and neither the lander nor the instrument is
+    asked (holder ruling item 10, #656 `6103915259`).
 
     Through the bound lander where there is one, answering the `Landed`
     object. Where there is none, through the host's instrument under
@@ -413,15 +500,17 @@ def land_branch(lander, checkout_root, branch: str, confirmation, *,
     name (`landing_refusal`). `main` is refused before anything is asked.
     """
     from opendox import landing
+    from opendox.landing_confirm import OPERATION_MERGE
 
     if branch == landing.DEFAULT_BRANCH:
         raise main_refused()
-    lander = _usable(lander)
-    if lander is not None:
-        return landed_object(lander.land(branch, confirmation=confirmation))
-    refused = landing_refusal(None, checkout_root, local=local)
-    if refused is not None:
-        raise refused
+    performing = landing_operation(lander, checkout_root, local=local)
+    if performing != operation:
+        raise landing.LandingRefused(OPERATION_CHANGED, code="operation-changed")
+    # the branch taken IS the operation decided: never a second reading
+    if performing == OPERATION_MERGE:
+        return landed_object(lander.land(branch, confirmation=confirmation),
+                             branch)
     report = landing.request_landing(checkout_root, branch,
                                      confirmation=confirmation, local=local)
     return submission_object(report, branch)
@@ -465,13 +554,13 @@ def cmd_land(args: argparse.Namespace) -> int:
         if args.branch == DEFAULT_BRANCH:
             raise main_refused()
         lander = _core()._landing_port(root, local=args.local)
-        refused = landing_refusal(lander, root, local=args.local)
-        if refused is not None:
-            raise refused
+        # what this landing performs, decided BEFORE the human is asked
+        operation = landing_operation(lander, root, local=args.local)
         head = branch_head(root, args.branch)
-        confirmation = landing_confirm.confirm_at_terminal(args.branch, head)
+        confirmation = landing_confirm.confirm_at_terminal(
+            args.branch, head, operation=operation)
         answer = land_branch(lander, root, args.branch, confirmation,
-                             local=args.local)
+                             operation=operation, local=args.local)
     # The lander's, the confirmation's or an instrument's NAMED failure, or
     # one nobody named: its type is all this verb prints of the last.
     except Exception as exc:  # noqa: BLE001
