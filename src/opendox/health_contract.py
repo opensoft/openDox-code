@@ -1038,3 +1038,636 @@ def to_json(finding: dict[str, Any]) -> str:
     contract refuses is ever written."""
     check_finding(finding)
     return canonical_json(finding).decode("utf-8")
+
+
+# ===========================================================================
+# THE PACK PROTOCOL (plan 038 T045, G15-A; #1144 15.1 and 15.2; decisions
+# N-3, OQ-H15-1, OQ-H15-10 and OQ-H15-11; R2Q18 (a) and R2Q20 (a); the
+# holder's rulings `openxFactory#656` `6028138991`, `6065680005`,
+# `6069024023` item 1, `6072086385` items 3 and 4, and `6086098003` item 1)
+# ===========================================================================
+#
+# Appended below T041's finding vocabulary: one stdlib-only contract module
+# (N-3), handed over at T041's landing. Nothing above this line is T045's.
+#
+# WHAT A PACK IS (15.1; OQ-H15-1). A Python package, the only pack runtime,
+# that the engine runs in a sandbox through its shim. It conforms to
+# `CheckPack` STRUCTURALLY, on `corpus_adapter.py`'s pattern: a
+# `runtime_checkable` Protocol with a CLOSED member set (`PACK_MEMBERS`), so a
+# pack authored elsewhere conforms without importing openDox's tooling. Its one
+# member, `check`, takes the read-only export's root and nothing else: no model,
+# no binding and no network (R2Q20 (a): pack checks are model-free).
+#
+# THE STATIC DECLARATION, READ BEFORE ANY PACK CODE RUNS (15.2; OQ-H15-10).
+# `opendox-pack.yaml`, inside the pack, names the pack's id and version (both
+# the manifest entry's), its families with each one's `kind`, own `version` and
+# `applies_to` globs, and each family's optional label. No family declares one
+# of `ENGINE_KINDS`, the kinds only the engine raises, so no pack can forge an
+# engine finding (`6069024023` item 1; `6086098003` item 1). This module imports the
+# standard library alone (`6028138991`), so it never parses YAML: the engine's
+# manifest reader (T047) reads at most `PACK_DECLARATION_MAX_BYTES`, passes them
+# through `decode_pack_declaration()`, parses the text with `yaml.safe_load`,
+# and hands the result to `check_pack_declaration()` (`6065680005` item 1). The
+# check judges every type it is handed, because YAML gives more than text: a
+# float for `1.10`, a date, `True` for a `yes:` key.
+#
+# THE OUTPUT: ONE JSON DOCUMENT ON STDOUT (OQ-H15-11). `{"findings": [...]}`,
+# each a finding in the neutral shape without the fields the engine stamps,
+# and optionally a `patch`. `check_pack_output()` admits it WHOLE or refuses it
+# WHOLE (`6065680005` item 2): one finding against the pack says why, and none
+# of the output is stored, as 15.6 has it for output the engine cannot read.
+# A pack's own `id` is IGNORED, because the engine computes every id; a pack's
+# `pack_id`, `pack_version` or `baseline_class` is REFUSED, because they are
+# provenance the engine stamps (15.7; `6065680005` item 3): T041's
+# `IGNORED_FIELDS` and `STAMPED_FIELDS`. A pack finding names a document, so an
+# empty `path` is refused: a pathless finding is the engine's alone
+# (`6069024023` item 1). A string carrying U+0000, which no stored finding can
+# hold, refuses the output whole too (`6072086385` item 4). stderr is no input
+# here: the engine records only its size and digest (T056).
+#
+# THE PATCH TYPE: A UNIFIED DIFF AND NOTHING ELSE (15.2; ADV-12).
+# `unified_diff_problem()` says whether a value is one. It admits git's
+# extended headers, so the patch validator (T049), which calls it first, can
+# refuse a rename, a mode change or a binary patch by its own rule; and a patch
+# that is not a diff is refused PER PATCH, there, never by refusing the output
+# (`6065680005` item 4). The size bound is 15.2a's, and T049's.
+#
+# A REFUSAL IS A FINDING AGAINST THE PACK (15.5, 15.6). `PackRefused` carries a
+# `PackRefusal`, whose `finding()` is T041's `engine_finding()` for the
+# category `declaration-refused` or `pack-output-refused`, two of
+# `ENTRY_CATEGORIES`: pathless, `human-only`, `identity` `{category, entry}`,
+# and `pack_id` and `pack_version` the manifest entry's (`6072086385` item 1).
+# One such finding per category and entry in a run, so its id is stable across
+# runs, and the reason rides in `evidence`. It quotes nothing of the pack: its
+# evidence holds the reason, indexes, the engine's own words and rule ids, a
+# name only where it is a short lowercase word, and a size and a digest.
+
+from typing import Iterable, Protocol, runtime_checkable  # noqa: E402 - T045's section (the cli.py:1693 form)
+import functools  # noqa: E402
+
+__all__ += [
+    "CheckPack",
+    "DECLARATION_REASONS",
+    "DECLARATION_REFUSED",
+    "FORBIDDEN_DECLARATION_KEYS",
+    "OUTPUT_REASONS",
+    "OUTPUT_REFUSED",
+    "PACK_DECLARATION_FILE",
+    "PACK_DECLARATION_KEYS",
+    "PACK_DECLARATION_KIND",
+    "PACK_DECLARATION_MAX_BYTES",
+    "PACK_FAMILY_KEYS",
+    "PACK_FAMILY_REQUIRED",
+    "PACK_FINDING_FIELDS",
+    "PACK_MEMBERS",
+    "PACK_OUTPUT_KEYS",
+    "PACK_PROTOCOL_VERSION",
+    "PACK_REQUIRED_FIELDS",
+    "PATCH_FIELD",
+    "PackDeclaration",
+    "PackFamily",
+    "PackFinding",
+    "PackRefusal",
+    "PackRefused",
+    "check_pack_declaration",
+    "check_pack_output",
+    "decode_pack_declaration",
+    "encode_pack_output",
+    "glob_problem",
+    "path_applies",
+    "unified_diff_problem",
+]
+
+#: The closed member set of `CheckPack`. A companion test reads
+#: `CheckPack.__protocol_attrs__` against it, so growing the surface is a
+#: two-file act somebody has to mean.
+PACK_MEMBERS: tuple[str, ...] = ("check",)
+
+
+@runtime_checkable
+class CheckPack(Protocol):
+    """One method, and nothing else, ever: see `PACK_MEMBERS`."""
+
+    def check(self, corpus: str) -> Iterable[Mapping[str, Any]]:
+        """The pack's findings over the read-only export whose root is
+        `corpus`, each a mapping in the shape `check_pack_output()` admits.
+        The engine's shim writes them to stdout as one document."""
+
+
+#: The declaration's file, at the root of the pack's pinned tree.
+PACK_DECLARATION_FILE = "opendox-pack.yaml"
+
+#: Its `kind`, and the protocol version its `schema_version` names: the
+#: version of this whole protocol, the declaration and the output alike.
+PACK_DECLARATION_KIND = "opendox-pack"
+PACK_PROTOCOL_VERSION = 1
+
+#: The most bytes of a declaration the engine reads and decodes; 15.2a's
+#: patch bound, and the order of the server's own body bound.
+PACK_DECLARATION_MAX_BYTES = 65_536
+
+#: The declaration's keys, all required, and a family's, `label` optional.
+PACK_DECLARATION_KEYS: tuple[str, ...] = ("schema_version", "kind", "id", "version",
+                                          "families")
+PACK_FAMILY_KEYS: tuple[str, ...] = ("kind", "version", "applies_to", "label")
+PACK_FAMILY_REQUIRED: tuple[str, ...] = ("kind", "version", "applies_to")
+
+#: Keys refused BY NAME, at either level: a pack never redefines the classes,
+#: the baseline or who may land (requirement 16; 15.5).
+FORBIDDEN_DECLARATION_KEYS: tuple[str, ...] = ("baseline", "landing", "classes")
+
+#: The two categories a refusal here is filed under (T041's `CATEGORIES`).
+DECLARATION_REFUSED = "declaration-refused"
+OUTPUT_REFUSED = "pack-output-refused"
+
+#: The output document's one key, and what a pack's finding may carry: the
+#: fields it owns, beside T041's `IGNORED_FIELDS` (its `id`, ignored) and
+#: `STAMPED_FIELDS` (refused), and a `patch`.
+PACK_OUTPUT_KEYS: tuple[str, ...] = ("findings",)
+PATCH_FIELD = "patch"
+PACK_FINDING_FIELDS: tuple[str, ...] = tuple(
+    field for field in FIELDS if field not in IGNORED_FIELDS + STAMPED_FIELDS)
+PACK_REQUIRED_FIELDS: tuple[str, ...] = (
+    "kind", "path", "identity", "severity", "resolution_class", "message")
+
+#: Every reason a declaration is refused for, in the engine's own words.
+DECLARATION_REASONS: dict[str, str] = {
+    "declaration-too-large": f"it is larger than {PACK_DECLARATION_MAX_BYTES} bytes",
+    "declaration-not-utf8": "it is not UTF-8 text",
+    "declaration-not-yaml": "it is not YAML the engine can read",
+    "declaration-not-a-mapping": "it is not a mapping",
+    "key-not-text": "a key is not text",
+    "forbidden-key": "it declares a rule only the engine owns",
+    "unknown-key": "it carries a key the declaration does not name",
+    "missing-schema-version": "it has no schema_version",
+    "missing-kind": "it has no kind",
+    "missing-id": "it has no id",
+    "missing-version": "it declares no version",
+    "missing-families": "it declares no families",
+    "schema-version-unsupported": f"its schema_version is not {PACK_PROTOCOL_VERSION}",
+    "kind-not-opendox-pack": f"its kind is not {PACK_DECLARATION_KIND}",
+    "id-not-a-name": f"its id is not a name of 1 to {NAME_MAX} lowercase letters, digits "
+                     "and hyphens",
+    "id-differs-from-entry": "its id is not its manifest entry's",
+    "version-not-text": "its version is not text (quote a version such as 1.10)",
+    "version-differs-from-entry": "its version is not its manifest entry's",
+    "families-not-a-list": "its families are not a list",
+    "no-families": "it declares no family",
+    "family-not-a-mapping": "a family is not a mapping",
+    "family-missing-kind": "a family has no kind",
+    "family-missing-version": "a family has no version",
+    "family-missing-applies-to": "a family has no applies_to",
+    "family-kind-not-a-name": f"a family's kind is not a name of 1 to {NAME_MAX} lowercase "
+                              "letters, digits and hyphens",
+    "family-kind-reserved": "a family's kind is one of the engine's own",
+    "family-kind-repeated": "two families share a kind",
+    "family-version-not-text": f"a family's version is not text of 1 to {STRING_MAX} "
+                               "characters",
+    "family-applies-to-empty": "a family's applies_to is not a list of one glob or more",
+    "family-label-not-text": f"a family's label is not one line of 1 to {STRING_MAX} "
+                             "characters",
+    "glob-not-text": f"a glob is not text of 1 to {STRING_MAX} characters",
+    "glob-not-corpus-relative": "a glob starts at a root or a drive, or holds a backslash",
+    "glob-bad-segment": "a glob has an empty, . or .. segment",
+    "glob-unsupported-syntax": "a glob uses a class, a brace or a ** inside a segment",
+}
+
+#: Every reason a pack's output is refused for, in the engine's own words.
+OUTPUT_REASONS: dict[str, str] = {
+    "output-not-utf8": "its stdout is not UTF-8 text",
+    "output-not-one-json-document": "its stdout is not one JSON document",
+    "output-envelope": "its document is not exactly {findings: [...]}",
+    "finding-not-an-object": "a finding is not an object",
+    "finding-key-not-text": "a finding has a field name that is not text",
+    "finding-claims-an-engine-field": "a finding supplies a field only the engine stamps",
+    "finding-unknown-field": "a finding carries a field the contract does not name",
+    "finding-missing-field": "a finding lacks a field the contract requires",
+    "finding-names-no-document": "a finding names no document",
+    "undeclared-kind": "a finding is of a kind its declaration does not list",
+    "outside-applies-to": "a finding's path matches none of its family's globs",
+    "finding-shape": "a finding breaks a rule of the neutral shape",
+}
+
+#: A name a refusal may repeat: short, lowercase, and never a passage.
+_SAFE_WORD = re.compile(r"[a-z0-9_-]{1,40}")
+_GLOB_SYNTAX = re.compile(r"[\[\]{}]")
+
+
+class PackFamily(NamedTuple):
+    """One family a pack declares: its kind, its own version, the globs of
+    the documents it applies to, and its optional label."""
+
+    kind: str
+    version: str
+    applies_to: tuple[str, ...]
+    label: str | None
+
+
+class PackDeclaration(NamedTuple):
+    """A declaration `check_pack_declaration()` admitted."""
+
+    id: str
+    version: str
+    families: tuple[PackFamily, ...]
+
+    def family(self, kind: Any) -> PackFamily | None:
+        """The family declaring `kind`, or None."""
+        for declared in self.families:
+            if declared.kind == kind:
+                return declared
+        return None
+
+
+class PackFinding(NamedTuple):
+    """One finding of an admitted output: the finding, stamped and checked
+    whole, and the patch the pack proposed for it, unjudged (T049's)."""
+
+    finding: dict[str, Any]
+    proposes_patch: bool
+    patch: Any
+
+
+class PackRefusal(NamedTuple):
+    """Why a pack's declaration or output is refused, against which manifest
+    entry. `where` holds indexes, rule ids and safe names only."""
+
+    category: str
+    reason: str
+    entry: str
+    version: str
+    where: Mapping[str, Any]
+
+    def finding(self) -> dict[str, Any]:
+        """The engine's finding against the pack, T041's `engine_finding()`:
+        pathless, `human-only`, attributed to the manifest entry, and checked
+        whole."""
+        if self.category == DECLARATION_REFUSED:
+            lead, words = "the pack's declaration is refused", DECLARATION_REASONS
+        else:
+            lead, words = "the pack's output is refused, and none of it is stored", OUTPUT_REASONS
+        return engine_finding(self.category, self.entry, pack_version=self.version,
+                              severity="error", message=f"{lead}: {words[self.reason]}",
+                              evidence={"reason": self.reason, **self.where})
+
+
+class PackRefused(ValueError):
+    """A declaration or an output refused; `refusal.finding()` is what the
+    engine records."""
+
+    def __init__(self, refusal: PackRefusal) -> None:
+        self.refusal = refusal
+        detail = ", ".join(f"{key}={value}" for key, value in refusal.where.items())
+        super().__init__(f"{refusal.category}: {refusal.reason}"
+                         + (f" ({detail})" if detail else ""))
+
+
+def _refuse(category: str, reason: str, entry: str, version: str, **where: Any) -> PackRefused:
+    words = DECLARATION_REASONS if category == DECLARATION_REFUSED else OUTPUT_REASONS
+    if reason not in words:
+        raise KeyError(reason)
+    return PackRefused(PackRefusal(category, reason, entry, version, dict(where)))
+
+
+def _safe(label: str, value: Any) -> dict[str, str]:
+    """`{label: value}` when `value` is a short lowercase word; else nothing,
+    so a refusal never repeats what a pack wrote at length."""
+    return {label: value} if isinstance(value, str) and _SAFE_WORD.fullmatch(value) else {}
+
+
+def _is_name(value: Any) -> bool:
+    return isinstance(value, str) and bool(_NAME.fullmatch(value)) and len(value) <= NAME_MAX
+
+
+def _is_version(value: Any, limit: int | None = None) -> bool:
+    """T041's `pack-version-is-text`: non-empty text free of control
+    characters and lone surrogates; at most `limit` characters when given."""
+    return (isinstance(value, str) and value != "" and not _CONTROL.search(value)
+            and (limit is None or len(value) <= limit))
+
+
+# ---------------------------------------------------------------------------
+# the globs a family applies to
+# ---------------------------------------------------------------------------
+
+def glob_problem(pattern: Any) -> str | None:
+    """None when `pattern` is a glob this protocol admits; else the reason.
+
+    A glob is corpus-relative and `/`-separated. `*` matches any characters
+    but `/`, `?` one character but `/`, and a whole segment `**` any number
+    of segments (one or more when it is the last). Every other character is
+    itself. A class, a brace, or `**` inside a segment is refused, so no glob
+    means something it does not say."""
+    if not isinstance(pattern, str) or not pattern or len(pattern) > STRING_MAX \
+            or _CONTROL.search(pattern):
+        return "glob-not-text"
+    if pattern.startswith("/") or _DRIVE.match(pattern) or "\\" in pattern:
+        return "glob-not-corpus-relative"
+    segments = pattern.split("/")
+    if any(segment in ("", ".", "..") for segment in segments):
+        return "glob-bad-segment"
+    if _GLOB_SYNTAX.search(pattern) or any("**" in s and s != "**" for s in segments):
+        return "glob-unsupported-syntax"
+    return None
+
+
+@functools.lru_cache(maxsize=1024)
+def _glob(pattern: str) -> re.Pattern[str]:
+    segments = pattern.split("/")
+    parts: list[str] = []
+    for index, segment in enumerate(segments):
+        last = index == len(segments) - 1
+        if segment == "**":
+            parts.append(r"[^/]+(?:/[^/]+)*" if last else r"(?:[^/]+/)*")
+            continue
+        piece = "".join(r"[^/]*" if char == "*" else r"[^/]" if char == "?"
+                        else re.escape(char) for char in segment)
+        parts.append(piece if last else piece + "/")
+    return re.compile("".join(parts), re.DOTALL)
+
+
+def path_applies(globs: Iterable[str], path: str) -> bool:
+    """Whether `path` matches one of `globs` WHOLE (so `*.md` is a top-level
+    document's). Each glob must be one `glob_problem()` admits."""
+    for pattern in globs:
+        if glob_problem(pattern) is not None:
+            raise ValueError("a glob the protocol does not admit")
+        if _glob(pattern).fullmatch(path):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# the declaration
+# ---------------------------------------------------------------------------
+
+def decode_pack_declaration(raw: bytes, *, entry_id: str, entry_version: str) -> str:
+    """The declaration's text, for the engine to parse: at most
+    `PACK_DECLARATION_MAX_BYTES`, and UTF-8. Refuses with `PackRefused`."""
+    if not isinstance(raw, (bytes, bytearray)):
+        raise TypeError("decode_pack_declaration() takes the file's bytes")
+    if len(raw) > PACK_DECLARATION_MAX_BYTES:
+        raise _refuse(DECLARATION_REFUSED, "declaration-too-large", entry_id, entry_version,
+                      bytes=len(raw))
+    try:
+        return bytes(raw).decode("utf-8")
+    except UnicodeDecodeError:
+        raise _refuse(DECLARATION_REFUSED, "declaration-not-utf8", entry_id,
+                      entry_version) from None
+
+
+def _keys(mapping: dict[Any, Any], allowed: tuple[str, ...], required: tuple[str, ...],
+          missing_prefix: str, refuse: Any, where: dict[str, Any]) -> None:
+    if any(not isinstance(key, str) for key in mapping):
+        raise refuse("key-not-text", **where)
+    for key in FORBIDDEN_DECLARATION_KEYS:
+        if key in mapping:
+            raise refuse("forbidden-key", key=key, **where)
+    for key in mapping:
+        if key not in allowed:
+            raise refuse("unknown-key", **_safe("key", key), **where)
+    for key in required:
+        if key not in mapping:
+            raise refuse(missing_prefix + key.replace("_", "-"), **where)
+
+
+def check_pack_declaration(document: Any, *, entry_id: str,
+                           entry_version: str) -> PackDeclaration:
+    """The declaration, admitted, or `PackRefused` naming the first reason.
+
+    `document` is what the engine parsed from `opendox-pack.yaml`; this
+    module parses nothing. `entry_id` and `entry_version` are the manifest
+    entry's, which the declaration's id and version must equal (15.1a)."""
+    def refuse(reason: str, **where: Any) -> PackRefused:
+        return _refuse(DECLARATION_REFUSED, reason, entry_id, entry_version, **where)
+
+    if not isinstance(document, dict):
+        raise refuse("declaration-not-a-mapping")
+    _keys(document, PACK_DECLARATION_KEYS, PACK_DECLARATION_KEYS, "missing-", refuse, {})
+    schema_version = document["schema_version"]
+    if isinstance(schema_version, bool) or schema_version != PACK_PROTOCOL_VERSION \
+            or not isinstance(schema_version, int):
+        raise refuse("schema-version-unsupported")
+    if document["kind"] != PACK_DECLARATION_KIND:
+        raise refuse("kind-not-opendox-pack")
+    if not _is_name(document["id"]):
+        raise refuse("id-not-a-name")
+    if document["id"] != entry_id:
+        raise refuse("id-differs-from-entry")
+    if not _is_version(document["version"]):
+        raise refuse("version-not-text")
+    if document["version"] != entry_version:
+        raise refuse("version-differs-from-entry")
+    families = document["families"]
+    if not isinstance(families, list):
+        raise refuse("families-not-a-list")
+    if not families:
+        raise refuse("no-families")
+    admitted: list[PackFamily] = []
+    for index, family in enumerate(families):
+        where = {"family": index}
+        if not isinstance(family, dict):
+            raise refuse("family-not-a-mapping", **where)
+        _keys(family, PACK_FAMILY_KEYS, PACK_FAMILY_REQUIRED, "family-missing-", refuse, where)
+        kind = family["kind"]
+        if not _is_name(kind):
+            raise refuse("family-kind-not-a-name", **where)
+        if kind in ENGINE_KINDS:
+            raise refuse("family-kind-reserved", kind=kind, **where)
+        if any(seen.kind == kind for seen in admitted):
+            raise refuse("family-kind-repeated", kind=kind, **where)
+        if not _is_version(family["version"], STRING_MAX):
+            raise refuse("family-version-not-text", **where)
+        globs = family["applies_to"]
+        if not isinstance(globs, list) or not globs:
+            raise refuse("family-applies-to-empty", **where)
+        for position, pattern in enumerate(globs):
+            problem = glob_problem(pattern)
+            if problem is not None:
+                raise refuse(problem, glob=position, **where)
+        label = family.get("label")
+        if label is not None and (not isinstance(label, str) or not label
+                                  or len(label) > STRING_MAX or _NOT_ONE_LINE.search(label)):
+            raise refuse("family-label-not-text", **where)
+        admitted.append(PackFamily(kind, family["version"], tuple(globs), label))
+    return PackDeclaration(document["id"], document["version"], tuple(admitted))
+
+
+# ---------------------------------------------------------------------------
+# the output
+# ---------------------------------------------------------------------------
+
+def _no_repeated_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    document: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in document:
+            raise ValueError("a key is given twice in one object")
+        document[key] = value
+    return document
+
+
+def _no_constant(name: str) -> Any:
+    raise ValueError(f"{name} is not a JSON number")
+
+
+def _finite(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError("a number JSON cannot write")
+    return value
+
+
+def encode_pack_output(findings: Iterable[Mapping[str, Any]]) -> bytes:
+    """The one document a pack's shim writes to stdout: `{"findings": [...]}`,
+    UTF-8, no NaN or infinity, one line."""
+    return (json.dumps({"findings": list(findings)}, ensure_ascii=False, allow_nan=False,
+                       separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def check_pack_output(stdout: bytes, declaration: PackDeclaration, *, entry_id: str,
+                      entry_version: str) -> tuple[PackFinding, ...]:
+    """The pack's findings, each stamped and checked whole, or `PackRefused`
+    for the WHOLE output, naming its first reason (`6065680005` item 2).
+
+    The engine stamps `pack_id` and `pack_version` from the manifest entry,
+    the family's declared version into `evidence.family_version`, and the id by
+    T041's rule; a pack's own `id` is ignored, and its `pack_id`,
+    `pack_version` or `baseline_class` is refused."""
+    def refuse(reason: str, **where: Any) -> PackRefused:
+        return _refuse(OUTPUT_REFUSED, reason, entry_id, entry_version, **where)
+
+    measured = {"bytes": len(stdout), "sha256": hashlib.sha256(stdout).hexdigest()}
+    try:
+        text = bytes(stdout).decode("utf-8")
+    except UnicodeDecodeError:
+        raise refuse("output-not-utf8", **measured) from None
+    try:
+        document = json.loads(text, object_pairs_hook=_no_repeated_keys,
+                              parse_constant=_no_constant, parse_float=_finite)
+    except (ValueError, RecursionError):
+        raise refuse("output-not-one-json-document", **measured) from None
+    if (not isinstance(document, dict) or tuple(document) != PACK_OUTPUT_KEYS
+            or not isinstance(document["findings"], list)):
+        raise refuse("output-envelope")
+    admitted: list[PackFinding] = []
+    for index, item in enumerate(document["findings"]):
+        where = {"finding": index}
+        if not isinstance(item, dict):
+            raise refuse("finding-not-an-object", **where)
+        for field in STAMPED_FIELDS:
+            if field in item:
+                raise refuse("finding-claims-an-engine-field", field=field, **where)
+        for key in item:
+            if key not in PACK_FINDING_FIELDS + IGNORED_FIELDS + (PATCH_FIELD,):
+                raise refuse("finding-unknown-field", **_safe("field", key), **where)
+        for field in PACK_REQUIRED_FIELDS:
+            if field not in item:
+                raise refuse("finding-missing-field", field=field, **where)
+        family = declaration.family(item["kind"])
+        if family is None:
+            raise refuse("undeclared-kind", **_safe("kind", item["kind"]), **where)
+        path = item["path"]
+        if path == "":
+            raise refuse("finding-names-no-document", kind=family.kind, **where)
+        if not isinstance(path, str):
+            raise refuse("finding-shape", rule="path-is-corpus-relative", **where)
+        if not path_applies(family.applies_to, path):
+            raise refuse("outside-applies-to", kind=family.kind, **where)
+        if "locator" in item and not isinstance(item["locator"], dict):
+            raise refuse("finding-shape", rule="locator-keys", **where)
+        evidence = item.get("evidence", {})
+        if not isinstance(evidence, dict):
+            raise refuse("finding-shape", rule="evidence-is-an-object", **where)
+        try:
+            finding = make_finding(
+                kind=family.kind, pack_id=entry_id, pack_version=entry_version, path=path,
+                identity=item["identity"], severity=item["severity"],
+                resolution_class=item["resolution_class"], message=item["message"],
+                evidence={**evidence, "family_version": family.version},
+                locator=item.get("locator"))
+        except FindingRefused as refused:
+            raise refuse("finding-shape", rule=refused.rule, **where) from None
+        admitted.append(PackFinding(finding, PATCH_FIELD in item, item.get(PATCH_FIELD)))
+    return tuple(admitted)
+
+
+# ---------------------------------------------------------------------------
+# the patch type
+# ---------------------------------------------------------------------------
+
+_HUNK_HEADER = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?")
+_EXTENDED_HEADER = re.compile(
+    r"(?:old mode|new mode|deleted file mode|new file mode) [0-7]{6}"
+    r"|(?:copy|rename) (?:from|to) .+"
+    r"|(?:similarity|dissimilarity) index \d{1,3}%"
+    r"|index [0-9a-f]{4,64}\.\.[0-9a-f]{4,64}(?: [0-7]{6})?")
+
+
+def unified_diff_problem(patch: Any) -> str | None:
+    """None when `patch` is a unified diff and nothing else; else the reason.
+
+    The diff may carry git's headers (`diff --git`, `index`, the mode,
+    rename and copy lines, a binary patch): they are a diff's, and the patch
+    validator refuses those it must by its own rules (15.2a, T049). What is
+    refused here is what is no diff at all: replacement text, prose around a
+    diff, a hunk whose lines do not add up, a file with no hunk."""
+    if not isinstance(patch, str):
+        return "patch-not-text"
+    if not patch:
+        return "patch-empty"
+    if not patch.endswith("\n"):
+        return "patch-no-final-newline"
+    lines = patch[:-1].split("\n")
+    at, files = 0, 0
+    while at < len(lines):
+        git = lines[at].startswith("diff --git ")
+        if git:
+            at += 1
+            while at < len(lines) and _EXTENDED_HEADER.fullmatch(lines[at]):
+                at += 1
+        if git and at < len(lines) and (lines[at] == "GIT binary patch"
+                                        or lines[at].startswith("Binary files ")):
+            at += 1
+            while at < len(lines) and not lines[at].startswith("diff --git "):
+                at += 1
+            files += 1
+            continue
+        if at + 1 < len(lines) and lines[at].startswith("--- ") \
+                and lines[at + 1].startswith("+++ "):
+            at += 2
+        elif git and (at == len(lines) or lines[at].startswith("diff --git ")):
+            files += 1  # a rename or a mode change alone: no hunk to carry
+            continue
+        else:
+            return "patch-not-a-unified-diff"
+        hunks = 0
+        while at < len(lines) and lines[at].startswith("@@"):
+            header = _HUNK_HEADER.fullmatch(lines[at])
+            if header is None:
+                return "patch-bad-hunk-header"
+            old = 1 if header.group(2) is None else int(header.group(2))
+            new = 1 if header.group(4) is None else int(header.group(4))
+            at += 1
+            while old > 0 or new > 0:
+                if at == len(lines):
+                    return "patch-hunk-short"
+                line = lines[at]
+                if line.startswith("\\ "):
+                    pass
+                elif line == "" or line.startswith(" "):
+                    old, new = old - 1, new - 1
+                elif line.startswith("-"):
+                    old -= 1
+                elif line.startswith("+"):
+                    new -= 1
+                else:
+                    return "patch-hunk-short"
+                at += 1
+            if old < 0 or new < 0:
+                return "patch-hunk-short"
+            while at < len(lines) and lines[at].startswith("\\ "):
+                at += 1
+            hunks += 1
+        if hunks == 0:
+            return "patch-no-hunk"
+        files += 1
+    return None if files else "patch-not-a-unified-diff"
