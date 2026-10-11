@@ -352,7 +352,7 @@ def test_two_links_to_one_target_are_one_finding(tmp_path) -> None:
         "README.md": _header() + "[a](gone.md) and [b](gone.md)\n\n[c](gone.md)\n"})
     found = _on(_run(repo), "README.md", F.BROKEN_LINK)
     assert [(f["identity"], f["locator"]["line_start"]) for f in found] == [
-        ({"target": "gone.md"}, 3)]
+        ({"target": "gone.md"}, 4)]
 
 
 # --------------------------------------------------------------------------
