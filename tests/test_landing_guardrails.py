@@ -3115,11 +3115,18 @@ class HostileLander:
         return self.answer
 
 
+#: An override that leaves the field out of the answer altogether.
+ABSENT = object()
+
+
 def landed_answer(**overrides):
-    """A `Landed`-shaped answer: `GOOD_LANDED`, with `overrides`."""
+    """A `Landed`-shaped answer: `GOOD_LANDED`, with `overrides` (`ABSENT`
+    leaves a field out)."""
     import types
 
-    return types.SimpleNamespace(**{**GOOD_LANDED, **overrides})
+    fields = {**GOOD_LANDED, **overrides}
+    return types.SimpleNamespace(**{name: value for name, value in fields.items()
+                                    if value is not ABSENT})
 
 
 def every_door(world, tmp_path, monkeypatch, capsys, lander) -> list[dict]:
@@ -3171,8 +3178,8 @@ def test_a_landed_answer_is_checked_field_by_field_at_every_door(
     verb's text, the verb's `--json`) by a fixed sentence naming the field
     alone, and nothing of the answer is printed."""
     not_the_landings = {
-        "branch": ["sess-2", BRANCH + " ", None],
-        "merge_commit": ["a" * 39, "A" * 40, "a" * 41, 40],
+        "branch": ["sess-2", BRANCH + " ", None, ABSENT],
+        "merge_commit": ["a" * 39, "A" * 40, "a" * 41, 40, ABSENT],
         "previous_main": ["b" * 39, "B" * 40, None],
         "served_checkout": ["Left", "fast-forwarded ", "", None],
         "pushed": [True, 0, "", None],
@@ -3231,11 +3238,15 @@ def test_a_landers_refusal_reaches_no_door_with_its_credential(
 def test_a_listed_code_is_answered_as_it_is(world, tmp_path, monkeypatch,
                                             capsys, local_install):
     """The mapping keeps every code the route lists: a lander's own named
-    refusal, and a confirmation refusal, keep theirs."""
+    refusal, a confirmation refusal and a conflict keep theirs; a code that
+    is not a string is answered `unlisted`, never a failure."""
     for n, (raised, code) in enumerate((
             (LandingRefused("main moved", code="main-moved"), "main-moved"),
             (ConfirmationRefused("spent", code="spent"), "confirmation:spent"),
-            (MergeConflict(BRANCH, ("doc.md",)), "merge-conflict"))):
+            (MergeConflict(BRANCH, ("doc.md",)), "merge-conflict"),
+            # a code that is no string at all is named by the fixed word too
+            (LandingRefused("no code", code=None), "unlisted"),
+            (ConfirmationRefused("a list", code=["spent"]), "unlisted"))):
         route = every_door(world, tmp_path / f"s{n}", monkeypatch, capsys,
                            HostileLander(raises=raised))[0]
         assert (route["status"], route["body"]["code"]) == (409, code), route

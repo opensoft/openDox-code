@@ -199,7 +199,7 @@ def answered_code(exc) -> str:
     from opendox.landing_confirm import ConfirmationRefused
 
     code = getattr(exc, "code", None)
-    if type(code) is not str:
+    if not isinstance(code, str):
         return UNLISTED_CODE
     if isinstance(exc, ConfirmationRefused):
         code = "confirmation:" + code

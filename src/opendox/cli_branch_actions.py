@@ -451,9 +451,10 @@ def landed_object(landed, branch: str) -> dict:
     held to data-model.md § Landed. `branch` must be the branch landed,
     `merge_commit` and `previous_main` full object names (40 hex digits, or
     64), `served_checkout` `fast-forwarded` or `left`, and `pushed` exactly
-    False. Each must be exactly that type, never a subclass that could print
-    otherwise than it compares. Any other answer is refused by a fixed
-    sentence that names the field and repeats nothing it carried.
+    False; a field the answer lacks is not the landing's either. Any other
+    answer is refused by a fixed sentence that names the field and repeats
+    nothing it carried. The trust model is the report's: hostile DATA from
+    trusted code (holder ruling item 11 (b)).
     """
     from opendox import landing
 
@@ -461,7 +462,7 @@ def landed_object(landed, branch: str) -> dict:
 
     def text(name: str) -> str | None:
         value = fields[name]
-        return value if type(value) is str else None
+        return value if isinstance(value, str) else None
 
     def object_name(name: str) -> bool:
         value = text(name)
