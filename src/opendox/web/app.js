@@ -38,7 +38,7 @@ import { renderLineage, renderStats } from "./views/lineage.js";
 import { mountExplorer } from "./views/explorer.js";
 import { renderViewer } from "./views/viewer.js";
 import { createEditAction } from "./views/edit.js";
-import { mountBranchActions } from "./views/branch-actions.js";
+import { mountBranchActions, mountLandConfirm } from "./views/branch-actions.js";
 import { renderCanvas } from "./views/canvas.js";
 import { renderLens } from "./views/lens.js";
 // THE GATE BAR IS NOT IMPORTED HERE ANY MORE (§ 3.4 slice S3, the view
@@ -1695,6 +1695,12 @@ async function render() {
     // withheld while another repository is active; with none active, as on a
     // standalone plane, it is offered (`anotherRepositoryIsActive` decides).
     mountBranchActions(document.getElementById("branchactions"), {
+      caps, composed, branch: safeKey(active)?.ref || null,
+      repository: safeKey(active)?.repository || null,
+    });
+    // ...and its LAND CONFIRM CONTROL beside it (plan 038 T016; #1144 12.6a),
+    // keyed on `actions.land` and handed the same arguments.
+    mountLandConfirm(document.getElementById("landconfirm"), {
       caps, composed, branch: safeKey(active)?.ref || null,
       repository: safeKey(active)?.repository || null,
     });

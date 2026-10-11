@@ -38,11 +38,12 @@ FIRST landing (R1Q5 (a)), so no build ever meets an empty default:
   the 31-entry `--help` tree openxFactory's golden pins, because it never meets
   this one.
 
-Release 2's `submit`, `land` and `health` join the tuple as they land. `submit`
-has (plan 038 T015; #1144 12.4a; decision N-2, refined by ADV-14):
-`cli_branch_actions.BranchActionSubcommands` follows `RuntimeSubcommand`, so a
-parser built on this default carries `opendox submit` too, and a host's
-command tree, which never meets this one, does not (R2Q3 (a)).
+Release 2's `submit`, `land` and `health` join the tuple as they land.
+`submit` has (plan 038 T015; #1144 12.4a; decision N-2, refined by ADV-14), and
+`land` has (plan 038 T016; #1144 12.6a): `cli_branch_actions
+.BranchActionSubcommands` follows `RuntimeSubcommand` and registers both, so a
+parser built on this default carries `opendox submit` and `opendox land` too,
+and a host's command tree, which never meets this one, does not (R2Q3 (a)).
 `ProjectSubcommand` is NOT here. R1Q5 (a) names the runtime verbs alone, so
 `project create-repository` stays on the `opendox-runtime` alias until a ruling
 says otherwise (plan 034, T006's finding U4). The holder's reading, recorded on
@@ -55,11 +56,13 @@ THE FIVE FACETS, AND WHY ONLY THREE ARE DECLARED.
 * `ROUTE_EXTENSIONS` is declared, and `serve.build_server()` reads it as
   strictly as the parser reads the verbs. openDox's older routes are the core
   server's fixed dispatch. The submit route, `POST /actions/session/submit`, is
-  the first that is not (plan 038 T015; 12.4a): it is this profile's
-  contribution, `serve_branch_actions.BranchActionRouteExtension`, so a host
-  profile that replaces the default carries no submit route, and its
-  `/capabilities` payload carries no `actions.submit` key (decision N-2,
-  refined by ADV-14; OQ-12-14; R2Q3 (a)).
+  the first that is not (plan 038 T015; 12.4a), and the two land routes, `POST
+  /actions/session/land-nonce` and `POST /actions/session/land`, follow it
+  (plan 038 T016; 12.6a; OQ-12-13): they are this profile's contribution,
+  `serve_branch_actions.BranchActionRouteExtension`, so a host profile that
+  replaces the default carries none of them, and its `/capabilities` payload
+  carries no `actions.submit` or `actions.land` key (decision N-2, refined by
+  ADV-14; OQ-12-14; R2Q3 (a)).
 * `DISPLAY` is NOT declared, and that is how the default's vocabulary is
   `NEUTRAL_DISPLAY` unchanged (requirement 3's third scenario; R1Q4 (a)). For a
   registered profile without the facet, `display_profile.host_display()`
@@ -83,7 +86,7 @@ THE FIVE FACETS, AND WHY ONLY THREE ARE DECLARED.
   R1Q1 (a)), and `serve.build_server()` reads it by presence and composes each
   mixin after the core handler (`route_extension.compose_handler`). The
   default's one mixin is `serve_branch_actions.BranchActionRoutes`, which holds
-  the submit binding's method and nothing else.
+  the methods the submit and land bindings name, and the gate they share.
 
 HOW IT IS REGISTERED: by the entry points, and never at import (R1Q3 (a)).
 `cli.build_parser()`, `serve.build_server()` and both `main()`s call
@@ -130,14 +133,16 @@ from opendox.serve_branch_actions import (
 __all__ = ["HANDLER_CONTRIBUTIONS", "ROUTE_EXTENSIONS", "SUBCOMMAND_EXTENSIONS"]
 
 #: openDox's OWN verbs, contributed through the § 2.4 subcommand seam (R1Q4 (a),
-#: R1Q5 (a)): the runtime's, then `submit` (plan 038 T015; 12.4a). Never
-#: empty: the module docstring gives the ruling that forbids it.
+#: R1Q5 (a)): the runtime's, then `submit` (plan 038 T015; 12.4a) and `land`
+#: (T016; 12.6a). Never empty: the module docstring gives the ruling that
+#: forbids it.
 SUBCOMMAND_EXTENSIONS: tuple = (RuntimeSubcommand(), BranchActionSubcommands())
 
-#: openDox's OWN contributed routes: the submit route (plan 038 T015; 12.4a).
-#: Every older route openDox owns is in the core server's fixed dispatch.
+#: openDox's OWN contributed routes: the submit route (plan 038 T015; 12.4a)
+#: and the two land routes (T016; 12.6a). Every older route openDox owns is in
+#: the core server's fixed dispatch.
 ROUTE_EXTENSIONS: tuple = (BranchActionRouteExtension(),)
 
-#: The mixin holding the method the submit binding names (plan 038 T015),
-#: composed after the core handler by `serve.build_server()`.
+#: The mixin holding the methods the submit and land bindings name (plan 038
+#: T015, T016), composed after the core handler by `serve.build_server()`.
 HANDLER_CONTRIBUTIONS: tuple = (BranchActionRoutes,)

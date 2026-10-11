@@ -135,6 +135,11 @@ route to that one module (never a `doxbench-*.js` file, OQ-12-14), and
 `test_the_submit_control_keys_on_submit_never_on_session` holds the control to
 the `actions.submit` key (OQ-12-14, refined by ADV-14).
 
+PLAN 038 T016 (#1144 12.6a; OQ-12-13) adds the land confirm control to the
+same module, `mountLandConfirm`, mounted into `#landconfirm`:
+`test_the_land_routes_are_addressed_by_the_branch_actions_view_alone` and
+`test_the_land_control_keys_on_land_never_on_session` hold it the same way.
+
 A CREATED file (this module and its fixture): no carve-manifest row (RULED
 OQ-C) -- the front end's package boundary did not exist before this note, so
 there is nothing for either file to have been carved FROM.
@@ -1455,3 +1460,40 @@ def test_the_submit_control_keys_on_submit_never_on_session() -> None:
     assert "caps?.actions?.submit === true" in code
     assert not re.search(r"\bsession\b", code), (
         "views/branch-actions.js reads `session`")
+
+
+# ---------------------------------------------------------------------------
+# PLAN 038 T016 -- openDox's own land confirm control, and where it may live
+# (#1144 12.6a; OQ-12-13; OQ-12-14, refined by ADV-14).
+# ---------------------------------------------------------------------------
+
+LAND_ROUTES = ("/actions/session/land-nonce", "/actions/session/land")
+
+
+def test_the_land_routes_are_addressed_by_the_branch_actions_view_alone() -> None:
+    """The land confirm control lives in `views/branch-actions.js` beside the
+    submit control, and nowhere else: never in a `doxbench-*.js` file, and
+    never in the shell, which mounts it into `#landconfirm` and names no
+    route."""
+    for route in LAND_ROUTES:
+        literal = f'"{route}"'
+        sites = sorted(row["path"] for row in _ROWS
+                       if literal in (WEB_ROOT / row["path"]).read_text(
+                           encoding="utf-8"))
+        assert sites == [BRANCH_ACTIONS_PATH], (route, sites)
+    shell = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+    assert "mountLandConfirm" in shell
+    assert 'getElementById("landconfirm")' in shell
+    assert 'id="landconfirm"' in (WEB_ROOT / "index.html").read_text(
+        encoding="utf-8")
+
+
+def test_the_land_control_keys_on_land_never_on_session() -> None:
+    """`actions.land` is present only where openDox's own profile contributed
+    the land routes, and true only where `land` can act; `session` is true on
+    any local human's plane. Read from the code alone."""
+    code = _code_only((WEB_ROOT / BRANCH_ACTIONS_PATH).read_text(
+        encoding="utf-8"))
+    assert "caps?.actions?.land === true" in code
+    assert not re.search(r"\bsession\b", code)
+

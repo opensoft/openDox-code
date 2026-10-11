@@ -1,7 +1,9 @@
-"""openDox's OWN submit verb: `opendox submit` (plan 038 T015; #1144 12.4a;
-openxFactory `specs/038-.../contracts/cli-http-submit-land.md`).
+"""openDox's OWN branch verbs: `opendox submit` (plan 038 T015; #1144 12.4a)
+and `opendox land` (plan 038 T016; #1144 12.6a), as openxFactory
+`specs/038-.../contracts/cli-http-submit-land.md` shapes them.
 
     opendox submit --repo-root PATH --branch BRANCH [--local] [--json]
+    opendox land   --repo-root PATH --branch BRANCH [--local] [--json]
 
 12.4a's ratified shape (ADV-01). Before this module a standalone openDox could
 not submit at all, `gh` or no `gh`: the only act that submitted was openXdox's
@@ -52,13 +54,60 @@ with a fixed sentence naming its TYPE alone, as the route answers it: its text
 is a host's port's, which this verb cannot vet, and it may carry a remote
 URL's credential (12.1a).
 
+LAND (plan 038 T016; #1144 12.6a). `land` lands BRANCH on `main` with ONE
+confirmed act, through the seam T012 declared (`opendox.landing`):
+
+* ITS BINDING. The verb takes its lander from `cli._landing_port` and the
+  route from the server's `landing_factory`, the two bindings 12.6a names.
+  Each binds the neutral lander only where the repository is `standalone`
+  (the explicit local install with `main`'s committed declaration), and
+  nothing otherwise (`landing.bound_lander`).
+* WHERE NO LANDER IS BOUND (`landing_refusal`). A `governed` repository with
+  a host's contributed instrument submits through it and reports where the
+  work went, and the merge stays the governance's act (R2Q4 (a)). Anything
+  else is refused BY NAME, before any human is asked to confirm a landing
+  that cannot happen: governed-without-an-instrument, or why the governance
+  is `unknown` (no `main`; no declaration, naming the exact file and content
+  to commit; a host that failed to load; the install mode), as
+  `landing.read_governance` names it.
+* THE CONFIRMATION. The verb asks at the CONTROLLING TERMINAL
+  (`landing_confirm.confirm_at_terminal`, the first of the two issuers),
+  showing the branch, its head and the OPERATION this landing performs: a
+  merge commit onto `main` where a lander is bound, a submission to the
+  host's instrument where the repository is governed (`landing_operation`,
+  decided before the prompt from the reading `landing_refusal` uses; holder
+  ruling item 10, #656 `6103915259`). The act performs exactly the
+  operation the question named, or refuses (`operation-changed`). The
+  human types the branch's name. There
+  is NO flag that answers for the human (decision N-11; 12.6a: "refuses when
+  there is none"), so a piped or scripted `land` is refused. This module and
+  `opendox.serve_branch_actions` are the two interactive layers
+  `landing_confirm.INTERACTIVE_LAYERS` names, and no other module may call an
+  issuer.
+* THE ANSWER (`land_branch`): the `Landed` object (`landed_object`) under
+  `standalone`, or the instrument's `Submission` (`submission_object`) under
+  `governed`; the two are told apart by their fields. A lander is a
+  binding's answer (a host's or a test's), so its `Landed` is CHECKED field
+  by field against data-model.md § Landed, as a report is, and never
+  printed on trust (lane 3's MAJOR on #100 at `99c4e079`). The printed report
+  names the merge commit and the `git revert -m 1` that undoes it. `land`
+  pushes nothing.
+* `--local` IS READ HERE, unlike `submit`'s: `standalone` needs the explicit
+  local install, which `--local` selects exactly as `OPENDOX_INSTALL_MODE=local`
+  does, and a flag and a setting that disagree are refused naming both
+  (R2Q9 (a) item 7), by the governance reading itself.
+* EVERY REFUSAL IS NAMED and passes through `redacted_text`, whoever wrote
+  it: the lander's own are redacted already, and an instrument's are a
+  host's, which this module cannot vet. A failure the instrument did not name
+  is refused naming its TYPE alone, as `submit` refuses one.
+
 IMPORT WEIGHT. The standard library alone at import, because
 `opendox.default_profile` imports this module and must import with nothing
 beyond the standard library (`tests/test_default_profile.py`).
 `opendox.session_pr` is imported where it is used, since it re-exports the
 landing seam (plan 038 T012), whose modules reach beyond the standard
-library; so are `opendox.cli`, the runtime's configuration and the git
-adapter.
+library; so are `opendox.cli`, the runtime's configuration, the git adapter,
+and the landing seam's own modules.
 """
 
 from __future__ import annotations
@@ -72,8 +121,12 @@ from pathlib import Path
 
 
 __all__ = [
-    "LOCAL_BESIDE_HOSTED", "SUBMISSION_FIELDS", "UNNAMED_FAILURE",
-    "BranchActionSubcommands", "cmd_submit", "redacted_text",
+    "LANDED_FIELDS", "LANDED_NOT_THE_LANDINGS", "LOCAL_BESIDE_HOSTED",
+    "NO_LANDER", "OPERATION_CHANGED", "SUBMISSION_FIELDS",
+    "UNNAMED_FAILURE", "UNNAMED_LANDING_FAILURE",
+    "BranchActionSubcommands", "branch_head", "cmd_land", "cmd_submit",
+    "land_branch", "landed_object", "landing_operation", "landing_refusal",
+    "main_refused", "redacted_text",
     "refusal_text", "submission_object", "submit_branch",
 ]
 
@@ -100,6 +153,41 @@ UNNAMED_FAILURE = (
     "the submission port raised {kind}, a failure it did not name, so nothing "
     "is reported as submitted. Its text is not printed: it is a host's port's, "
     "which this verb cannot vet")
+
+
+#: The `Landed` object's fields, in the order the verb prints them
+#: (data-model.md § Landed).
+LANDED_FIELDS = ("branch", "merge_commit", "previous_main", "served_checkout",
+                 "pushed")
+
+#: The refusal where the repository is `standalone` and still no lander is
+#: bound: a binding that answered nothing (a host's or a test's).
+NO_LANDER = (
+    "no lander is bound for this checkout, so nothing lands: the binding that "
+    "supplies one (`landing_factory`, or `_landing_port`) answered none")
+
+#: The refusal of a `Landed` answer that is not the landing's. `{field}` is
+#: the field's NAME, and nothing the answer carried is repeated (12.1a).
+#: The lander may have merged before it answered, so it says where to look.
+LANDED_NOT_THE_LANDINGS = (
+    "the lander answered a `Landed` whose `{field}` is not the landing's "
+    "(data-model.md § Landed), so nothing is reported as landed. Whether "
+    "`main` moved is git's to say: `git log -1 main`")
+
+#: The refusal of an act that would not be the operation its confirmation
+#: named (holder ruling item 10): the binding changed after the question.
+OPERATION_CHANGED = (
+    "the landing would not be the operation the confirmation named: what "
+    "this checkout binds changed after the question was asked, so nothing "
+    "landed and nothing was submitted. Ask again, and confirm what the new "
+    "question names")
+
+#: The refusal of a failure the landing did not name. `{kind}` is the
+#: exception's type, and nothing else of it is printed (12.1a).
+UNNAMED_LANDING_FAILURE = (
+    "the landing raised {kind}, a failure it did not name, so nothing is "
+    "reported as landed. Its text is not printed: it may be a host's "
+    "instrument's, which this verb cannot vet")
 
 
 def _core():
@@ -260,8 +348,241 @@ def cmd_submit(args: argparse.Namespace) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------
+# land (plan 038 T016; #1144 12.6a)
+# --------------------------------------------------------------------------
+
+def main_refused():
+    """The refusal of `main` itself, as the lander words it (R2Q5 (a))."""
+    from opendox.landing import DEFAULT_BRANCH, LandingRefused
+
+    return LandingRefused(
+        f"`land` lands a branch ON `{DEFAULT_BRANCH}`, so it does not take "
+        f"`{DEFAULT_BRANCH}` itself (R2Q5 (a))", code="branch-is-main")
+
+
+def branch_head(checkout_root, branch: str) -> str:
+    """`branch`'s head, the commit a confirmation is bound to, or a refusal
+    naming why there is none. Read through the one git surface,
+    `session_git.SessionGit`, so feature 007's guard sees the read."""
+    from opendox.landing import DEFAULT_BRANCH, LandingRefused
+    from opendox.session_git import GitError, SessionGit
+
+    if branch == DEFAULT_BRANCH:
+        raise main_refused()
+    git = SessionGit(Path(checkout_root))
+    if not isinstance(branch, str) or not git.check_ref_format(branch):
+        raise LandingRefused(f"{branch!r} is not a legal branch name",
+                             code="no-such-branch")
+    try:
+        head = git.git(git.served_root, "rev-parse", "--verify", "--quiet",
+                       f"refs/heads/{branch}^{{commit}}")
+    except GitError:
+        head = ""
+    if not _OBJECT_NAME.fullmatch(head):
+        raise LandingRefused(f"there is no local branch {branch!r} to land",
+                             code="no-such-branch")
+    return head
+
+
+def _usable(lander):
+    """`lander` where it can land (a callable `land`), else None. A binding's
+    answer is a host's or a test's, so one with no `land` operation is NO
+    lander: it must neither offer the act nor fail it with a 500 (Copilot at
+    `1bba2b1c` on #100)."""
+    if lander is None:
+        return None
+    try:
+        return lander if callable(getattr(lander, "land", None)) else None
+    except Exception:  # noqa: BLE001 - a binding that cannot be read lands nothing
+        return None
+
+
+def landing_refusal(lander, checkout_root, *, local: bool = False):
+    """None where `land` can act on `checkout_root`, else the refusal that
+    names why not (contracts § /capabilities, the `actions.land` row).
+
+    `land` can act where a lander is bound (`standalone`), or where the
+    repository is `governed` and a host's instrument is contributed, through
+    which `land` submits (R2Q4 (a)). Otherwise the refusal is the governance
+    reading's own: governed-without-an-instrument, or why it is `unknown`.
+    """
+    from opendox import landing
+
+    if _usable(lander) is not None:
+        return None
+    reading = landing.read_governance(checkout_root, local=local)
+    if reading.governance == landing.GOVERNED:
+        if reading.instrument is not None:
+            return None
+        return landing.LandingRefused(reading.reason,
+                                      code="governed-without-an-instrument")
+    if reading.governance == landing.UNKNOWN:
+        return landing.LandingRefused(reading.reason, code=reading.code)
+    return landing.LandingRefused(NO_LANDER, code="no-lander-bound")
+
+
+def landing_operation(lander, checkout_root, *, local: bool = False) -> str:
+    """The operation `land` performs on `checkout_root`, decided from the
+    reading `landing_refusal` makes, or that refusal raised.
+
+    `landing_confirm.OPERATION_MERGE` where a lander is bound (a merge commit
+    onto `main`), `OPERATION_SUBMIT` where the repository is `governed` and a
+    host's instrument is contributed (R2Q4 (a)). Each issuer states it BEFORE
+    it asks (holder ruling item 10, #656 `6103915259`), and `land_branch`
+    performs it or refuses.
+    """
+    from opendox.landing_confirm import OPERATION_MERGE, OPERATION_SUBMIT
+
+    # The binding is read ONCE, and that one reading decides the operation.
+    usable = _usable(lander)
+    refused = landing_refusal(usable, checkout_root, local=local)
+    if refused is not None:
+        raise refused
+    return OPERATION_MERGE if usable is not None else OPERATION_SUBMIT
+
+
+def landed_object(landed, branch: str) -> dict:
+    """The `Landed` object's five fields, read by name and CHECKED.
+
+    A lander is a binding's answer, a host's or a test's, so nothing it says
+    is printed on trust (lane 3's MAJOR on #100 at `99c4e079`; one trust
+    model, as `submission_object` holds a port's report to): each field is
+    held to data-model.md § Landed. `branch` must be the branch landed,
+    `merge_commit` and `previous_main` full object names (40 hex digits, or
+    64), `served_checkout` `fast-forwarded` or `left`, and `pushed` exactly
+    False; a field the answer lacks is not the landing's either. Any other
+    answer is refused by a fixed sentence that names the field and repeats
+    nothing it carried. The trust model is the report's: hostile DATA from
+    trusted code (holder ruling item 11 (b)).
+    """
+    from opendox import landing
+
+    fields = {name: getattr(landed, name, None) for name in LANDED_FIELDS}
+
+    def text(name: str) -> str | None:
+        value = fields[name]
+        return value if isinstance(value, str) else None
+
+    def object_name(name: str) -> bool:
+        value = text(name)
+        return value is not None and _OBJECT_NAME.fullmatch(value) is not None
+
+    for name, matches in (
+            ("branch", text("branch") == branch),
+            ("merge_commit", object_name("merge_commit")),
+            ("previous_main", object_name("previous_main")),
+            ("served_checkout", text("served_checkout") in (
+                landing.SERVED_FAST_FORWARDED, landing.SERVED_LEFT)),
+            ("pushed", fields["pushed"] is False)):
+        if not matches:
+            raise landing.LandingRefused(
+                LANDED_NOT_THE_LANDINGS.format(field=name),
+                code="answer-not-the-landing")
+    return fields
+
+
+def land_branch(lander, checkout_root, branch: str, confirmation, *,
+                operation: str, local: bool = False) -> dict:
+    """THE LAND ACT, SHARED BY BOTH DOORS: land `branch` with `confirmation`.
+
+    `operation` is the one the confirmation's question named
+    (`landing_operation`, decided before the human was asked). The act
+    performs exactly it: where the operation it would perform now is another
+    (the binding changed after the question), it is refused by name
+    (`operation-changed`), and neither the lander nor the instrument is
+    asked (holder ruling item 10, #656 `6103915259`).
+
+    Through the bound lander where there is one, answering the `Landed`
+    object. Where there is none, through the host's instrument under
+    `governed` (`landing.request_landing`, which spends the confirmation
+    against the branch's head and submits), answering its `Submission`
+    object, checked and redacted by `submission_object`. Otherwise refused by
+    name (`landing_refusal`). `main` is refused before anything is asked.
+    """
+    from opendox import landing
+    from opendox.landing_confirm import OPERATION_MERGE
+
+    if branch == landing.DEFAULT_BRANCH:
+        raise main_refused()
+    performing = landing_operation(lander, checkout_root, local=local)
+    if performing != operation:
+        raise landing.LandingRefused(OPERATION_CHANGED, code="operation-changed")
+    # the branch taken IS the operation decided: never a second reading
+    if performing == OPERATION_MERGE:
+        return landed_object(lander.land(branch, confirmation=confirmation),
+                             branch)
+    report = landing.request_landing(checkout_root, branch,
+                                     confirmation=confirmation, local=local)
+    return submission_object(report, branch)
+
+
+def _landed_lines(landed: dict) -> list[str]:
+    """The printed report: the merge commit, and the command that undoes it.
+    The branch name is shown as the prompt shows it, escaped where it holds a
+    character a terminal acts on (`session_git.shown`; Copilot at `1bba2b1c`)."""
+    from opendox.session_git import shown
+
+    merge = landed["merge_commit"]
+    return [f"landed `{shown(landed['branch'])}` on `main` with the merge commit "
+            f"{merge}",
+            f"  previous main:   {landed['previous_main']}",
+            f"  served checkout: {landed['served_checkout']}",
+            "  pushed nothing:  `git push` publishes `main` when you choose",
+            f"  undo:            git revert -m 1 {merge}"]
+
+
+def _landing_failure_text(exc: BaseException) -> str | None:
+    """A NAMED failure's text as the verb prints it, redacted; None for a
+    failure nobody named."""
+    from opendox.landing import LandingRefused
+    from opendox.landing_confirm import ConfirmationRefused
+    from opendox.session_pr import SubmissionError
+
+    if isinstance(exc, (LandingRefused, ConfirmationRefused, SubmissionError)):
+        return redacted_text(str(exc))
+    return None
+
+
+def cmd_land(args: argparse.Namespace) -> int:
+    """`opendox land`: confirm at the terminal, land, and print what landed."""
+    from opendox import landing_confirm
+    from opendox.landing import DEFAULT_BRANCH
+
+    root = Path(args.repo_root)
+    try:
+        # the argument's own fault first, before any read of the repository
+        if args.branch == DEFAULT_BRANCH:
+            raise main_refused()
+        lander = _core()._landing_port(root, local=args.local)
+        # what this landing performs, decided BEFORE the human is asked
+        operation = landing_operation(lander, root, local=args.local)
+        head = branch_head(root, args.branch)
+        confirmation = landing_confirm.confirm_at_terminal(
+            args.branch, head, operation=operation)
+        answer = land_branch(lander, root, args.branch, confirmation,
+                             operation=operation, local=args.local)
+    # The lander's, the confirmation's or an instrument's NAMED failure, or
+    # one nobody named: its type is all this verb prints of the last.
+    except Exception as exc:  # noqa: BLE001
+        said = _landing_failure_text(exc)
+        print("land refused: " + (said if said is not None else
+                                  UNNAMED_LANDING_FAILURE.format(
+                                      kind=type(exc).__name__)),
+              file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(answer))
+    elif "merge_commit" in answer:
+        print("\n".join(_landed_lines(answer)))
+    else:
+        print("\n".join(_report_lines(answer)
+                        + ["  the merge stays the governance's act (R2Q4 (a))"]))
+    return 0
+
+
 class BranchActionSubcommands:
-    """The default profile's contributed verb: `submit`.
+    """The default profile's contributed verbs: `submit` and `land`.
 
     Conforms to `subcommand_extension.SubcommandExtension` STRUCTURALLY, as
     `RuntimeSubcommand` does, importing nothing from it.
@@ -288,3 +609,30 @@ class BranchActionSubcommands:
         submit.add_argument("--json", action="store_true",
                             help="print the report as one JSON object")
         submit.set_defaults(func=cmd_submit)
+
+        # NO FLAG ANSWERS FOR THE HUMAN (decision N-11): these four options
+        # are the whole verb, and `tests/test_landing_guardrails.py` holds them.
+        land = subparsers.add_parser(
+            "land",
+            help="land a local branch on main with one merge commit, confirmed "
+                 "at the terminal",
+            description=(
+                "Merge BRANCH, any local branch but main, into main with a "
+                "--no-ff merge commit, after you type its name at the "
+                "controlling terminal. A standalone repository (the local "
+                "install, and main's own .opendox/governance.yaml) is merged "
+                "here and nothing is pushed; a governed one is submitted "
+                "through its governance's instrument. The report names the "
+                "`git revert -m 1` that undoes a landing."))
+        land.add_argument("--repo-root", required=True,
+                          help="the checkout the branch is in")
+        land.add_argument("--branch", required=True,
+                          help="the local branch to land (any but main)")
+        land.add_argument(
+            "--local", action="store_true",
+            help="the local single-user install, exactly as "
+                 "OPENDOX_INSTALL_MODE=local selects it; refused beside "
+                 "OPENDOX_INSTALL_MODE=hosted")
+        land.add_argument("--json", action="store_true",
+                          help="print what landed as one JSON object")
+        land.set_defaults(func=cmd_land)

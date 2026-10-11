@@ -625,7 +625,11 @@ def test_the_default_profile_contributes_the_route_and_its_mixin() -> None:
     from opendox import default_profile
 
     bindings = route_extension.collect_bindings(default_profile.ROUTE_EXTENSIONS)
-    assert bindings == (_SUBMIT,)
+    # T016 adds the two land routes beside it (#1144 12.6a; OQ-12-13)
+    assert bindings[0] == _SUBMIT
+    assert [b.pattern for b in bindings[1:]] == [
+        serve_branch_actions.ACTIONS_SESSION_LAND_NONCE_ROUTE,
+        serve_branch_actions.ACTIONS_SESSION_LAND_ROUTE]
     assert route_extension.declared_handler_contributions(default_profile) == (
         serve_branch_actions.BranchActionRoutes,)
 
