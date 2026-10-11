@@ -125,7 +125,7 @@ def _write(root: Path, files: dict[str, str]) -> None:
 def _repository(parent: Path, files: dict[str, str], *, name: str = "corpus",
                 when: int = T0, author: int | None = None) -> Path:
     root = parent / name
-    root.mkdir()
+    root.mkdir(parents=True)
     _write(root, files)
     _git(root, "-c", "init.defaultBranch=main", "init", "-q")
     _commit(root, when=when, author=author)
@@ -482,7 +482,7 @@ def test_front_matter_derivable_and_underivable(tmp_path) -> None:
         "no-heading.md": _header(title=None) + PROSE,
         "only-h2.md": _header(title=None) + "## Second level\n\n" + PROSE,
     })
-    found = _run(repo)
+    found = _run(repo, families=(F.DERIVABLE_FRONT_MATTER,))
     assert [(f["path"], f["kind"], f["resolution_class"], f["identity"],
              f["evidence"]["field"]) for f in found] == [
         ("empty-title.md", F.DERIVABLE_FRONT_MATTER, AUTO_FIX, {}, "title")]
