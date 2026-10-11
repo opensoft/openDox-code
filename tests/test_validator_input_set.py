@@ -1,4 +1,5 @@
-"""openDox's validator's input set, held to plan 034's T057.
+"""openDox's validator's input set, held to plan 034's T057 and plan 038's
+T041.
 
 T057 realizes #1144's 7.1, 7.1a, 7.1b and 7.2, with 7.1 as T007's batch G
 amends it (R1Q11 (a) and R1Q12 (a), `openxFactory#656` comment `5850003126`):
@@ -9,6 +10,16 @@ amends it (R1Q11 (a) and R1Q12 (a), `openxFactory#656` comment `5850003126`):
     openDox root pins (R1Q12 (a)) ... A test asserts that `gate-intent` and
     `ideation-possibles-register` are NOT in the set (7.1b).
 
+T005's batch Q adds to batch G's text (R2Q22 (a), `6003486656`; N-15,
+`6013547504`): openDox-spec's three health schemas travel as the four do, and
+the finding's neutral shape is *"a copy the engine reads and NOT a validator
+kind: a finding's `kind` field is its family, so no `kind` constant can name
+the schema (N-15). openDox-code's `tests/test_validator_input_set.py`
+therefore reads 'the validator's kinds plus the finding shape'."* Plan 038's
+T041 makes the first of those copies: the finding shape, at the spec-leg
+commit T060 pinned (openDox-spec `7db9438b`, `dox-v1.2`). T047 and T054 add
+the two file kinds after it.
+
 Its falsifier is *"the packaged-copy digest test and the 7.1b test"*. They are
 the first two cases below:
 
@@ -18,9 +29,10 @@ the first two cases below:
 
 WHAT ELSE IT HOLDS.
 
-1. THE SET IS EXACTLY FOUR: the record, the validator's kinds and the files on
-   disk all name the same four copies, and none of the six schemas outside
-   the set is carried.
+1. THE SET IS THE VALIDATOR'S KINDS PLUS THE FINDING SHAPE (N-15): the
+   validator's kinds read the same copies the record names, less the finding
+   shape, which the record and the files on disk carry and no kind reads.
+   None of the six schemas outside the set is carried.
 2. PRESENCE IS NOT IDENTITY: a copy that differs from its digest, is absent,
    or has no digest recorded is refused before a byte of it is parsed, and a
    validator is never built over it. A record that cannot hold every copy to a
@@ -55,25 +67,37 @@ from opendox import validator
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "src" / "opendox" / "contracts"
 
-#: openDox's own spec leg's four schemas (7.1, as batch G amends it).
-THE_FOUR = ("ideation-workbench", "opendox-snapshot", "xfactory-workbench-chat-turn",
-            "xfactory-workbench-model-catalog")
+#: The copies the validator's kinds read: openDox's own spec leg's four
+#: validated schemas (7.1, as batch G amends it).
+VALIDATOR_COPIES = ("ideation-workbench", "opendox-snapshot",
+                    "xfactory-workbench-chat-turn", "xfactory-workbench-model-catalog")
 
-#: The spec-leg commit the openDox root pins, which the copies are held to: T053
-#: as landed, openDox-spec#16's squash (opensoft/openDox#14 moved the root's spec
-#: pin to it). It is the one commit that carries all four. It moved from #16's
-#: head, cd49eb25, with the record, in lockstep. The two commits have one tree.
-SPEC_COMMIT = "f7ee3c763b3af4581daf1cd54406e5111e9358e6"
+#: The finding's neutral shape (plan 038 T040 and T041): a copy the health
+#: engine reads, and no validator kind (N-15).
+FINDING_SHAPE = "opendox-health-finding"
+
+#: Every copy the record names, in its order: the validator's plus the finding
+#: shape.
+THE_COPIES = tuple(sorted(VALIDATOR_COPIES + (FINDING_SHAPE,)))
+
+#: The spec-leg commit the openDox root pins, which the copies are held to:
+#: T040 as landed, openDox-spec#17's squash, which plan 038's T060 pinned
+#: (opensoft/openDox#20, `6a9f4902`, tagged `dox-v1.2`). It is the one commit
+#: that carries all five. It moved from T053's f7ee3c76 with the record, in
+#: lockstep. #17 only added files, so the four earlier copies are unchanged.
+SPEC_COMMIT = "7db9438b4cc4446ab4e6ab5b552c220312deccc9"
 
 #: WHAT THE OPENDOX ROOT PINS, stated here apart from the record, so that a copy
-#: and its recorded digest cannot move together unseen. All four are the
+#: and its recorded digest cannot move together unseen. All five are the
 #: digests the root's `contracts/manifest.yaml` records for them at its spec
-#: pin, `SPEC_COMMIT` (the root's `main` at 52005213, opensoft/openDox#14). The
-#: first three are unchanged from the root's previous spec pin, 8fe8c4c7. The
-#: fourth is T053's new `opendox-snapshot` entry.
+#: pin, `SPEC_COMMIT` (the root's `main` at 6a9f4902, opensoft/openDox#20). The
+#: first four are unchanged from the root's previous spec pin, f7ee3c76. The
+#: fifth is T040's new `opendox-health-finding` entry.
 PINNED_BY_THE_ROOT = {
     "ideation-workbench":
         "d30438491119c20928fbe4e85088fc33682829eeb6558d87dafce651000faafc",
+    "opendox-health-finding":
+        "6fb9b29f23a4270fa0310624d9e59b5d82e9888a5168600671e90ed30f781016",
     "opendox-snapshot":
         "f9e3e111af1d4bd4c377c933027d81b582ae2b0a395b66f4e4621992454a584a",
     "xfactory-workbench-chat-turn":
@@ -104,7 +128,7 @@ def test_each_packaged_copy_is_the_spec_legs_file_at_the_pinned_commit() -> None
         f"the copies are recorded at {record.commit}, and this test holds them at "
         f"{SPEC_COMMIT}. They move together, in one commit: copy the spec leg's "
         "files at the commit the openDox root pins, and move both")
-    assert record.ids == THE_FOUR
+    assert record.ids == THE_COPIES
     for copy in record.copies:
         on_disk = PACKAGE / "schemas" / f"{copy.id}.schema.yaml"
         digest = hashlib.sha256(on_disk.read_bytes()).hexdigest()
@@ -142,29 +166,49 @@ def test_gate_intent_and_the_possibles_register_are_not_in_the_set() -> None:
 
 
 # ---------------------------------------------------------------------------
-# the set is exactly four
+# the set: the validator's kinds plus the finding shape
 # ---------------------------------------------------------------------------
 
-def test_the_set_is_the_spec_legs_four_and_nothing_else() -> None:
-    """7.1: openDox validates its own spec leg's kinds. The record, the kinds'
-    entries and the files on disk name the same four copies. None of the
-    consumer's three and none of openxFactory's four is carried."""
+def test_the_set_is_the_validators_kinds_plus_the_finding_shape() -> None:
+    """7.1, as batch Q amends it (N-15): openDox validates its own spec leg's
+    kinds, and its engine reads the finding shape. The kinds' entries name the
+    validator's copies; the record and the files on disk name those plus the
+    finding shape. None of the consumer's three and none of openxFactory's
+    four is carried."""
     entries = {copy for copy, _pointer in validator.KIND_ENTRIES.values()}
     on_disk = {path.name.removesuffix(".schema.yaml")
                for path in (PACKAGE / "schemas").iterdir()}
-    assert set(THE_FOUR) == entries == on_disk == set(contracts.record().ids)
-    assert contracts.COPY_IDS == set(THE_FOUR)
+    assert set(VALIDATOR_COPIES) == entries
+    assert entries | {FINDING_SHAPE} == on_disk == set(contracts.record().ids)
+    assert contracts.COPY_IDS == set(THE_COPIES)
+    assert FINDING_SHAPE not in entries
     assert not (set(OPENXDOX_SPECS) | set(OPENXFACTORYS)) & on_disk
     assert sorted(p.name for p in PACKAGE.iterdir() if p.name != "__pycache__") == [
         "__init__.py", "copies.yaml", "schemas"]
 
 
+def test_the_finding_shape_is_a_copy_and_no_validator_kind() -> None:
+    """N-15: a finding's `kind` is its family, so the shape declares no `kind`
+    const, no kind of the validator reads it, and no validator is built over
+    it. Its copy is still proved before it is read."""
+    shape = contracts.load(FINDING_SHAPE)
+    assert "const" not in shape["properties"]["kind"]
+    assert "schema_version" not in shape["properties"]
+    assert FINDING_SHAPE not in validator.KIND_ENTRIES
+    with pytest.raises(validator.UnknownKind):
+        validator.validator_for(FINDING_SHAPE)
+    assert contracts.verified_bytes(FINDING_SHAPE) == (
+        PACKAGE / "schemas" / f"{FINDING_SHAPE}.schema.yaml").read_bytes()
+
+
 def test_each_kind_is_the_const_its_entry_declares() -> None:
     """The validator's map of kinds is the copies' own: each kind's entry
     declares that kind as its `kind` const. So a kind the map names and no
-    copy declares, or a copy's kind the map leaves out, fails here."""
+    copy declares, or a copy's kind the map leaves out, fails here. It reads
+    the VALIDATOR's copies only: the finding shape declares no `kind` const
+    (N-15), and the set test above holds the two lists apart."""
     derived = {}
-    for copy_id in THE_FOUR:
+    for copy_id in VALIDATOR_COPIES:
         document = contracts.load(copy_id)
         envelopes = [document] if "oneOf" not in document else [
             validator._at_pointer(document, branch["$ref"][1:])
@@ -313,15 +357,17 @@ _SHIPPED = yaml.safe_load((PACKAGE / "copies.yaml").read_text(encoding="utf-8"))
     ({"kind": "pinned_contract_manifest"}, "kind is"),
     ({"schema_version": True}, "schema_version is"),
     ({"unread": 1}, "its keys are"),
-    # 7.1b at run time: an edited record cannot let a fifth schema in, even a
-    # well-formed entry whose file sits beside the four, nor leave one out.
+    # 7.1b at run time: an edited record cannot let another schema in, even a
+    # well-formed entry whose file sits beside the copies, nor leave one out.
     ({"copies": _SHIPPED + [{"id": "gate-intent",
                              "path": "contracts/schemas/gate-intent.schema.yaml",
-                             "sha256": "0" * 64}]}, "not openDox's four"),
-    ({"copies": _SHIPPED[:3]}, "not openDox's four"),
+                             "sha256": "0" * 64}]}, "not the copies openDox carries"),
+    ({"copies": _SHIPPED[:-1]}, "not the copies openDox carries"),
+    ({"copies": [entry for entry in _SHIPPED if entry["id"] != "opendox-health-finding"]},
+     "not the copies openDox carries"),
 ], ids=["empty digest", "no digest", "wrong path", "repeated id", "no copies",
         "short commit", "another leg", "another kind", "boolean version", "unknown key",
-        "a fifth copy", "three copies"])
+        "a copy outside the set", "a copy left out", "the finding shape left out"])
 def test_a_record_that_cannot_hold_every_copy_is_refused(
         monkeypatch: pytest.MonkeyPatch, changes: dict, says: str) -> None:
     """An empty or absent digest is drift and never a pass, and so is a record
@@ -403,7 +449,7 @@ def test_the_record_as_shipped_is_accepted() -> None:
     """The negative cases above change one field each of the shipped record,
     so this is their control."""
     record = contracts.record()
-    assert (record.commit, record.ids) == (SPEC_COMMIT, THE_FOUR)
+    assert (record.commit, record.ids) == (SPEC_COMMIT, THE_COPIES)
 
 
 # ---------------------------------------------------------------------------
