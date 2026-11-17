@@ -371,7 +371,9 @@ jobs:
         run: |
           dir="$RUNNER_TEMP/trivy"
           mkdir -p "$dir"
-          curl -fsSL --retry 3 --output "$dir/trivy.tar.gz" \
+          # HTTPS only, the redirect to the release host included (SonarCloud
+          # githubactions:S6506): `--proto =https` refuses any other scheme.
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --output "$dir/trivy.tar.gz" \
             "https://github.com/aquasecurity/trivy/releases/download/v$TRIVY_VERSION/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
           if ! printf '%s  %s\n' "$TRIVY_SHA256" "$dir/trivy.tar.gz" | sha256sum --strict -c -; then
             echo "::error::the Trivy $TRIVY_VERSION tarball is not the one this file records, so nothing from it runs"

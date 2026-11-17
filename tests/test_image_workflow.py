@@ -150,8 +150,10 @@ def test_the_workflow_runs_only_when_dispatched_with_a_revision_and_a_qa_target(
     assert list(triggers) == ["workflow_dispatch"], triggers
     inputs = triggers["workflow_dispatch"]["inputs"]
     assert list(inputs) == ["revision", "target"]
-    assert inputs["revision"]["required"] is True and inputs["revision"]["type"] == "string"
-    assert inputs["target"]["type"] == "choice" and inputs["target"]["options"] == ["qa"]
+    assert inputs["revision"]["required"] is True
+    assert inputs["revision"]["type"] == "string"
+    assert inputs["target"]["type"] == "choice"
+    assert inputs["target"]["options"] == ["qa"]
     assert "pull_request_target" not in WORKFLOW.read_text(encoding="utf-8")
 
 
@@ -236,7 +238,8 @@ def test_the_image_is_recorded_and_uploaded_before_trivy_runs() -> None:
                              names.index(TRIVY_STEP))
     assert record < upload < trivy, names
     upload_step = _workflow()["jobs"]["build"]["steps"][upload]
-    assert upload_step["with"]["name"] == "image" and upload_step["with"]["retention-days"] == 7
+    assert upload_step["with"]["name"] == "image"
+    assert upload_step["with"]["retention-days"] == 7
     outputs = _workflow()["jobs"]["build"]["outputs"]
     assert outputs["image-id"] == "${{ steps.image.outputs.image-id }}"
     assert outputs["archive-sha256"] == "${{ steps.image.outputs.archive-sha256 }}"
@@ -411,7 +414,8 @@ def test_the_revision_step_reads_tags_over_git_with_no_credential() -> None:
                      r'\s+ls-remote --tags "https://github\.com/\$GITHUB_REPOSITORY\.git" \\\n'
                      r'\s+"refs/tags/\$REVISION" "refs/tags/\$REVISION\^\{\}"\)"; then\n', script), script
     calls = [line.strip() for line in script.splitlines() if re.search(r"\bgh\b", line)]
-    assert len(calls) == 1 and '/compare/$sha...refs/heads/main"' in calls[0], calls
+    assert len(calls) == 1, calls
+    assert '/compare/$sha...refs/heads/main"' in calls[0], calls
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +656,7 @@ def test_trivy_is_pinned_by_version_and_sha256() -> None:
     assert script.index("sha256sum --strict -c") < script.index("tar -xzf")
     assert ("https://github.com/aquasecurity/trivy/releases/download/v$TRIVY_VERSION/"
             "trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz") in script
+    assert "curl -fsSL --proto '=https' --tlsv1.2 " in script
 
 
 @needs_a_shell
@@ -728,7 +733,8 @@ def test_the_scan_verdict(case: str, tmp_path: Path) -> None:
     if case == "QA's empty gate, a critical finding":
         assert "report only for qa" in result.stdout
         text = summary.read_text()
-        assert "| CRITICAL | 1 | 1 | 0 |" in text and "| HIGH | 1 | 0 | 0 |" in text
+        assert "| CRITICAL | 1 | 1 | 0 |" in text
+        assert "| HIGH | 1 | 0 | 0 |" in text
         assert "| CRITICAL | CVE-1 | pkg | 1 | 2026.10.18 |" in text
         assert "CVE-2" not in text  # no fix, so not in the list of fixable findings
 
@@ -837,7 +843,8 @@ def test_the_push_names_no_resource_group() -> None:
     `az acr login` without a resource group falls back to the login server
     suffix, and with one it would make a direct read, and fail."""
     script = _step("push", PUSH_STEP)["run"]
-    assert "--resource-group" not in script and " -g " not in script
+    assert "--resource-group" not in script
+    assert " -g " not in script
     assert 'az acr login --name "$ACR_NAME"' in script
 
 
