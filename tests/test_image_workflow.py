@@ -33,8 +33,13 @@ What is held:
     alone, which names the environment that holds them, and by the two places
     that need them; `ACR_NAME` stays a variable;
   * the order: the image is recorded and uploaded before Trivy runs, and the
-    push job checks its secrets and variable, its approval and the archive
-    before it signs in;
+    push job checks its secrets and variable, its approval, the environment's
+    deployment limit and the archive before it signs in;
+  * the artifacts: the archive's artifact carries the run attempt in its name,
+    so a rerun uploads under a new name, and the push job downloads it by the
+    ID the build job's upload returned and by no name, so that no other
+    attempt's archive can be the one it loads; the two reports replace their
+    earlier attempt's;
   * the target step: `qa` passes with an empty scan gate, and anything else,
     `prod` among them, refuses;
   * the revision step: a full commit on `main` passes, and one off `main` or
@@ -44,6 +49,10 @@ What is held:
     cannot carry and unreadable tags each refuse;
   * the environment step and the approval step (the latter `release.yml`'s own
     script, byte for byte);
+  * the deployment limit step, in both jobs and the same script in each: the
+    environment's policy list is read, and only exactly one policy, the branch
+    `main`, passes; a wildcard, another branch, a tag policy, an empty list, a
+    truncated list, an answer in another shape and a failed read each refuse;
   * the build step builds at the gated commit only, with the flags it names;
   * the record step and the load step: the revision label, the platform, the
     archive's sha256 and the image ID each refuse a mismatch;
@@ -62,6 +71,9 @@ What is held:
     repository, no path inside one and no estate domain: the next step is
     "the deployment repository's QA overlay", and the step summary says the
     same;
+  * the operator page covers the user-assigned managed identity alone, and its
+    secret-setting snippet is run against stand-ins: a value that is empty or
+    not a GUID, a failed `az` and an expired login never reach `gh secret set`;
   * the operator page (`docs/image-release.md`) gives no hand `az` command that
     creates the identity, its federated credential or the role assignment
     (Terraform provisions them, 2026-11-17, "Terraform"), sets the three IDs
@@ -320,7 +332,7 @@ def test_the_image_is_recorded_and_uploaded_before_trivy_runs() -> None:
                              names.index(TRIVY_STEP))
     assert record < upload < trivy, names
     upload_step = _workflow()["jobs"]["build"]["steps"][upload]
-    assert upload_step["with"]["name"] == "image"
+    assert upload_step["with"]["name"] == "image-${{ github.run_attempt }}"
     assert upload_step["with"]["retention-days"] == 7
     outputs = _workflow()["jobs"]["build"]["outputs"]
     assert outputs["image-id"] == "${{ steps.image.outputs.image-id }}"
@@ -330,13 +342,14 @@ def test_the_image_is_recorded_and_uploaded_before_trivy_runs() -> None:
 SETTINGS_STEP = "the Azure secrets and the registry variable are set"
 APPROVAL_STEP = ("this environment still asks a reviewer and limits its refs, "
                  "and this run's deployment to it was approved")
+LIMIT_STEP = "the acr-qa environment's deployment limit is exactly the branch main"
 LOAD_STEP = "the archive is the one the build job recorded, and loads as its image"
 PUSH_STEP = "push the image, and read its digest back from the registry"
 RELEASE_RECORD_STEP = "record the pushed image"
 
 
 def test_the_push_job_checks_everything_before_it_signs_in() -> None:
-    assert _names("push") == [SETTINGS_STEP, APPROVAL_STEP, "actions/download-artifact", LOAD_STEP,
+    assert _names("push") == [SETTINGS_STEP, APPROVAL_STEP, LIMIT_STEP, "actions/download-artifact", LOAD_STEP,
                               "azure/login", PUSH_STEP, RELEASE_RECORD_STEP, "actions/upload-artifact"]
 
 
@@ -386,6 +399,9 @@ case "$*" in
   *actions/runs/*/approvals*)
     [ -n "${FAKE_APPROVALS_FAILS:-}" ] && { echo "HTTP 404" >&2; exit 1; }
     printf '%s\\n' "$FAKE_APPROVALS" ;;
+  *deployment-branch-policies*)
+    [ -n "${FAKE_POLICIES_FAILS:-}" ] && { echo "HTTP 404" >&2; exit 1; }
+    printf '%s\\n' "$FAKE_POLICIES" ;;
   *environments/*)
     args="$*"; environment="${args##*environments/}"; environment="${environment%% *}"
     variable="FAKE_ENVIRONMENT_${environment//-/_}"
@@ -592,6 +608,141 @@ def test_the_approval_step(case: str, tmp_path: Path) -> None:
     else:
         assert result.returncode != 0, result.stdout
         assert refusal in result.stdout + result.stderr, result.stdout + result.stderr
+
+
+# ---------------------------------------------------------------------------
+# The deployment limit: the environment's policy LIST is read, not just its presence.
+
+LIMIT_URL = f"api repos/{REPOSITORY}/environments/acr-qa/deployment-branch-policies"
+
+
+def _policies(*entries: tuple[str, str], total: int | None = None) -> str:
+    """The list of deployment branch policies as GitHub answers it:
+    `entries` as (name pattern, "branch" or "tag"), and `total` as the count
+    it reports, the list's length unless a case says otherwise."""
+    listed = [{"id": 100 + n, "node_id": f"policy{n}", "name": name, "type": kind}
+              for n, (name, kind) in enumerate(entries)]
+    return json.dumps({"total_count": len(listed) if total is None else total, "branch_policies": listed})
+
+
+MAIN = ("main", "branch")
+NOT_EXACTLY = "must be exactly one policy, the branch 'main'"
+NOT_THE_SHAPE = "are not the shape this step reads"
+
+# (the answer, or None when the read fails), then the refusal's words, None for a pass.
+LIMIT_CASES = {
+    "exactly the branch main": (_policies(MAIN), None),
+    "a wildcard alone": (_policies(("*", "branch")), NOT_EXACTLY),
+    "a wildcard beside main": (_policies(MAIN, ("*", "branch")), "holds 2"),
+    "a path wildcard alone": (_policies(("feature/*", "branch")), NOT_EXACTLY),
+    "another branch beside main": (_policies(MAIN, ("release", "branch")), "holds 2"),
+    "another branch alone": (_policies(("release", "branch")), NOT_EXACTLY),
+    "a tag policy alone": (_policies(("v*", "tag")), NOT_EXACTLY),
+    "main as a tag policy": (_policies(("main", "tag")), NOT_EXACTLY),
+    "a tag policy beside main": (_policies(MAIN, ("v*", "tag")), "holds 2"),
+    "main in capitals": (_policies(("Main", "branch")), NOT_EXACTLY),
+    "a full ref in place of the name": (_policies(("refs/heads/main", "branch")), NOT_EXACTLY),
+    "no policy": (_policies(), "holds 0: none"),
+    "a list GitHub reports as longer": (_policies(MAIN, total=2), NOT_THE_SHAPE),
+    "a count that is not a number": (
+        json.dumps({"total_count": True, "branch_policies": [{"name": "main", "type": "branch"}]}), NOT_THE_SHAPE),
+    "no list": (json.dumps({"total_count": 1}), NOT_THE_SHAPE),
+    "a list of nothing named": (json.dumps({"total_count": 1, "branch_policies": [{"id": 1}]}), NOT_THE_SHAPE),
+    "a policy with no type": (
+        json.dumps({"total_count": 1, "branch_policies": [{"id": 1, "name": "main"}]}), NOT_THE_SHAPE),
+    "an answer that is not an object": ("null", NOT_THE_SHAPE),
+    "an answer that is not JSON": ("<html>Bad gateway</html>", "are not JSON"),
+    "the read failing": (None, "cannot be read"),
+}
+
+
+@needs_a_shell
+@pytest.mark.parametrize("job", ["build", "push"])
+@pytest.mark.parametrize("case", sorted(LIMIT_CASES))
+def test_the_deployment_limit_step(job: str, case: str, tmp_path: Path) -> None:
+    answer, refusal = LIMIT_CASES[case]
+    step = _step(job, LIMIT_STEP)
+    log = tmp_path / "gh.log"
+    env = {"GITHUB_REPOSITORY": REPOSITORY, "GH_TOKEN": "unused", "FAKE_LOG": str(log),
+           "ENVIRONMENT": step["env"]["ENVIRONMENT"]}
+    if answer is None:
+        env["FAKE_POLICIES_FAILS"] = "1"
+    else:
+        env["FAKE_POLICIES"] = answer
+    result = _run(step["run"], tmp_path, env, (_stand_in(tmp_path / "bin", "gh", FAKE_GH),))
+    assert _log(log) == [LIMIT_URL], "the step reads the policy list, once, and nothing else"
+    if refusal is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "acr-qa: its deployment limit is exactly the branch 'main'" in result.stdout
+    else:
+        assert result.returncode != 0, result.stdout
+        assert refusal in result.stdout + result.stderr, result.stdout + result.stderr
+
+
+def test_the_deployment_limit_step_is_the_same_script_in_both_jobs_and_placed_after_their_checks() -> None:
+    build, push = _step("build", LIMIT_STEP), _step("push", LIMIT_STEP)
+    assert build == push
+    assert build["env"] == {"GH_TOKEN": "${{ github.token }}", "ENVIRONMENT": "acr-qa"}
+    assert build["env"]["ENVIRONMENT"] == _workflow()["jobs"]["push"]["environment"]["name"]
+    build_names, push_names = _names("build"), _names("push")
+    assert build_names.index(ENVIRONMENT_STEP) + 1 == build_names.index(LIMIT_STEP) < build_names.index("actions/checkout")
+    assert push_names.index(APPROVAL_STEP) + 1 == push_names.index(LIMIT_STEP) < push_names.index("azure/login")
+    assert push_names.index(LIMIT_STEP) < push_names.index("actions/download-artifact")
+    # The endpoint answers to `actions: read` (GitHub's permissions table for
+    # "List deployment branch policies"), which both jobs already hold and
+    # nothing wider.
+    jobs = _workflow()["jobs"]
+    assert jobs["build"]["permissions"]["actions"] == jobs["push"]["permissions"]["actions"] == "read"
+    assert "administration" not in jobs["build"]["permissions"] and "administration" not in jobs["push"]["permissions"]
+
+
+def test_the_header_says_the_real_control_is_the_environments_own_configuration() -> None:
+    header = WORKFLOW.read_text(encoding="utf-8").split("\non:\n", 1)[0]
+    flat = " ".join(line.removeprefix("#").strip() for line in header.splitlines())
+    assert "THE REAL CONTROL IS THE ENVIRONMENT'S OWN CONFIGURATION" in flat
+    assert "GitHub enforces that" in flat and "a branch can delete every check below" in flat
+    assert "They cannot stop a branch" in flat
+    page = " ".join(_page().split())
+    assert "The real control is the environment's own configuration, not this workflow." in page
+    assert "They do not bind a branch." in page
+
+
+# ---------------------------------------------------------------------------
+# The artifacts: a rerun uploads, and the push job loads the archive of its own build.
+
+
+def _upload_steps(job: str) -> list[dict]:
+    return [step for step in _workflow()["jobs"][job]["steps"] if step.get("uses", "").startswith("actions/upload-artifact@")]
+
+
+def test_a_rerun_uploads_the_archive_under_a_new_name_and_replaces_only_what_nothing_reads() -> None:
+    """The pinned upload action refuses a name its run already holds
+    (`overwrite` defaults to false, in its own action.yml), and an artifact
+    belongs to the run, so every name that a rerun meets again must either
+    change with the attempt or replace its earlier self."""
+    (image,) = [s for s in _upload_steps("build") if s["with"]["path"].endswith("/image/")]
+    assert image["id"] == "upload-image"
+    assert image["with"]["name"] == "image-${{ github.run_attempt }}"
+    assert "overwrite" not in image["with"], "the archive is never replaced: each attempt has its own"
+    (scan,) = [s for s in _upload_steps("build") if s["with"]["name"] == "scan"]
+    (record,) = _upload_steps("push")
+    assert record["with"]["name"] == "image-release"
+    for report in (scan, record):
+        assert report["with"]["overwrite"] is True, report["with"]["name"]
+    assert len(_upload_steps("build")) == 2 and len(_upload_steps("push")) == 1
+
+
+def test_the_push_job_downloads_the_archive_by_the_id_its_build_job_recorded_and_no_name() -> None:
+    build_outputs = _workflow()["jobs"]["build"]["outputs"]
+    assert build_outputs["image-artifact-id"] == "${{ steps.upload-image.outputs.artifact-id }}"
+    downloads = [s for s in _workflow()["jobs"]["push"]["steps"] if s.get("uses", "").startswith("actions/download-artifact@")]
+    assert len(downloads) == 1, "the push job downloads exactly one artifact"
+    assert downloads[0]["with"] == {"artifact-ids": "${{ needs.build.outputs.image-artifact-id }}",
+                                    "path": "${{ runner.temp }}/image"}
+    for job in _workflow()["jobs"].values():
+        for step in job["steps"]:
+            if step.get("uses", "").startswith("actions/download-artifact@"):
+                assert "name" not in step["with"] and "pattern" not in step["with"] and "run-id" not in step["with"]
 
 
 # ---------------------------------------------------------------------------
@@ -989,7 +1140,7 @@ def test_the_page_creates_no_azure_resource_by_hand() -> None:
     page states their end state and keeps `az` for reading."""
     page = _page()
     for creating in ("az identity create", "az identity federated-credential create",
-                     "az ad app federated-credential create", "az role assignment create",
+                     "az ad app federated-credential create", "az ad app create", "az role assignment create",
                      "az identity update", "az role assignment update"):
         assert creating not in page, creating
     shell = "\n".join(re.findall(r"```sh\n(.*?)```", page, re.S))
@@ -1006,14 +1157,100 @@ def test_the_page_creates_no_azure_resource_by_hand() -> None:
         assert property_ in flat, property_
 
 
-def test_the_page_sets_the_three_ids_as_secrets_from_a_command_and_never_a_literal() -> None:
+def test_the_page_covers_the_user_assigned_managed_identity_alone() -> None:
+    page = _page().lower()
+    assert "app registration" not in page and "az ad " not in page
+    assert "user-assigned managed identity" in page
+    shell = "\n".join(re.findall(r"```sh\n(.*?)```", _page(), re.S))
+    assert "az identity show" in shell and "az identity federated-credential list" in shell
+
+
+def test_the_page_sets_the_three_ids_as_secrets_only_after_checking_them() -> None:
     page = _page()
-    for name in AZURE_IDS:
-        assert re.search(rf"\| gh secret set {name} --env acr-qa --repo {REPOSITORY}\b", page), name
-        assert f"gh variable set {name}" not in page
     assert not re.search(r"gh secret set \w+[^\n]*--(?:body|env-file)", page), "a secret's value typed on the line"
+    assert not re.search(r"\|\s*gh secret set", page.replace("printf '%s' \"$2\" | gh secret set", "")), \
+        "a value piped straight from a command, unchecked"
+    snippet = _secret_snippet()
+    assert snippet.count("gh secret set") == 1, "one place sets a secret, and it follows the check"
+    assert snippet.index("=~ $guid") < snippet.index("gh secret set")
+    for name, variable in (("AZURE_CLIENT_ID", "client_id"), ("AZURE_TENANT_ID", "tenant_id"),
+                           ("AZURE_SUBSCRIPTION_ID", "subscription_id")):
+        assert f'set_guid_secret {name} "${variable}"' in snippet, name
+        assert f'gh variable set {name}' not in page
     assert f'gh variable set ACR_NAME --env acr-qa --repo {REPOSITORY} --body "<REGISTRY_NAME>"' in page
     assert "gh secret list --env acr-qa" in page
+
+
+def _secret_snippet() -> str:
+    for block in re.findall(r"```sh\n(.*?)```", _page(), re.S):
+        if "set_guid_secret()" in block:
+            return block
+    raise AssertionError("the page has no secret-setting snippet")
+
+
+FAKE_AZ_READ = """#!/usr/bin/env bash
+# A stand-in `az`: it answers the three reads the snippet makes, or fails like an expired login.
+printf '%s\\n' "$*" >> "$FAKE_AZ_LOG"
+[ -n "${FAKE_AZ_FAILS:-}" ] && { echo "ERROR: Please run 'az login' to setup account." >&2; exit 1; }
+case "$*" in
+  *"--query clientId"*) printf '%s\\n' "$FAKE_CLIENT_ID" ;;
+  *"--query tenantId"*) printf '%s\\n' "$FAKE_TENANT_ID" ;;
+  "account show"*) printf '%s\\n' "$FAKE_SUBSCRIPTION_ID" ;;
+  *) echo "the stand-in az has no answer for: $*" >&2; exit 2 ;;
+esac
+"""
+
+FAKE_GH_SET = """#!/usr/bin/env bash
+# A stand-in `gh`: it records its argv, and what arrived on standard input for `secret set`.
+if [ "$1 $2" = "secret set" ]; then printf '%s <<< %s\\n' "$*" "$(cat)" >> "$FAKE_GH_LOG"
+else printf '%s\\n' "$*" >> "$FAKE_GH_LOG"; fi
+"""
+
+SNIPPET_GOOD = {"FAKE_CLIENT_ID": "11111111-2222-3333-4444-555555555555",
+                "FAKE_TENANT_ID": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+                "FAKE_SUBSCRIPTION_ID": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"}
+SECRET_ARGS = "--env acr-qa --repo opensoft/openDox-code"
+
+SNIPPET_CASES = {
+    "all three read and well formed": (
+        {}, ["AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID"]),
+    "an expired login: every read fails": ({"FAKE_AZ_FAILS": "1"}, []),
+    "one read answers nothing": ({"FAKE_TENANT_ID": ""}, ["AZURE_CLIENT_ID", "AZURE_SUBSCRIPTION_ID"]),
+    "one read answers a word, not a GUID": ({"FAKE_CLIENT_ID": "None"}, ["AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID"]),
+    "one read answers a GUID and more": (
+        {"FAKE_SUBSCRIPTION_ID": SNIPPET_GOOD["FAKE_SUBSCRIPTION_ID"] + " extra"}, ["AZURE_CLIENT_ID", "AZURE_TENANT_ID"]),
+}
+
+
+@needs_a_shell
+@pytest.mark.parametrize("case", sorted(SNIPPET_CASES))
+def test_the_secret_snippet_never_sets_an_empty_or_malformed_secret(case: str, tmp_path: Path) -> None:
+    """The page's own snippet, run with stand-in `az` and `gh`, in a shell
+    that does not stop at the first failure, as an operator's does not."""
+    change, expected = SNIPPET_CASES[case]
+    values = {**SNIPPET_GOOD, **change}
+    script = re.sub(r"<[A-Z_]+>", lambda m: m.group(0).strip("<>").lower().replace("_", "-"), _secret_snippet())
+    bin_dir = _stand_in(tmp_path / "bin", "az", FAKE_AZ_READ)
+    _stand_in(bin_dir, "gh", FAKE_GH_SET)
+    az_log, gh_log = tmp_path / "az.log", tmp_path / "gh.log"
+    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}", "HOME": str(tmp_path),
+           "LANG": "C.UTF-8", "FAKE_AZ_LOG": str(az_log), "FAKE_GH_LOG": str(gh_log), **values}
+    result = subprocess.run(("bash", "--noprofile", "--norc", "-c", script), cwd=tmp_path, env=env,
+                            capture_output=True, text=True)
+    lines = _log(gh_log)
+    sets = [line for line in lines if line.startswith("secret set")]
+    by_name = {"AZURE_CLIENT_ID": values["FAKE_CLIENT_ID"], "AZURE_TENANT_ID": values["FAKE_TENANT_ID"],
+               "AZURE_SUBSCRIPTION_ID": values["FAKE_SUBSCRIPTION_ID"]}
+    assert sets == [f"secret set {name} {SECRET_ARGS} <<< {by_name[name]}" for name in expected], (sets, result.stderr)
+    for value in filter(None, by_name.values()):
+        for line in lines:
+            if not line.startswith("secret set"):
+                assert value not in line, "a value reached a command line"
+        assert value not in result.stdout + result.stderr, "a value was printed"
+    for name in by_name:
+        refused = f"{name} is not set" in result.stderr
+        assert refused == (name not in expected), (name, result.stderr)
+    assert f"variable set ACR_NAME {SECRET_ARGS} --body registry-name" in lines
 
 
 def test_the_workflow_the_page_and_this_file_name_no_deployment_repository() -> None:

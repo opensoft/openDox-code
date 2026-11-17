@@ -25,16 +25,20 @@ Two jobs. The second waits for the first and for an approval.
 1. Refuses any target but `qa`.
 2. Resolves the `revision` input to a commit and requires it to be on this
    repository's `main`.
-3. Requires the `acr-qa` environment to name a required reviewer and to limit
-   the refs that may deploy to it.
+3. Requires the `acr-qa` environment to name a required reviewer, and its
+   deployment limit to be exactly one policy: the branch `main`. It reads the
+   list of policies, so `*`, another branch or a tag policy refuses, and so
+   does a read that fails.
 4. Checks out that commit and builds the Dockerfile for `linux/amd64`, with
    `SOURCE_REVISION` set to the full commit (the image's
    `org.opencontainers.image.revision` label), tagged
    `opendox-runtime:<tag>`. `<tag>` is the tag you named, or the commit's first
    12 characters.
 5. Records the image ID and the sha256 of its `docker save` archive, checks the
-   revision label and the platform, and uploads the archive (artifact `image`,
-   kept 7 days).
+   revision label and the platform, and uploads the archive (artifact
+   `image-<attempt>`, kept 7 days). The name carries the run attempt, so that
+   "Re-run failed jobs" after a failed scan uploads under a new name instead of
+   being refused. The upload's artifact ID is a job output.
 6. Downloads Trivy at a pinned version, checks its sha256, and scans the
    archive for vulnerabilities and secrets. It also writes a CycloneDX SBOM.
    Both go up as the artifact `scan`, and a table goes to the job summary.
@@ -44,9 +48,11 @@ Two jobs. The second waits for the first and for an approval.
 1. Requires the three secrets and the one variable, each in its shape. It
    prints their names, never a value.
 2. Re-checks the environment's rules, and that this run's deployment to it
-   was approved: `release.yml`'s own script.
-3. Loads the archive only at the recorded sha256, and only if it loads as the
-   recorded image ID.
+   was approved: `release.yml`'s own script. Then reads the deployment limit's
+   list again, with the build job's own script.
+3. Downloads the archive by the artifact ID the build job recorded, never by a
+   name, so that it cannot load another attempt's. Loads it only at the
+   recorded sha256, and only if it loads as the recorded image ID.
 4. Signs in to Azure by OIDC (`azure/login`). There is no stored password.
 5. `az acr login`, `docker push`, then pulls the image back by the digest the
    push reported. The pulled image must be the recorded image ID.
@@ -104,6 +110,16 @@ Run the workflow from `main`. The `revision` input says what is built; the
 **Use workflow from** branch says which copy of `image.yml` runs. `acr-qa`
 accepts deployments from `main` alone, so a run from another branch builds and
 scans but cannot push.
+
+**The real control is the environment's own configuration, not this
+workflow.** GitHub enforces the environment's deployment branch policies and
+its required reviewer before any step of a job that names it runs, and a
+branch's copy of `image.yml` cannot change that. A branch can, though, delete
+every check in its own copy of the file. The checks in the workflow (the
+reviewer, the deployment limit and its list, the approval) are `main`'s
+reviewed copy noticing a misconfigured environment before it builds and before
+it signs in. They do not bind a branch. What binds one is the environment as
+step 4 creates it, and the review of changes to `main`.
 
 ### Prod is not built yet
 
@@ -169,8 +185,9 @@ the subject from this command's output, not from memory.
 
 Terraform must leave these, and step 6 reads them back:
 
-- **An identity that holds no secret of any kind**: a user-assigned managed
-  identity, or an app registration.
+- **A user-assigned managed identity**, which holds no secret of any kind. It
+  is the only kind of identity this page covers: every command below reads it
+  with `az identity`.
 - **One federated credential on it**, with exactly:
   - issuer `https://token.actions.githubusercontent.com`;
   - audience `api://AzureADTokenExchange`;
@@ -239,6 +256,10 @@ Create it with a required reviewer and a deployment limit of the branch `main`
 alone. This mirrors the `pypi` environment, which limits to the tag `v*` and
 allows self-review so that its owner can approve his own dispatch.
 
+The deployment limit is a **list**, and it must hold exactly one entry: the
+branch `main`. The workflow reads the list and refuses an environment that
+holds another branch, a wildcard such as `*` or `feature/*`, or a tag policy.
+
 ```sh
 reviewer_id="$(gh api users/<REVIEWER_LOGIN> --jq .id)"
 
@@ -263,19 +284,33 @@ part of the image reference and of the digest output, and masking it would
 garble both. Environment secrets and variables reach only the jobs that run in
 `acr-qa`. A later `acr-prod` will carry the same names with prod's values.
 
-Never type a value into a command. `gh secret set` reads its value from
-standard input when it is given no `--body`, so each ID below comes straight
-from the read-only command that holds it, and is on no command line and in no
-shell history. A file works the same way: `gh secret set <NAME> --env acr-qa
---repo opensoft/openDox-code < <FILE>`.
+Never type a value into a command, and never let a failed read become an empty
+secret. Each ID is read into a shell variable, checked to be a GUID, and only
+then given to `gh secret set` on standard input (`printf` is a shell builtin,
+so the value is on no command line, and nothing prints it). If an `az` command
+fails, say because its login expired, the variable is empty, the check refuses,
+and `gh` is never called, so a secret that was valid is left as it was. To take
+a value from a file instead, read it into the variable (`client_id="$(cat
+<FILE>)"`) and run the same check. The snippet is for bash or zsh.
 
 ```sh
-az identity show --name <IDENTITY_NAME> --resource-group <IDENTITY_RESOURCE_GROUP> --query clientId --output tsv \
-  | gh secret set AZURE_CLIENT_ID --env acr-qa --repo opensoft/openDox-code
-az identity show --name <IDENTITY_NAME> --resource-group <IDENTITY_RESOURCE_GROUP> --query tenantId --output tsv \
-  | gh secret set AZURE_TENANT_ID --env acr-qa --repo opensoft/openDox-code
-az account show --query id --output tsv \
-  | gh secret set AZURE_SUBSCRIPTION_ID --env acr-qa --repo opensoft/openDox-code   # the subscription that holds the registry
+guid='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
+set_guid_secret() {   # NAME VALUE
+  if [[ "$2" =~ $guid ]]; then
+    printf '%s' "$2" | gh secret set "$1" --env acr-qa --repo opensoft/openDox-code
+  else
+    echo "$1 is not set: what Azure answered is empty or not a GUID" >&2
+    return 1
+  fi
+}
+
+client_id="$(az identity show --name <IDENTITY_NAME> --resource-group <IDENTITY_RESOURCE_GROUP> --query clientId --output tsv)"
+set_guid_secret AZURE_CLIENT_ID "$client_id"
+tenant_id="$(az identity show --name <IDENTITY_NAME> --resource-group <IDENTITY_RESOURCE_GROUP> --query tenantId --output tsv)"
+set_guid_secret AZURE_TENANT_ID "$tenant_id"
+subscription_id="$(az account show --query id --output tsv)"   # the subscription that holds the registry
+set_guid_secret AZURE_SUBSCRIPTION_ID "$subscription_id"
 
 gh variable set ACR_NAME --env acr-qa --repo opensoft/openDox-code --body "<REGISTRY_NAME>"
 ```
@@ -299,9 +334,10 @@ az role assignment list --assignee "$(az identity show --name <IDENTITY_NAME> \
   --query '[].{role: roleDefinitionName, scope: scope, condition: condition}'
 ```
 
-The three secrets and the variable should be listed, the credential should show
-step 2's issuer, audience and subject, and the one role assignment should be
-step 3's. If something differs, the fix is a change to the Terraform, not a
+The three secrets and the variable should be listed, the environment's policy
+list should be exactly one entry, `main` of type `branch`, the credential
+should show step 2's issuer, audience and subject, and the one role assignment
+should be step 3's. If something differs, the fix is a change to the Terraform, not a
 hand edit in Azure.
 
 Then dispatch one run (see "How to run it") and approve it.
@@ -322,7 +358,12 @@ Then dispatch one run (see "How to run it") and approve it.
   propagated yet (wait a few minutes), or the registry is in ABAC mode and
   holds `AcrPush`, which it ignores (see step 3).
 - **The build job stops at the environment check**: `acr-qa` does not exist
-  yet, names no reviewer, or has no deployment limit (step 4).
+  yet, names no reviewer, has no deployment limit, or its limit is not exactly
+  the branch `main` (step 4). The push job re-checks the same, and also stops
+  if the policy list cannot be read.
+- **"Re-run failed jobs" and the artifacts**: the archive is kept 7 days, and a
+  rerun of the push job alone uses the archive the build job's attempt
+  uploaded. If that archive has expired, dispatch again.
 
 ## What the public repository shows
 
