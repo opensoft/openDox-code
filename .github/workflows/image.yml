@@ -99,10 +99,10 @@ name: image
 # entry, naming the image, to the public Sigstore transparency log. Both are
 # the owner's call; the SBOM above is an artifact only.
 #
-# THE Opensoft-Tenant DIGEST BUMP IS NOT HERE. Its overlay does not exist yet,
-# and its design ties the migration Job's name to the digest, so the edit
-# cannot be written or tested against anything real. `docs/image-release.md`
-# records it as the next step, with the token design.
+# THE DEPLOYMENT REPOSITORY'S DIGEST BUMP IS NOT HERE. Its QA overlay does not
+# exist yet, and its design ties the migration Job's name to the digest, so the
+# edit cannot be written or tested against anything real.
+# `docs/image-release.md` records it as the next step, with the token design.
 # ---------------------------------------------------------------------------
 
 on:
@@ -688,9 +688,9 @@ jobs:
           (where / "image-release.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
           lines = ["", f"### {record['image']} in the {record['target']} registry", "",
                    "| | |", "|---|---|"] + [f"| {key} | `{value}` |" for key, value in record.items()]
-          lines += ["", "Opensoft-Tenant's QA overlay is bumped by hand for now: "
-                    "`gitops/azure/opendox/overlays/qa/kustomization.yaml`, the `opendox-runtime` "
-                    f"image's `digest: {record['digest']}` (docs/image-release.md, \"Next step\")."]
+          lines += ["", "The deployment repository's QA overlay is bumped by hand for now: the "
+                    f"`opendox-runtime` image's `digest: {record['digest']}` "
+                    "(docs/image-release.md, \"Next step\")."]
           summary = os.environ.get("GITHUB_STEP_SUMMARY")
           if summary:
               with open(summary, "a", encoding="utf-8") as handle:

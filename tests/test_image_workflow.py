@@ -58,6 +58,10 @@ What is held:
     and a missing digest or another image refusing;
   * the record step writes the four fields the record promises, and no
     registry host;
+  * the workflow, the operator page and this file name no deployment
+    repository, no path inside one and no estate domain: the next step is
+    "the deployment repository's QA overlay", and the step summary says the
+    same;
   * the operator page (`docs/image-release.md`) gives no hand `az` command that
     creates the identity, its federated credential or the role assignment
     (Terraform provisions them, 2026-11-17, "Terraform"), sets the three IDs
@@ -89,6 +93,11 @@ REPOSITORY_URL = f"https://github.com/{REPOSITORY}.git"
 OPERATOR_PAGE = ROOT / "docs" / "image-release.md"
 # Environment SECRETS of `acr-qa` (2026-11-17, "Secrets"); `ACR_NAME` is a variable.
 AZURE_IDS = ("AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID")
+# What a public repository must not spell: the estate's deployment repository
+# (Brett Heap, 2026-11-17: "Remove tenant name from #104"), a path inside it,
+# and the estate's domain. Built from parts so that this file does not spell
+# them itself, and matched without regard to case.
+ESTATE_MARKERS = ("opensoft" + "-tenant", "gitops" + "/", "kustomization" + ".yaml", "opensoft" + ".dev")
 
 needs_a_shell = pytest.mark.skipif(
     shutil.which("bash") is None or shutil.which("git") is None,
@@ -960,6 +969,9 @@ def test_the_release_record(digest: str, tmp_path: Path) -> None:
     assert f"::notice title=opendox-runtime:v0.1.0::{DIGEST} from {SHA}" in result.stdout
     for text in (record.read_text(), summary.read_text()):
         assert "azurecr" not in text
+        for marker in ESTATE_MARKERS:
+            assert marker not in text.lower(), marker
+    assert "The deployment repository's QA overlay is bumped by hand" in summary.read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -1002,6 +1014,16 @@ def test_the_page_sets_the_three_ids_as_secrets_from_a_command_and_never_a_liter
     assert not re.search(r"gh secret set \w+[^\n]*--(?:body|env-file)", page), "a secret's value typed on the line"
     assert f'gh variable set ACR_NAME --env acr-qa --repo {REPOSITORY} --body "<REGISTRY_NAME>"' in page
     assert "gh secret list --env acr-qa" in page
+
+
+def test_the_workflow_the_page_and_this_file_name_no_deployment_repository() -> None:
+    """The deployment repository is the estate's, and this one is public: it is
+    "the deployment repository", and its overlay "the QA overlay", everywhere."""
+    for path in (WORKFLOW, OPERATOR_PAGE, Path(__file__)):
+        text = path.read_text(encoding="utf-8").lower()
+        for marker in ESTATE_MARKERS:
+            assert marker not in text, (path.name, marker)
+    assert "the deployment repository's qa overlay" in " ".join(_page().lower().split())
 
 
 def test_the_page_holds_only_placeholders_for_the_estate() -> None:

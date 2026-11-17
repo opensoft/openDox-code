@@ -339,32 +339,32 @@ both, so the push job's step headers and `docker push`'s own output show it to
 anyone who opens a run. The record (`image-release.json` and the job summary)
 names no registry host.
 
-## Next step: the Opensoft-Tenant digest bump
+## Next step: the deployment repository's digest bump
 
-Not built. The QA overlay
-`gitops/azure/opendox/overlays/qa/kustomization.yaml` in `opensoft/Opensoft-Tenant`
-does not exist yet. Its design also ties the migration Job's name to the image
-digest, so the edit a bump makes cannot be written or tested against anything
-real. Until it exists, bump the overlay by hand with the digest this workflow
-reports.
+Not built. The deployment repository's QA overlay does not exist yet. Its
+design also ties the migration Job's name to the image digest, so the edit a
+bump makes cannot be written or tested against anything real. Until it exists,
+bump the overlay's `opendox-runtime` image digest by hand with the digest this
+workflow reports.
 
 The design, for when the overlay lands:
 
-- A third job, `needs: push`, with `if: vars.TENANT_BUMP_CLIENT_ID != ''`
+- A third job, `needs: push`, with `if: vars.DEPLOY_BUMP_CLIENT_ID != ''`
   (a **repository** variable, so a job-level `if` can read it). Until it is
   set, the job is skipped, and GitHub creates no environment for it.
-- A GitHub App installed on `opensoft/Opensoft-Tenant` alone, with
+- A GitHub App installed on the deployment repository alone, with
   `Contents: write` and `Pull requests: write`.
 - The token comes from `actions/create-github-app-token` (pinned by SHA), given:
-  - `client-id: ${{ vars.TENANT_BUMP_CLIENT_ID }}` (current releases deprecate
+  - `client-id: ${{ vars.DEPLOY_BUMP_CLIENT_ID }}` (current releases deprecate
     `app-id` in favour of `client-id`);
-  - `private-key: ${{ secrets.TENANT_BUMP_PRIVATE_KEY }}`, an environment
+  - `private-key: ${{ secrets.DEPLOY_BUMP_PRIVATE_KEY }}`, an environment
     secret of a separate environment;
-  - `owner: opensoft`, `repositories: Opensoft-Tenant`;
+  - `owner: opensoft`, `repositories: <DEPLOYMENT_REPOSITORY>`;
   - `permission-contents: write`, `permission-pull-requests: write`.
 - The job edits the `opendox-runtime` image's `digest:`, and whatever the
-  overlay ties to it. It then opens a pull request in Opensoft-Tenant, whose
-  own review and checks gate the merge, and Flux deploys what merges.
+  overlay ties to it. It then opens a pull request in the deployment
+  repository, whose own review and checks gate the merge, and what merges is
+  deployed from there.
 
 ## Also not done here
 
