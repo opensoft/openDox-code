@@ -77,9 +77,15 @@ schema="${OPENDOX_PG_SCHEMA:-public}"
 # round 30). The bundled path does not create it: an alternate owner is
 # externally provisioned, with its own credential, which is what this refusal
 # says.
-if ! psql -tAqX --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
-      -v owner="$migration_owner" \
-      -c "select 1 from pg_roles where rolname = :'owner'" | grep -q '^1$'; then
+#
+# THE QUERY REACHES `psql` ON STDIN, NOT THROUGH `-c`. psql 16 hands a `-c`
+# string to the server as written and interpolates `:'owner'` only in what it
+# reads as input, so the server got a literal colon, answered a syntax error,
+# and this guard read that as "no such role": the refusal below fired on every
+# first start, for an owner that existed (openDox-code#102).
+if ! printf '%s\n' "select 1 from pg_roles where rolname = :'owner'" |
+     psql -tAqX --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+          -v owner="$migration_owner" | grep -q '^1$'; then
   echo "init-runtime-role: OPENDOX_MIGRATION_PG_USER names '$migration_owner'," \
        "which this database does not have. The bundled first start creates the" \
        "SERVED role only; an alternate migration owner is provisioned" \
