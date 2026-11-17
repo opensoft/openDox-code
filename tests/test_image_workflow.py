@@ -22,14 +22,19 @@ read rather than reaching the network.
 
 What is held:
   * the shape: dispatch only, a `revision` input and a `target` choice of `qa`
-    alone, no secret, no `pull_request_target`, `id-token: write` on the push
-    job alone, in `acr-qa`, every action pinned by a full commit SHA (checkout
-    and the artifact actions at `release.yml`'s own pins), no expression inside
-    any `run:` script, no estate identifier in the file, and each job's
-    timeout covering its steps';
+    alone, no `pull_request_target`, `id-token: write` on the push job alone,
+    in `acr-qa`, every action pinned by a full commit SHA (checkout and the
+    artifact actions at `release.yml`'s own pins), no expression inside any
+    `run:` script, no estate identifier in the file, and each job's timeout
+    covering its steps';
+  * the Azure IDs: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and
+    `AZURE_SUBSCRIPTION_ID` are environment SECRETS (Brett Heap, 2026-11-17,
+    "Secrets"), read from `secrets` and never from `vars`, in the push job
+    alone, which names the environment that holds them, and by the two places
+    that need them; `ACR_NAME` stays a variable;
   * the order: the image is recorded and uploaded before Trivy runs, and the
-    push job checks its variables, its approval and the archive before it
-    signs in;
+    push job checks its secrets and variable, its approval and the archive
+    before it signs in;
   * the target step: `qa` passes with an empty scan gate, and anything else,
     `prod` among them, refuses;
   * the revision step: a full commit on `main` passes, and one off `main` or
@@ -46,13 +51,18 @@ What is held:
   * the scan's verdict: report only with an empty gate, and with a gate, a
     finding at a gated severity, a misspelt gate and an unreadable report each
     refuse;
-  * the variables step names each missing or malformed variable, and prints
-    no value;
+  * the settings step names each missing or malformed secret or variable, and
+    prints no value;
   * the push step: `az acr login` with no resource group, the server from the
     cloud's suffix, lowercased, the digest from the push, read back by a pull,
     and a missing digest or another image refusing;
   * the record step writes the four fields the record promises, and no
-    registry host.
+    registry host;
+  * the operator page (`docs/image-release.md`) gives no hand `az` command that
+    creates the identity, its federated credential or the role assignment
+    (Terraform provisions them, 2026-11-17, "Terraform"), sets the three IDs
+    as secrets, from a command's output and never a typed literal, and holds
+    no identifier of the estate.
 """
 
 from __future__ import annotations
@@ -76,6 +86,9 @@ WORKFLOW = ROOT / ".github" / "workflows" / "image.yml"
 RELEASE = ROOT / ".github" / "workflows" / "release.yml"
 REPOSITORY = "opensoft/openDox-code"
 REPOSITORY_URL = f"https://github.com/{REPOSITORY}.git"
+OPERATOR_PAGE = ROOT / "docs" / "image-release.md"
+# Environment SECRETS of `acr-qa` (2026-11-17, "Secrets"); `ACR_NAME` is a variable.
+AZURE_IDS = ("AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID")
 
 needs_a_shell = pytest.mark.skipif(
     shutil.which("bash") is None or shutil.which("git") is None,
@@ -171,8 +184,67 @@ def test_only_the_push_job_can_mint_an_identity_token_and_it_runs_in_acr_qa() ->
     assert jobs["push"]["needs"] == "build"
 
 
-def test_no_secret_is_named() -> None:
-    assert "secrets." not in WORKFLOW.read_text(encoding="utf-8")
+def _strings(node: object):
+    """Every string of a parsed document, keys included."""
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            yield from _strings(key)
+            yield from _strings(value)
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            yield from _strings(item)
+
+
+def _reads(node: object) -> list[tuple[str, str]]:
+    """Each `secrets.NAME` and `vars.NAME` read inside a `${{ }}` expression
+    of the parsed document, as (context, NAME). Comments are not parsed, and a
+    `run:` script holds no expression (another test), so only real reads count."""
+    return [match for text in _strings(node)
+            for expression in re.findall(r"\$\{\{(.*?)\}\}", text, re.S)
+            for match in re.findall(r"\b(secrets|vars)\.(\w+)", expression)]
+
+
+def test_the_three_azure_ids_are_secrets_read_in_two_places_and_never_variables() -> None:
+    """Brett Heap, 2026-11-17: the IDs are environment secrets, so that GitHub
+    masks them in a public repository's run logs. Each is read exactly twice,
+    by the step that checks it is set and by `azure/login`, and the registry's
+    name stays a variable."""
+    reads = _reads(_workflow())
+    for name in AZURE_IDS:
+        assert reads.count(("secrets", name)) == 2, (name, reads)
+        assert ("vars", name) not in reads, f"{name} is read from vars"
+    assert reads.count(("vars", "ACR_NAME")) == 2, reads
+    assert ("secrets", "ACR_NAME") not in reads
+    assert sorted(set(reads)) == sorted([("secrets", name) for name in AZURE_IDS] + [("vars", "ACR_NAME")]), reads
+    # Not even in a comment: nothing in the file spells an Azure ID as a variable.
+    assert not re.search(r"\bvars\.AZURE_", WORKFLOW.read_text(encoding="utf-8"))
+
+
+def test_a_secret_is_read_only_in_a_job_that_names_the_acr_qa_environment() -> None:
+    """An environment's secrets reach a job only if it names the environment
+    (and only after its approval). The build job names none and reads none, and
+    nothing outside the jobs (the workflow's own `env`) reads any."""
+    workflow = _workflow()
+    jobs = workflow["jobs"]
+    for name, job in jobs.items():
+        secrets = [secret for kind, secret in _reads(job) if kind == "secrets"]
+        if secrets:
+            assert (job.get("environment") or {}).get("name") == "acr-qa", (name, secrets)
+    assert [kind for kind, _ in _reads(jobs["build"]) if kind == "secrets"] == []
+    assert _reads({key: value for key, value in workflow.items() if key != "jobs"}) == []
+
+
+def test_no_step_prints_or_passes_an_azure_id_but_the_check_and_the_login() -> None:
+    """Outside the step that checks the settings and `azure/login`, no step's
+    script or environment mentions an Azure ID, so no step can echo one."""
+    for job_name, job in _workflow()["jobs"].items():
+        for step in job["steps"]:
+            if step.get("name") == SETTINGS_STEP or step.get("uses", "").startswith("azure/login@"):
+                continue
+            for name in AZURE_IDS:
+                assert name not in json.dumps(step), (job_name, step.get("name"), name)
 
 
 def _uses(path: Path) -> list[str]:
@@ -205,19 +277,20 @@ GUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-
 
 
 def test_no_estate_identifier_is_written_in_the_file() -> None:
-    """The repository is public: the Azure IDs and the registry's name are
-    variables, read in exactly the places that need them."""
+    """The repository is public: the Azure IDs are secrets and the registry's
+    name is a variable, read in exactly the places that need them."""
     text = WORKFLOW.read_text(encoding="utf-8")
     assert not GUID.search(text), GUID.search(text)
     for literal in ("azurecr.io", "/subscriptions/", "resourceGroups"):
         assert literal not in text, literal
-    assert sorted(set(re.findall(r"vars\.(\w+)", text))) == [
-        "ACR_NAME", "AZURE_CLIENT_ID", "AZURE_SUBSCRIPTION_ID", "AZURE_TENANT_ID"]
+    assert sorted(set(_reads(_workflow()))) == [
+        ("secrets", "AZURE_CLIENT_ID"), ("secrets", "AZURE_SUBSCRIPTION_ID"),
+        ("secrets", "AZURE_TENANT_ID"), ("vars", "ACR_NAME")]
     login = next(step for step in _workflow()["jobs"]["push"]["steps"]
                  if step.get("uses", "").startswith("azure/login@"))
-    assert login["with"] == {"client-id": "${{ vars.AZURE_CLIENT_ID }}",
-                             "tenant-id": "${{ vars.AZURE_TENANT_ID }}",
-                             "subscription-id": "${{ vars.AZURE_SUBSCRIPTION_ID }}"}
+    assert login["with"] == {"client-id": "${{ secrets.AZURE_CLIENT_ID }}",
+                             "tenant-id": "${{ secrets.AZURE_TENANT_ID }}",
+                             "subscription-id": "${{ secrets.AZURE_SUBSCRIPTION_ID }}"}
 
 
 def test_each_job_timeout_covers_its_steps() -> None:
@@ -245,7 +318,7 @@ def test_the_image_is_recorded_and_uploaded_before_trivy_runs() -> None:
     assert outputs["archive-sha256"] == "${{ steps.image.outputs.archive-sha256 }}"
 
 
-VARIABLES_STEP = "the registry variables are set"
+SETTINGS_STEP = "the Azure secrets and the registry variable are set"
 APPROVAL_STEP = ("this environment still asks a reviewer and limits its refs, "
                  "and this run's deployment to it was approved")
 LOAD_STEP = "the archive is the one the build job recorded, and loads as its image"
@@ -254,7 +327,7 @@ RELEASE_RECORD_STEP = "record the pushed image"
 
 
 def test_the_push_job_checks_everything_before_it_signs_in() -> None:
-    assert _names("push") == [VARIABLES_STEP, APPROVAL_STEP, "actions/download-artifact", LOAD_STEP,
+    assert _names("push") == [SETTINGS_STEP, APPROVAL_STEP, "actions/download-artifact", LOAD_STEP,
                               "azure/login", PUSH_STEP, RELEASE_RECORD_STEP, "actions/upload-artifact"]
 
 
@@ -740,44 +813,58 @@ def test_the_scan_verdict(case: str, tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The variables step.
+# The settings step: three secrets and one variable.
 
-GOOD_VARIABLES = {"AZURE_CLIENT_ID": "11111111-2222-3333-4444-555555555555",
-                  "AZURE_TENANT_ID": "66666666-7777-8888-9999-aaaaaaaaaaaa",
-                  "AZURE_SUBSCRIPTION_ID": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
-                  "ACR_NAME": "exampleregistry"}
+GOOD_SETTINGS = {"AZURE_CLIENT_ID": "11111111-2222-3333-4444-555555555555",
+                 "AZURE_TENANT_ID": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+                 "AZURE_SUBSCRIPTION_ID": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+                 "ACR_NAME": "exampleregistry"}
 
-VARIABLE_CASES = {
-    "all four, each in its shape": ({}, None),
-    "no client id": ({"AZURE_CLIENT_ID": ""}, "the variable AZURE_CLIENT_ID is not set"),
-    "no tenant id": ({"AZURE_TENANT_ID": ""}, "the variable AZURE_TENANT_ID is not set"),
-    "no subscription id": ({"AZURE_SUBSCRIPTION_ID": ""}, "the variable AZURE_SUBSCRIPTION_ID is not set"),
+# A secret that is not set reads as an empty string, as a variable does, so an
+# empty value is the "not set" case for all four.
+SETTINGS_CASES = {
+    "three secrets and a variable, each in its shape": ({}, None),
+    "no client id": ({"AZURE_CLIENT_ID": ""}, "the secret AZURE_CLIENT_ID is not set"),
+    "no tenant id": ({"AZURE_TENANT_ID": ""}, "the secret AZURE_TENANT_ID is not set"),
+    "no subscription id": ({"AZURE_SUBSCRIPTION_ID": ""}, "the secret AZURE_SUBSCRIPTION_ID is not set"),
     "no registry": ({"ACR_NAME": ""}, "the variable ACR_NAME is not set"),
     "a registry's login server in place of its name": ({"ACR_NAME": "exampleregistry.example.invalid"},
                                                        "the variable ACR_NAME is not a registry name"),
     "a client id that is not a GUID": ({"AZURE_CLIENT_ID": "exampleregistry"},
-                                       "the variable AZURE_CLIENT_ID is not a GUID"),
+                                       "the secret AZURE_CLIENT_ID is not a GUID"),
+    "a tenant id that is not a GUID": ({"AZURE_TENANT_ID": "66666666-7777-8888-9999"},
+                                       "the secret AZURE_TENANT_ID is not a GUID"),
+    "all three secrets unset": ({name: "" for name in AZURE_IDS},
+                                "the secret AZURE_SUBSCRIPTION_ID is not set"),
 }
 
 
 @needs_a_shell
-@pytest.mark.parametrize("case", sorted(VARIABLE_CASES))
-def test_the_variables_step(case: str, tmp_path: Path) -> None:
-    change, refusal = VARIABLE_CASES[case]
-    env = {**GOOD_VARIABLES, **change}
-    result = _run(_step("push", VARIABLES_STEP)["run"], tmp_path, env, (_python3(tmp_path / "bin"),))
+@pytest.mark.parametrize("case", sorted(SETTINGS_CASES))
+def test_the_settings_step(case: str, tmp_path: Path) -> None:
+    change, refusal = SETTINGS_CASES[case]
+    env = {**GOOD_SETTINGS, **change}
+    result = _run(_step("push", SETTINGS_STEP)["run"], tmp_path, env, (_python3(tmp_path / "bin"),))
     for value in env.values():
         if value:
-            assert value not in result.stdout + result.stderr, "a variable's value was printed"
+            assert value not in result.stdout + result.stderr, "a secret's or variable's value was printed"
     if refusal is None:
         assert result.returncode == 0, result.stdout + result.stderr
     else:
         assert result.returncode != 0, result.stdout
         assert refusal in result.stdout, result.stdout + result.stderr
+    if case == "all three secrets unset":
+        for name in AZURE_IDS:
+            assert f"the secret {name} is not set on the acr-qa environment" in result.stdout, result.stdout
 
 
-def test_the_variables_step_reads_the_four_variables() -> None:
-    assert _step("push", VARIABLES_STEP)["env"] == {name: f"${{{{ vars.{name} }}}}" for name in GOOD_VARIABLES}
+def test_the_settings_step_reads_three_secrets_and_one_variable() -> None:
+    assert _step("push", SETTINGS_STEP)["env"] == {
+        **{name: f"${{{{ secrets.{name} }}}}" for name in AZURE_IDS}, "ACR_NAME": "${{ vars.ACR_NAME }}"}
+
+
+def test_the_push_step_reads_the_registry_name_as_a_variable() -> None:
+    assert _step("push", PUSH_STEP)["env"]["ACR_NAME"] == "${{ vars.ACR_NAME }}"
 
 
 # ---------------------------------------------------------------------------
@@ -873,3 +960,53 @@ def test_the_release_record(digest: str, tmp_path: Path) -> None:
     assert f"::notice title=opendox-runtime:v0.1.0::{DIGEST} from {SHA}" in result.stdout
     for text in (record.read_text(), summary.read_text()):
         assert "azurecr" not in text
+
+
+# ---------------------------------------------------------------------------
+# The operator page.
+
+
+def _page() -> str:
+    return OPERATOR_PAGE.read_text(encoding="utf-8")
+
+
+def test_the_page_creates_no_azure_resource_by_hand() -> None:
+    """Brett Heap, 2026-11-17, "Terraform": the identity, its federated
+    credential and the registry role assignment are created through the
+    estate's infrastructure-as-code by an operator, never by hand `az`. The
+    page states their end state and keeps `az` for reading."""
+    page = _page()
+    for creating in ("az identity create", "az identity federated-credential create",
+                     "az ad app federated-credential create", "az role assignment create",
+                     "az identity update", "az role assignment update"):
+        assert creating not in page, creating
+    shell = "\n".join(re.findall(r"```sh\n(.*?)```", page, re.S))
+    commands = re.findall(r"\baz((?: [a-z][a-z-]*)+)", shell)  # `az` and its subcommand words
+    assert commands, "the page keeps its read-only az commands"
+    for command in commands:
+        assert command.split()[-1] in ("show", "list"), f"az{command}"
+    assert "Terraform" in page
+    # The end state: the issuer, the audience, the subject and where its prefix comes from, and the role.
+    flat = " ".join(page.split())  # the page wraps its lines
+    for property_ in ("https://token.actions.githubusercontent.com", "api://AzureADTokenExchange",
+                      "<prefix>:environment:acr-qa", "actions/oidc/customization/sub",
+                      "`AcrPush`", "Container Registry Repository Writer", "roleAssignmentMode"):
+        assert property_ in flat, property_
+
+
+def test_the_page_sets_the_three_ids_as_secrets_from_a_command_and_never_a_literal() -> None:
+    page = _page()
+    for name in AZURE_IDS:
+        assert re.search(rf"\| gh secret set {name} --env acr-qa --repo {REPOSITORY}\b", page), name
+        assert f"gh variable set {name}" not in page
+    assert not re.search(r"gh secret set \w+[^\n]*--(?:body|env-file)", page), "a secret's value typed on the line"
+    assert f'gh variable set ACR_NAME --env acr-qa --repo {REPOSITORY} --body "<REGISTRY_NAME>"' in page
+    assert "gh secret list --env acr-qa" in page
+
+
+def test_the_page_holds_only_placeholders_for_the_estate() -> None:
+    page = _page()
+    assert not GUID.search(page), GUID.search(page)
+    for literal in ("/home/", "/workspace/", "/Users/", "/subscriptions/", "resourceGroups", "vault.azure"):
+        assert literal not in page, literal
+    assert not re.search(r"[A-Za-z0-9]\.azurecr\.io", page), "a registry host"

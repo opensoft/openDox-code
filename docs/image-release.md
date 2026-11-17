@@ -8,10 +8,13 @@ Heap approved a pipeline for the QA registry on 2026-11-17 ("lets setup so that
 we can have a pipeline that can deploy to it" ... "go ahead with the
 pipeline").
 
-It cannot push anything until an operator has done the one-time setup below:
-an Azure identity, its federated credential, one role assignment, the `acr-qa`
-environment and four variables. Until then a dispatch builds and scans, and
-the build job stops at the environment check, naming what is missing.
+It cannot push anything until an operator has done the one-time setup below.
+The Azure side is an identity, its federated credential and one role
+assignment, all provisioned through Terraform and never by hand. The GitHub
+side is the `acr-qa` environment, three secrets and one variable. Until then a
+dispatch builds and scans. The build job stops at the environment check if
+`acr-qa` is missing or unprotected, and the push job stops at its first step,
+naming what is missing, if a secret or the variable is.
 
 ## What a run does
 
@@ -38,7 +41,8 @@ Two jobs. The second waits for the first and for an approval.
 
 **push** (in the `acr-qa` environment, after an approval):
 
-1. Requires the four variables, each in its shape.
+1. Requires the three secrets and the one variable, each in its shape. It
+   prints their names, never a value.
 2. Re-checks the environment's rules, and that this run's deployment to it
    was approved: `release.yml`'s own script.
 3. Loads the archive only at the recorded sha256, and only if it loads as the
@@ -129,9 +133,18 @@ CRITICAL (certifi 2026.7.22 from the dependency lock, fixed in 2026.10.18) and
 
 Every value in angle brackets is a placeholder. None of these identifiers
 belongs in this repository: it is public, so they live in Azure and in the
-`acr-qa` environment's variables. Run the `az` commands as someone who may
-create a managed identity in `<IDENTITY_RESOURCE_GROUP>` and assign roles on the
-registry (`Owner` or `Role Based Access Control Administrator` on it).
+`acr-qa` environment's secrets and variable.
+
+The setup has two halves, made in different ways:
+
+- **The Azure side** is the identity, its federated credential and the registry
+  role assignment. An operator provisions them through the estate's
+  infrastructure-as-code, which is Terraform. They are never created by hand
+  with `az` (Brett Heap, 2026-11-17: "Terraform"). Steps 1 to 3 state the end
+  state those resources must have. The `az` commands in the steps below only
+  read (`show`, `list`).
+- **The GitHub side** is the `acr-qa` environment, its three secrets and its
+  one variable. Steps 4 and 5 set them with `gh`.
 
 ### 1. The OIDC subject the federated credential must match
 
@@ -149,59 +162,44 @@ echo "$subject"   # repo:opensoft@<owner-id>/openDox-code@<repository-id>:enviro
 ```
 
 If the API answers `"use_immutable_subject": false` and no `sub_claim_prefix`,
-the subject is the name-based one instead.
+the subject is the name-based one instead. Whoever writes the Terraform takes
+the subject from this command's output, not from memory.
 
-### 2. The identity and its federated credential
+### 2. The identity and its federated credential: the end state
 
-A user-assigned managed identity, with no secret of any kind. An app
-registration works too, with `az ad app federated-credential create`.
+Terraform must leave these, and step 6 reads them back:
 
-```sh
-az identity create \
-  --name <IDENTITY_NAME> \
-  --resource-group <IDENTITY_RESOURCE_GROUP> \
-  --location <LOCATION>
+- **An identity that holds no secret of any kind**: a user-assigned managed
+  identity, or an app registration.
+- **One federated credential on it**, with exactly:
+  - issuer `https://token.actions.githubusercontent.com`;
+  - audience `api://AzureADTokenExchange`;
+  - subject `<prefix>:environment:acr-qa`, the string step 1 printed, character
+    for character.
 
-az identity federated-credential create \
-  --name github-opendox-code-acr-qa \
-  --identity-name <IDENTITY_NAME> \
-  --resource-group <IDENTITY_RESOURCE_GROUP> \
-  --issuer https://token.actions.githubusercontent.com \
-  --subject "$subject" \
-  --audiences api://AzureADTokenExchange
-```
+### 3. One role, on the one registry: the end state
 
-### 3. One role, on the one registry
-
-First check the registry's role assignment permissions mode:
+First read the registry's role assignment permissions mode:
 
 ```sh
 az acr show --name <REGISTRY_NAME> --resource-group <REGISTRY_RESOURCE_GROUP> \
   --query roleAssignmentMode --output tsv
 ```
 
-In **RBAC Registry Permissions** mode, assign `AcrPush`, scoped to the
-registry's resource ID:
+Terraform must give the identity's principal (a service principal) exactly one
+role assignment, scoped to the registry's resource ID, not to its resource
+group or the subscription:
 
-```sh
-registry_id="$(az acr show --name <REGISTRY_NAME> --resource-group <REGISTRY_RESOURCE_GROUP> --query id --output tsv)"
-principal_id="$(az identity show --name <IDENTITY_NAME> --resource-group <IDENTITY_RESOURCE_GROUP> --query principalId --output tsv)"
+- In **RBAC Registry Permissions** mode, the role is `AcrPush`.
+- In **RBAC Registry + ABAC Repository Permissions** mode (`rbac-abac`), the
+  registry does not honour `AcrPush`. The role is `Container Registry
+  Repository Writer` instead, with an ABAC condition (condition version `2.0`)
+  that scopes it to the one repository `opendox-runtime`. The condition below
+  follows Microsoft's single-repository example, with the role's two write
+  actions added. Check it in the portal's condition editor before relying on
+  it. Pass it as one string, with its line breaks removed.
 
-az role assignment create \
-  --assignee-object-id "$principal_id" \
-  --assignee-principal-type ServicePrincipal \
-  --role AcrPush \
-  --scope "$registry_id"
-```
-
-In **RBAC Registry + ABAC Repository Permissions** mode (`rbac-abac`), the
-registry does not honour `AcrPush`. Assign `Container Registry Repository
-Writer` instead, scoped to the one repository by a condition. The condition
-below follows Microsoft's single-repository example, with the role's two write
-actions added. Check it in the portal's condition editor before relying on it.
-
-```sh
-condition=$(cat <<'EOF' | tr -d '\n'
+```text
 (
  (
   !(ActionMatches{'Microsoft.ContainerRegistry/registries/repositories/content/read'})
@@ -217,27 +215,17 @@ condition=$(cat <<'EOF' | tr -d '\n'
   @Request[Microsoft.ContainerRegistry/registries/repositories:name] StringEqualsIgnoreCase 'opendox-runtime'
  )
 )
-EOF
-)
-az role assignment create \
-  --assignee-object-id "$principal_id" \
-  --assignee-principal-type ServicePrincipal \
-  --role "Container Registry Repository Writer" \
-  --scope "$registry_id" \
-  --description "openDox-code image.yml pushes opendox-runtime" \
-  --condition "$condition" \
-  --condition-version "2.0"
 ```
 
-Assign nothing else. In particular, do not assign `Container Registry
-Contributor and Data Access Configuration Administrator`, even though
-Microsoft lists it as the role for `az acr login`. It can delete the registry.
-The workflow does not need it: it runs `az acr login --name` with no resource
-group. Without control-plane read, the CLI's lookup of the registry finds
-nothing, so it falls back to `<name>.azurecr.io` and exchanges the Entra token
-for a registry token on the data plane (traced in the Azure CLI's
-`acr/_docker_utils.py`, `_get_credentials`). `AcrPush` is exactly
-`registries/pull/read` and `registries/push/write`.
+Nothing else is assigned. In particular, `Container Registry Contributor and
+Data Access Configuration Administrator` is not, even though Microsoft lists it
+as the role for `az acr login`. It can delete the registry. The workflow does
+not need it: it runs `az acr login --name` with no resource group. Without
+control-plane read, the CLI's lookup of the registry finds nothing, so it falls
+back to `<name>.azurecr.io` and exchanges the Entra token for a registry token
+on the data plane (traced in the Azure CLI's `acr/_docker_utils.py`,
+`_get_credentials`). `AcrPush` is exactly `registries/pull/read` and
+`registries/push/write`.
 
 **Why not `az acr build`.** It runs the build on ACR Tasks. That needs
 `Container Registry Tasks Contributor`, a registry-wide control-plane role
@@ -266,20 +254,30 @@ gh api --method POST repos/opensoft/openDox-code/environments/acr-qa/deployment-
   -f name=main -f type=branch
 ```
 
-### 5. The four variables, on the environment
+### 5. The three secrets and the one variable, on the environment
 
-Environment variables reach only the jobs that run in `acr-qa`. A later
-`acr-prod` will carry the same names with prod's values.
+The client, tenant and subscription IDs are environment **secrets**, so that
+GitHub masks them in this public repository's run logs (Brett Heap, 2026-11-17:
+"Secrets"). `ACR_NAME` is an environment **variable**: the registry's name is
+part of the image reference and of the digest output, and masking it would
+garble both. Environment secrets and variables reach only the jobs that run in
+`acr-qa`. A later `acr-prod` will carry the same names with prod's values.
+
+Never type a value into a command. `gh secret set` reads its value from
+standard input when it is given no `--body`, so each ID below comes straight
+from the read-only command that holds it, and is on no command line and in no
+shell history. A file works the same way: `gh secret set <NAME> --env acr-qa
+--repo opensoft/openDox-code < <FILE>`.
 
 ```sh
-client_id="$(az identity show --name <IDENTITY_NAME> --resource-group <IDENTITY_RESOURCE_GROUP> --query clientId --output tsv)"
-tenant_id="$(az identity show --name <IDENTITY_NAME> --resource-group <IDENTITY_RESOURCE_GROUP> --query tenantId --output tsv)"
-subscription_id="$(az account show --query id --output tsv)"   # the subscription that holds the registry
+az identity show --name <IDENTITY_NAME> --resource-group <IDENTITY_RESOURCE_GROUP> --query clientId --output tsv \
+  | gh secret set AZURE_CLIENT_ID --env acr-qa --repo opensoft/openDox-code
+az identity show --name <IDENTITY_NAME> --resource-group <IDENTITY_RESOURCE_GROUP> --query tenantId --output tsv \
+  | gh secret set AZURE_TENANT_ID --env acr-qa --repo opensoft/openDox-code
+az account show --query id --output tsv \
+  | gh secret set AZURE_SUBSCRIPTION_ID --env acr-qa --repo opensoft/openDox-code   # the subscription that holds the registry
 
-gh variable set AZURE_CLIENT_ID       --env acr-qa --repo opensoft/openDox-code --body "$client_id"
-gh variable set AZURE_TENANT_ID       --env acr-qa --repo opensoft/openDox-code --body "$tenant_id"
-gh variable set AZURE_SUBSCRIPTION_ID --env acr-qa --repo opensoft/openDox-code --body "$subscription_id"
-gh variable set ACR_NAME              --env acr-qa --repo opensoft/openDox-code --body "<REGISTRY_NAME>"
+gh variable set ACR_NAME --env acr-qa --repo opensoft/openDox-code --body "<REGISTRY_NAME>"
 ```
 
 `ACR_NAME` is the registry's name, not its login server: no `.azurecr.io`.
@@ -291,17 +289,31 @@ gh api repos/opensoft/openDox-code/environments/acr-qa \
   --jq '{rules: [.protection_rules[].type], policy: .deployment_branch_policy}'
 gh api repos/opensoft/openDox-code/environments/acr-qa/deployment-branch-policies \
   --jq '.branch_policies[] | {name, type}'
+gh secret list --env acr-qa --repo opensoft/openDox-code     # names only: a secret is never read back
 gh variable list --env acr-qa --repo opensoft/openDox-code
 az identity federated-credential list --identity-name <IDENTITY_NAME> \
-  --resource-group <IDENTITY_RESOURCE_GROUP> --query '[].{subject: subject, audiences: audiences}'
+  --resource-group <IDENTITY_RESOURCE_GROUP> \
+  --query '[].{issuer: issuer, audiences: audiences, subject: subject}'
+az role assignment list --assignee "$(az identity show --name <IDENTITY_NAME> \
+  --resource-group <IDENTITY_RESOURCE_GROUP> --query principalId --output tsv)" --all \
+  --query '[].{role: roleDefinitionName, scope: scope, condition: condition}'
 ```
+
+The three secrets and the variable should be listed, the credential should show
+step 2's issuer, audience and subject, and the one role assignment should be
+step 3's. If something differs, the fix is a change to the Terraform, not a
+hand edit in Azure.
 
 Then dispatch one run (see "How to run it") and approve it.
 
 ## When the first push fails
 
 - **`AADSTS70021` / `AADSTS700213`**: the federated credential's subject is
-  not the one the token carries. Redo step 1, and compare.
+  not the one the token carries. Redo step 1, and compare. The fix is a change
+  to the Terraform.
+- **The push job's first step names a secret or the variable**: it is unset on
+  `acr-qa`, or it is not in its shape (a GUID, or a registry name of 5 to 50
+  letters or digits). The step prints the name, never the value (step 5).
 - **`No subscriptions found`** at sign-in: the identity sees no subscription.
   A role assignment on a resource inside the subscription normally makes it
   visible. If it does not, the workflow needs `allow-no-subscriptions: true`
@@ -314,16 +326,18 @@ Then dispatch one run (see "How to run it") and approve it.
 
 ## What the public repository shows
 
-The workflow file names no estate identifier. Variables are not masked, though,
-and a public repository's run logs are public. The push job's step headers
-therefore show the client, tenant and subscription IDs and the registry name to
-anyone who opens a run. They are identifiers, not credentials: knowing them
-does not let anyone mint the GitHub token the federated credential accepts.
+The workflow file names no estate identifier. The client, tenant and
+subscription IDs are environment secrets, so GitHub masks them in the run logs
+of this public repository (Brett Heap, 2026-11-17: "Secrets"). They are
+identifiers, not credentials: knowing them does not let anyone mint the GitHub
+token the federated credential accepts. No step prints a secret's value, and
+only the push job, which runs in `acr-qa` after an approval, can read them.
 
-Microsoft's guide recommends keeping the three IDs as environment secrets
-instead, which GitHub masks. Switching means changing `vars.` to `secrets.`
-for those three in `image.yml`, and changing the tests that pin `vars.`. That
-choice is the owner's.
+The registry's name is an environment variable and is not masked. It is part
+of the image reference and of the digest output, and masking it would garble
+both, so the push job's step headers and `docker push`'s own output show it to
+anyone who opens a run. The record (`image-release.json` and the job summary)
+names no registry host.
 
 ## Next step: the Opensoft-Tenant digest bump
 

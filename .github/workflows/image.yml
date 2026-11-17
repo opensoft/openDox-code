@@ -4,10 +4,11 @@ name: image
 # BUILD THE openDox RUNTIME IMAGE AND PUSH IT TO THE QA REGISTRY, BY DIGEST.
 # Brett Heap approved a pipeline for the QA registry on 2026-11-17: "lets
 # setup so that we can have a pipeline that can deploy to it" ... "go ahead
-# with the pipeline". No openxFactory plan task and no ruling on
-# opensoft/openxFactory#656 names this workflow yet; the pull request that
-# adds it says so. `docs/image-release.md` is the operator's page: what this
-# does, how to run it, and the one-time setup it waits on.
+# with the pipeline". His ruling of the same day on opensoft/openxFactory#656
+# (comment 6936600205, item 4) makes this a governed workflow, for QA only:
+# promotion to production is not covered and needs its own ruling.
+# `docs/image-release.md` is the operator's page: what this does, how to run
+# it, and the one-time setup it waits on.
 #
 # DISPATCH ONLY. Nothing here runs on a push, a tag or a pull request: a push
 # to a registry is an outward-facing act, and the `acr-qa` environment asks
@@ -60,13 +61,24 @@ name: image
 # Contributor` (create and run any task on the registry) besides.
 #
 # NO ESTATE IDENTIFIER IN THIS PUBLIC FILE. The client, tenant and
-# subscription IDs and the registry's name are variables (`vars.AZURE_CLIENT_ID`,
-# `vars.AZURE_TENANT_ID`, `vars.AZURE_SUBSCRIPTION_ID`, `vars.ACR_NAME`), set
-# on the `acr-qa` environment, and the push job refuses, naming the variable,
-# when one is unset or malformed. They are identifiers, not credentials, but a
-# variable is not masked: a public repository's run logs show them in the push
-# job's step headers. No output or artifact of this workflow names the
-# registry's host.
+# subscription IDs are environment SECRETS of `acr-qa` (`secrets.AZURE_CLIENT_ID`,
+# `secrets.AZURE_TENANT_ID`, `secrets.AZURE_SUBSCRIPTION_ID`), so that GitHub
+# masks them in this public repository's run logs (Brett Heap, 2026-11-17:
+# "Secrets"; item 5 of the ruling cited above holds them as environment
+# secrets). They are identifiers, not credentials, but a public repository's
+# run logs are public. Only a job that names the environment reads its
+# secrets, and only after the environment's approval: the push job alone names
+# it, and the build job names no secret. The registry's name is a
+# VARIABLE, `vars.ACR_NAME`, on the same environment: it is part of the image
+# reference and of the digest output, and masking it would garble both, so the
+# push job's logs show it. The push job refuses, naming the secret or the
+# variable, when one is unset or malformed, and no step prints a value. No
+# output or artifact of this workflow records the registry's host.
+#
+# THE AZURE SIDE IS CREATED THROUGH TERRAFORM, never by hand `az` (the same
+# ruling, item 5): the identity, its federated credential and the registry
+# role assignment. `docs/image-release.md` states the end state they must
+# have, and the read-only checks that show it.
 #
 # EVERY ACTION IS PINNED BY FULL COMMIT SHA, with its release tag beside it, as
 # in `release.yml`, and checkout and the two artifact actions are at
@@ -497,34 +509,39 @@ jobs:
     outputs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
-      # THE VARIABLES, NAMED WHEN MISSING. They live on the `acr-qa`
-      # environment (or the repository), never in this file. Each must have
-      # its shape: a GUID for the three Azure IDs, and 5 to 50 letters or
-      # digits for a registry name, so a value pasted in the wrong variable
-      # stops here and not inside Azure. No value is printed.
-      - name: the registry variables are set
+      # THE SECRETS AND THE VARIABLE, NAMED WHEN MISSING. The three Azure IDs
+      # are environment SECRETS of `acr-qa`, and the registry's name is a
+      # VARIABLE of it, never in this file. This job names the environment, so
+      # it alone reads them: a secret that is not set reads as an empty
+      # string. Each must have its shape: a GUID for the three Azure IDs, and 5
+      # to 50 letters or digits for a registry name, so a value pasted in the
+      # wrong place stops here and not inside Azure. Only names are printed,
+      # never a value.
+      - name: the Azure secrets and the registry variable are set
         timeout-minutes: 1
         env:
-          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
-          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           ACR_NAME: ${{ vars.ACR_NAME }}
         run: |
           python3 - <<'PY'
           import os, re, sys
 
           GUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-          shapes = {"AZURE_CLIENT_ID": (GUID, "a GUID"), "AZURE_TENANT_ID": (GUID, "a GUID"),
-                    "AZURE_SUBSCRIPTION_ID": (GUID, "a GUID"),
-                    "ACR_NAME": (r"[A-Za-z0-9]{5,50}", "a registry name, 5 to 50 letters or digits")}
+          shapes = {"AZURE_CLIENT_ID": ("secret", GUID, "a GUID"),
+                    "AZURE_TENANT_ID": ("secret", GUID, "a GUID"),
+                    "AZURE_SUBSCRIPTION_ID": ("secret", GUID, "a GUID"),
+                    "ACR_NAME": ("variable", r"[A-Za-z0-9]{5,50}",
+                                 "a registry name, 5 to 50 letters or digits")}
           problems = []
-          for name, (shape, said) in shapes.items():
+          for name, (kind, shape, said) in shapes.items():
               value = os.environ.get(name, "")
               if not value:
-                  problems.append(f"the variable {name} is not set on the acr-qa environment or the "
-                                  "repository; docs/image-release.md's one-time setup sets it")
+                  problems.append(f"the {kind} {name} is not set on the acr-qa environment; "
+                                  "docs/image-release.md's one-time setup sets it")
               elif not re.fullmatch(shape, value):
-                  problems.append(f"the variable {name} is not {said}")
+                  problems.append(f"the {kind} {name} is not {said}")
           for problem in problems:
               print(f"::error::{problem}")
           if problems:
@@ -605,9 +622,9 @@ jobs:
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         timeout-minutes: 3
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       # THE PUSH, AND THE DIGEST READ BACK. `az acr login --name` with NO
       # `--resource-group`: the identity holds only `AcrPush`, a data-plane
