@@ -39,13 +39,19 @@
 # `pixeltable-pgserver` (RULED, openxFactory#656 `5916000030` item 2): the one
 # line that moved is `pgserver==0.1.4` -> `pixeltable-pgserver==0.6.0`, whose
 # own requirements were all pinned already.
+# Re-resolved 2026-11-17 on cpython 3.12.3 / linux x86_64, in a clean
+# environment under the pins above less `certifi`, for the 0.1.1 patch release
+# (RULED, openxFactory#656 `6936600205` item 2: a bounded re-resolve, not a
+# full regeneration): the one line that moved is `certifi==2026.7.22` ->
+# `certifi==2026.10.23`, which clears GHSA-6q48-6c7w-9gw2 (critical; fixed in
+# 2026.10.18). `httpx` and `httpcore` require it; nothing else moved.
 PyJWT==2.14.0
 PyYAML==6.0.3
 Pygments==2.21.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
-certifi==2026.7.22
+certifi==2026.10.23
 cffi==2.1.1
 click==8.5.0
 cryptography==50.0.1
