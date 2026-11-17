@@ -232,13 +232,17 @@ _BLOCK_SIBLINGS = "import sys\n" + "".join(
 #: `test_the_runtime_extra_is_the_one_pyproject_declares` holds the keys to
 #: pyproject's own list. `test_the_runtime_extras_modules_are_the_runtimes_own`
 #: holds the modules to what `opendox.runtime` imports, and, where the extra
-#: is installed, to the installed metadata.
+#: is installed, to the installed metadata. `certifi` has NO modules here:
+#: the extra names it for its floor alone (0.1.1, GHSA-6q48-6c7w-9gw2), and
+#: `opendox.runtime` imports nothing from it (`httpx` does), so it exempts
+#: no import failure.
 RUNTIME_EXTRA: dict[str, tuple[str, ...]] = {
     "fastapi": ("fastapi", "pydantic"),
     "uvicorn": ("uvicorn",),
     "psycopg": ("psycopg", "psycopg_pool"),
     "PyJWT": ("jwt",),
     "httpx": ("httpx",),
+    "certifi": (),
 }
 RUNTIME_PACKAGE = "opendox.runtime"
 
