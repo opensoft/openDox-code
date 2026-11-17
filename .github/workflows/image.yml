@@ -1,0 +1,688 @@
+name: image
+
+# ---------------------------------------------------------------------------
+# BUILD THE openDox RUNTIME IMAGE AND PUSH IT TO THE QA REGISTRY, BY DIGEST.
+# Brett Heap approved a pipeline for the QA registry on 2026-11-17: "lets
+# setup so that we can have a pipeline that can deploy to it" ... "go ahead
+# with the pipeline". No openxFactory plan task and no ruling on
+# opensoft/openxFactory#656 names this workflow yet; the pull request that
+# adds it says so. `docs/image-release.md` is the operator's page: what this
+# does, how to run it, and the one-time setup it waits on.
+#
+# DISPATCH ONLY. Nothing here runs on a push, a tag or a pull request: a push
+# to a registry is an outward-facing act, and the `acr-qa` environment asks
+# for an approval before it.
+#
+# WHAT IS BUILT is the `revision` input, a tag of THIS repository or a full
+# 40-character commit, never the ref the workflow is dispatched on. A
+# dispatch runs the dispatched ref's OWN copy of this file, so run it from
+# `main`: the `acr-qa` environment's deployment limit is the branch `main`,
+# and a dispatch from any other branch builds and scans but cannot push. The
+# input is separate from the dispatched ref so that main's reviewed copy of
+# this file can build an older commit, `v0.1.0` among them, that predates it.
+#
+# THE QA GATE: the commit must be on this repository's `main` (`main` itself
+# or an ancestor of it), and NOT necessarily the commit the openDox root pins.
+# QA exists to test a fix before the root pin moves, so it builds any reviewed
+# commit. `main` is `refs/heads/main` in the compare, as in `release.yml`: a
+# bare `main` would resolve to a TAG named `main` before the branch.
+#
+# PROD IS NOT BUILT HERE, and the place it goes is marked in the `target`
+# step. Prod will PROMOTE a digest QA already holds (`az acr import` by
+# digest, in its own job and its own environment, `acr-prod`), never rebuild
+# it, and its gate is `release.yml`'s stricter one: the commit must be the one
+# opensoft/openDox main pins in `contracts/code-pin.yaml`. Its scan gate fails
+# (CRITICAL and HIGH) where QA's only reports.
+#
+# TWO JOBS, THE SECOND GATED ON THE FIRST:
+#   build   resolves and gates the revision, checks that `acr-qa` asks a
+#           reviewer and limits the refs that deploy, builds
+#           `deploy/compose/Dockerfile` for linux/amd64 with SOURCE_REVISION
+#           set to the full commit, records the image ID and the archive's
+#           sha256 BEFORE any third-party code runs, uploads the archive, then
+#           scans it with Trivy. It mints no identity token, and its
+#           GITHUB_TOKEN reads only.
+#   push    in the `acr-qa` environment: re-checks the environment and this
+#           run's approval, loads the archive the build job recorded (by
+#           sha256 and image ID), signs in to Azure by OIDC, pushes, reads the
+#           digest back by pulling it, and records it.
+#
+# NO STORED CREDENTIAL. Azure sign-in is workload identity federation: the
+# push job asks GitHub for a short-lived OIDC token, and Microsoft Entra ID
+# accepts it only for the federated credential configured on its side, whose
+# subject names this repository's `acr-qa` environment. This repository uses
+# GitHub's IMMUTABLE subject format, so that subject carries the owner's and
+# the repository's numeric IDs (`docs/image-release.md` says how to read it).
+# The identity holds ONE role, `AcrPush`, scoped to the one registry, and
+# `az acr login` (with no `--resource-group`, so that it needs no control-plane
+# read of the registry) exchanges the Entra token for a registry token. NOT
+# `az acr build`, which runs on ACR Tasks and needs `Container Registry Tasks
+# Contributor` (create and run any task on the registry) besides.
+#
+# NO ESTATE IDENTIFIER IN THIS PUBLIC FILE. The client, tenant and
+# subscription IDs and the registry's name are variables (`vars.AZURE_CLIENT_ID`,
+# `vars.AZURE_TENANT_ID`, `vars.AZURE_SUBSCRIPTION_ID`, `vars.ACR_NAME`), set
+# on the `acr-qa` environment, and the push job refuses, naming the variable,
+# when one is unset or malformed. They are identifiers, not credentials, but a
+# variable is not masked: a public repository's run logs show them in the push
+# job's step headers. No output or artifact of this workflow names the
+# registry's host.
+#
+# EVERY ACTION IS PINNED BY FULL COMMIT SHA, with its release tag beside it, as
+# in `release.yml`, and checkout and the two artifact actions are at
+# `release.yml`'s own pins. Trivy is NOT `aquasecurity/trivy-action`: that
+# action's tags were rewritten to an infostealer on 2026-03-19 (Aqua Security's
+# incident report), and a SHA pin covers only an action's own files, not the
+# Trivy it downloads. The Trivy release is fetched at a pinned version and
+# checked against the sha256 recorded in this file before it is unpacked.
+#
+# THE SCAN REPORTS FOR QA AND REFUSES NOTHING (Brett Heap, 2026-11-17: "the
+# scan findings are acceptable for qa"). Its gate is the `target` step's
+# `scan-fail-on` output, empty for QA; the prod path sets it. The report and a
+# CycloneDX SBOM are uploaded as the `scan` artifact, and a table goes to the
+# job summary.
+#
+# NO PROVENANCE ATTESTATION YET. `actions/attest-build-provenance` would need
+# `attestations: write`, and for a public repository it writes a permanent
+# entry, naming the image, to the public Sigstore transparency log. Both are
+# the owner's call; the SBOM above is an artifact only.
+#
+# THE Opensoft-Tenant DIGEST BUMP IS NOT HERE. Its overlay does not exist yet,
+# and its design ties the migration Job's name to the digest, so the edit
+# cannot be written or tested against anything real. `docs/image-release.md`
+# records it as the next step, with the token design.
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: >-
+          What to build: a tag of this repository (for example v0.1.0) or a
+          full 40-character commit on main. Run the workflow from main.
+        required: true
+        type: string
+      target:
+        description: >-
+          Where the image goes. Only qa exists; prod will promote a QA digest.
+        required: true
+        type: choice
+        options:
+          - qa
+        default: qa
+
+# Nothing by default. Each job grants itself exactly what it uses.
+permissions: {}
+
+# One image run at a time, and a running one is never cancelled halfway.
+concurrency:
+  group: image
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # `bash -eo pipefail`: a failed command anywhere in a pipeline fails the step.
+    shell: bash
+
+env:
+  # The inputs reach every script through the environment, never through an
+  # expression pasted into a script, so no input value can become shell or
+  # Python source.
+  REVISION: ${{ inputs.revision }}
+  TARGET: ${{ inputs.target }}
+  # The repository the image goes to, inside the registry `ACR_NAME` names.
+  # The Kubernetes base names the same repository
+  # (`ghcr.io/opensoft/opendox-runtime`, a placeholder an overlay rewrites).
+  IMAGE_NAME: opendox-runtime
+
+jobs:
+  build:
+    name: build and scan
+    # PINNED, as `validate.yml` pins it: the image ID this job records and the
+    # push job compares depends on the runner's Docker and its image store
+    # (Docker 28.0.4 on this image, by its README on 2026-11-17), and both
+    # jobs must run the same one; `ubuntu-latest` moves.
+    runs-on: ubuntu-24.04
+    # THE BUDGET: every step declares its own timeout, and the job's covers
+    # their sum (1 + 3 + 2 + 5 + 20 + 5 + 10 + 3 + 15 + 2 + 5 = 71 min).
+    timeout-minutes: 75
+    permissions:
+      contents: read # the compare with main
+      actions: read # the step that reads the acr-qa environment's protection rules
+    outputs:
+      sha: ${{ steps.revision.outputs.sha }}
+      tag: ${{ steps.revision.outputs.tag }}
+      image-id: ${{ steps.image.outputs.image-id }}
+      archive-sha256: ${{ steps.image.outputs.archive-sha256 }}
+    steps:
+      # THE TARGET'S RULES. QA is the only target: its gate is "on main" (the
+      # next step), and its scan gate is empty, so the scan reports and
+      # refuses nothing.
+      - name: the target's rules
+        id: target
+        timeout-minutes: 1
+        run: |
+          case "$TARGET" in
+            qa)
+              echo "scan-fail-on=" | tee -a "$GITHUB_OUTPUT"
+              ;;
+            # PROD GOES HERE, AND IS NOT BUILT. It promotes a digest QA holds,
+            # by `az acr import`, in its own job and environment (`acr-prod`),
+            # never by rebuilding. Its gate is `release.yml`'s: the commit must
+            # be the one opensoft/openDox main pins (that file's step "the
+            # dispatched commit is the one the openDox root pins", the same
+            # script). Its scan gate is `scan-fail-on=CRITICAL,HIGH`.
+            *)
+              echo "::error::target $TARGET is not built: only qa exists. Prod will promote a QA digest, behind the openDox root's pin gate, in a later change"
+              exit 1
+              ;;
+          esac
+
+      # THE REVISION IS A COMMIT ON `main`. A full 40-character commit is
+      # taken as written. Anything else must be a tag of this repository whose
+      # name is also a valid image tag (letters, digits, `_`, `.` and `-`, at
+      # most 128, not starting with `.` or `-`), so that the image can carry
+      # it. The tag is read anonymously, over git, as `release.yml` reads the
+      # root's pin: `refs/tags/<tag>` in full, so a branch of the same name
+      # cannot answer, and `^{}` beside it, the commit an annotated tag points
+      # at. Then the one `gh` call: the compare with `refs/heads/main`, which
+      # also refuses a commit this repository does not have.
+      - name: the revision is a tag or a full commit on this repository's main
+        id: revision
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            sha="$REVISION"
+            tag="${REVISION:0:12}"
+          elif [[ "$REVISION" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] \
+              && git check-ref-format "refs/tags/$REVISION"; then
+            if ! refs="$(GIT_TERMINAL_PROMPT=0 git -c credential.helper= \
+                ls-remote --tags "https://github.com/$GITHUB_REPOSITORY.git" \
+                "refs/tags/$REVISION" "refs/tags/$REVISION^{}")"; then
+              echo "::error::the tags of $GITHUB_REPOSITORY cannot be read, so $REVISION cannot be resolved"
+              exit 1
+            fi
+            sha="$(awk -v ref="refs/tags/$REVISION^{}" '$2 == ref { print $1 }' <<< "$refs")"
+            if [ -z "$sha" ]; then
+              sha="$(awk -v ref="refs/tags/$REVISION" '$2 == ref { print $1 }' <<< "$refs")"
+            fi
+            if [ -z "$sha" ]; then
+              echo "::error::$GITHUB_REPOSITORY has no tag $REVISION; name a tag, or a commit by all 40 characters"
+              exit 1
+            fi
+            tag="$REVISION"
+          else
+            echo "::error::the revision names neither a full 40-character commit nor a tag usable as an image tag (letters, digits, '_', '.' and '-', at most 128, not starting with '.' or '-')"
+            exit 1
+          fi
+          if ! status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$sha...refs/heads/main" --jq .status)"; then
+            echo "::error::$sha cannot be compared with $GITHUB_REPOSITORY's main, so it is not a commit of this repository"
+            exit 1
+          fi
+          case "$status" in
+            identical|ahead) echo "$REVISION is $sha, on main ($status); the image is tagged $tag" ;;
+            *)
+              echo "::error::$sha is not on this repository's main (compare: $status); QA builds only a commit on main"
+              exit 1
+              ;;
+          esac
+          {
+            echo "sha=$sha"
+            echo "tag=$tag"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      # THE ENVIRONMENT MUST ASK A REVIEWER, AND LIMIT THE REFS THAT DEPLOY, as
+      # `release.yml` requires of its two. GitHub creates an environment a job
+      # names if it does not exist yet, with no protection rule, so a dispatch
+      # made before `acr-qa` was configured would push with nobody approving
+      # it. And a dispatch runs the dispatched ref's own copy of this file, so
+      # an environment any ref may deploy to would push whatever a branch
+      # builds. `acr-qa` must name a required reviewer, and its
+      # `deployment_branch_policy` must be a custom deployment limit (the
+      # branch `main`; this step does not re-read the pattern). Nothing is
+      # built before this passes.
+      - name: the acr-qa environment asks a reviewer and limits the refs that deploy
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENVIRONMENT: acr-qa
+        run: |
+          if ! settings=$(gh api "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT"); then
+            echo "::error::the $ENVIRONMENT environment cannot be read (it does not exist yet, or this job cannot see it); create it with a required reviewer and a deployment limit to the branch main first (docs/image-release.md)"
+            exit 1
+          fi
+          SETTINGS="$settings" python3 - <<'PY'
+          import json, os, sys
+
+          environment, settings = os.environ["ENVIRONMENT"], json.loads(os.environ["SETTINGS"])
+          reviewers = sum(len(rule.get("reviewers") or []) for rule in settings.get("protection_rules") or []
+                          if rule.get("type") == "required_reviewers")
+          policy = settings.get("deployment_branch_policy")
+          problems = []
+          if reviewers < 1:
+              problems.append(f"the {environment} environment names no required reviewer, "
+                              "so a push to the registry would not wait for an approval")
+          if not policy or policy.get("custom_branch_policies") is not True:
+              problems.append(f"the {environment} environment does not limit the refs that may "
+                              f"deploy to it (deployment_branch_policy {policy!r}): a dispatch on any "
+                              "branch runs that branch's own image.yml, so limit it to the branch main")
+          for problem in problems:
+              print(f"::error::{problem}")
+          if problems:
+              sys.exit(1)
+          print(f"{environment}: {reviewers} required reviewer(s), and only the refs its "
+                "deployment limit names can deploy")
+          PY
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 5
+        with:
+          ref: ${{ steps.revision.outputs.sha }}
+          persist-credentials: false
+
+      # `--provenance=false --sbom=false`: buildx's own attestations would make
+      # the pushed object an index rather than one image manifest; the SBOM is
+      # the scan's artifact instead. `--pull` takes the base image as the
+      # registry serves it today.
+      - name: build the image for linux/amd64 at the gated commit
+        timeout-minutes: 20
+        env:
+          SHA: ${{ steps.revision.outputs.sha }}
+          TAG: ${{ steps.revision.outputs.tag }}
+        run: |
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "$SHA" ]; then
+            echo "::error::the checkout is at $head, and the gate passed $SHA"
+            exit 1
+          fi
+          docker buildx build --platform linux/amd64 --pull \
+            --provenance=false --sbom=false \
+            --file deploy/compose/Dockerfile \
+            --build-arg "SOURCE_REVISION=$SHA" \
+            --tag "$IMAGE_NAME:$TAG" \
+            --load .
+
+      # THE IMAGE IS RECORDED HERE, BEFORE ANY THIRD-PARTY CODE RUNS, as
+      # `release.yml` records its digests before its smoke test. Only Docker
+      # and the Dockerfile's own build have run so far; Trivy runs after the
+      # archive is uploaded, so nothing it does can change what is pushed. The
+      # image must carry the gated commit in its revision label (the build
+      # argument landed) and be linux/amd64. The push job loads the archive
+      # only at this sha256, and pushes only this image ID.
+      - name: record the image and its archive
+        id: image
+        timeout-minutes: 5
+        env:
+          SHA: ${{ steps.revision.outputs.sha }}
+          TAG: ${{ steps.revision.outputs.tag }}
+        run: |
+          ref="$IMAGE_NAME:$TAG"
+          id="$(docker image inspect --format '{{.Id}}' "$ref")"
+          revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$ref")"
+          platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$ref")"
+          if [ "$revision" != "$SHA" ]; then
+            echo "::error::$ref carries the revision label '$revision', not $SHA"
+            exit 1
+          fi
+          if [ "$platform" != "linux/amd64" ]; then
+            echo "::error::$ref is $platform, not linux/amd64"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/image"
+          docker save --output "$RUNNER_TEMP/image/$IMAGE_NAME.tar" "$ref"
+          archive="$(sha256sum "$RUNNER_TEMP/image/$IMAGE_NAME.tar" | cut -d' ' -f1)"
+          {
+            echo "image-id=$id"
+            echo "archive-sha256=$archive"
+          } | tee -a "$GITHUB_OUTPUT"
+          {
+            echo "### $ref"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| revision | \`$REVISION\` |"
+            echo "| commit | \`$SHA\` |"
+            echo "| image ID | \`$id\` |"
+            echo "| archive sha256 | \`$archive\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Seven days: the archive must outlive the wait for the push job's
+      # approval, and an image is hundreds of megabytes. A push approved later
+      # than that finds no archive and fails; dispatch again.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        timeout-minutes: 10
+        with:
+          name: image
+          path: ${{ runner.temp }}/image/
+          if-no-files-found: error
+          retention-days: 7
+
+      # TRIVY, FROM ITS PINNED RELEASE, BY sha256. The digest below is the one
+      # the release's own checksum file names for this tarball, the one GitHub
+      # records for the asset, and the one a download measured, all three read
+      # on 2026-11-17. The check runs before anything is unpacked.
+      - name: install Trivy from its pinned release, by sha256
+        timeout-minutes: 3
+        env:
+          TRIVY_VERSION: 0.76.1
+          TRIVY_SHA256: c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0
+        run: |
+          dir="$RUNNER_TEMP/trivy"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 --output "$dir/trivy.tar.gz" \
+            "https://github.com/aquasecurity/trivy/releases/download/v$TRIVY_VERSION/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          if ! printf '%s  %s\n' "$TRIVY_SHA256" "$dir/trivy.tar.gz" | sha256sum --strict -c -; then
+            echo "::error::the Trivy $TRIVY_VERSION tarball is not the one this file records, so nothing from it runs"
+            exit 1
+          fi
+          tar -xzf "$dir/trivy.tar.gz" -C "$dir" trivy
+          "$dir/trivy" --version
+
+      # The archive, not the Docker daemon: what is scanned is the file the
+      # push job will load, byte for byte. Vulnerabilities and secrets, as JSON
+      # for the verdict below, and a CycloneDX SBOM for the record.
+      - name: scan the image
+        id: scan
+        timeout-minutes: 15
+        run: |
+          mkdir -p "$RUNNER_TEMP/scan"
+          "$RUNNER_TEMP/trivy/trivy" image --input "$RUNNER_TEMP/image/$IMAGE_NAME.tar" \
+            --scanners vuln,secret --format json --exit-code 0 --timeout 12m --skip-version-check \
+            --output "$RUNNER_TEMP/scan/trivy.json"
+          "$RUNNER_TEMP/trivy/trivy" image --input "$RUNNER_TEMP/image/$IMAGE_NAME.tar" \
+            --format cyclonedx --timeout 12m --skip-version-check \
+            --output "$RUNNER_TEMP/scan/sbom.cdx.json"
+
+      # THE SCAN'S VERDICT. A table of findings by severity goes to the job
+      # summary, with the CRITICAL and HIGH ones that have a fix. FAIL_ON is
+      # the target's scan gate: empty, the step reports and refuses nothing
+      # (QA); a list of severities, any finding at one of them refuses. A gate
+      # naming something that is not a severity refuses too, since a misspelt
+      # gate would pass everything, and so does a report that cannot be read:
+      # a report that did not appear is not a clean scan.
+      - name: the scan's verdict
+        timeout-minutes: 2
+        env:
+          FAIL_ON: ${{ steps.target.outputs.scan-fail-on }}
+        run: |
+          REPORT="$RUNNER_TEMP/scan/trivy.json" python3 - <<'PY'
+          import json, os, sys
+
+          SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN")
+          target, path = os.environ["TARGET"], os.environ["REPORT"]
+          gate = [part.strip().upper() for part in os.environ.get("FAIL_ON", "").split(",") if part.strip()]
+          unknown = [part for part in gate if part not in SEVERITIES]
+          if unknown:
+              sys.exit(f"::error::the scan gate names {unknown}, which are not severities "
+                       f"{list(SEVERITIES)}; a misspelt gate would pass everything")
+          try:
+              with open(path, encoding="utf-8") as handle:
+                  report = json.load(handle)
+          except (OSError, ValueError) as error:
+              sys.exit(f"::error::the scan report cannot be read ({error}); a report that did not "
+                       "appear is a refusal, not a clean scan")
+          if not isinstance(report, dict) or report.get("SchemaVersion") != 2:
+              sys.exit("::error::the scan report is not a Trivy report of schema version 2")
+
+          vulnerabilities = {s: 0 for s in SEVERITIES}
+          fixable = {s: 0 for s in SEVERITIES}
+          secrets = {s: 0 for s in SEVERITIES}
+          rows = []
+          for result in report.get("Results") or []:
+              for finding in result.get("Vulnerabilities") or []:
+                  severity = finding.get("Severity") if finding.get("Severity") in SEVERITIES else "UNKNOWN"
+                  vulnerabilities[severity] += 1
+                  if finding.get("FixedVersion"):
+                      fixable[severity] += 1
+                      if severity in ("CRITICAL", "HIGH"):
+                          rows.append((severity, finding.get("VulnerabilityID", "?"), finding.get("PkgName", "?"),
+                                       finding.get("InstalledVersion", "?"), finding.get("FixedVersion")))
+              for finding in result.get("Secrets") or []:
+                  severity = finding.get("Severity") if finding.get("Severity") in SEVERITIES else "UNKNOWN"
+                  secrets[severity] += 1
+
+          lines = ["", "### The scan", "",
+                   f"Target `{target}`, gate: " + (", ".join(gate) if gate else "none, report only"), "",
+                   "| severity | vulnerabilities | with a fix | secrets |", "|---|---:|---:|---:|"]
+          lines += [f"| {s} | {vulnerabilities[s]} | {fixable[s]} | {secrets[s]} |" for s in SEVERITIES]
+          if rows:
+              lines += ["", "CRITICAL and HIGH findings with a fix:", "",
+                        "| severity | id | package | installed | fixed in |", "|---|---|---|---|---|"]
+              lines += [f"| {s} | {i} | {p} | {have} | {fixed} |"
+                        for s, i, p, have, fixed in sorted(rows)[:40]]
+              if len(rows) > 40:
+                  lines.append(f"\nand {len(rows) - 40} more, in the `scan` artifact")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write("\n".join(lines) + "\n")
+          for s in SEVERITIES:
+              print(f"{s}: {vulnerabilities[s]} vulnerabilities ({fixable[s]} with a fix), {secrets[s]} secrets")
+
+          if not gate:
+              print(f"report only for {target}: the scan refuses nothing")
+              sys.exit(0)
+          blocking = {s: vulnerabilities[s] + secrets[s] for s in gate if vulnerabilities[s] + secrets[s]}
+          if blocking:
+              sys.exit(f"::error::the scan found {blocking}, and the {target} gate refuses "
+                       f"{', '.join(gate)}; nothing is pushed")
+          print(f"the scan found nothing at {', '.join(gate)}")
+          PY
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() && steps.scan.outcome == 'success' }}
+        timeout-minutes: 5
+        with:
+          name: scan
+          path: ${{ runner.temp }}/scan/
+          if-no-files-found: error
+
+  push:
+    name: push to the QA registry
+    needs: build
+    runs-on: ubuntu-24.04
+    # THE BUDGET: every step declares its own timeout, and the job's covers
+    # their sum (1 + 2 + 10 + 5 + 3 + 20 + 2 + 5 = 48 min).
+    # tests/test_image_workflow.py reads each bound from this file.
+    timeout-minutes: 50
+    environment:
+      name: acr-qa
+    permissions:
+      id-token: write # the OIDC token the federated credential accepts
+      actions: read # this environment's protection rules and this run's review history
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      # THE VARIABLES, NAMED WHEN MISSING. They live on the `acr-qa`
+      # environment (or the repository), never in this file. Each must have
+      # its shape: a GUID for the three Azure IDs, and 5 to 50 letters or
+      # digits for a registry name, so a value pasted in the wrong variable
+      # stops here and not inside Azure. No value is printed.
+      - name: the registry variables are set
+        timeout-minutes: 1
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ACR_NAME: ${{ vars.ACR_NAME }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+
+          GUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+          shapes = {"AZURE_CLIENT_ID": (GUID, "a GUID"), "AZURE_TENANT_ID": (GUID, "a GUID"),
+                    "AZURE_SUBSCRIPTION_ID": (GUID, "a GUID"),
+                    "ACR_NAME": (r"[A-Za-z0-9]{5,50}", "a registry name, 5 to 50 letters or digits")}
+          problems = []
+          for name, (shape, said) in shapes.items():
+              value = os.environ.get(name, "")
+              if not value:
+                  problems.append(f"the variable {name} is not set on the acr-qa environment or the "
+                                  "repository; docs/image-release.md's one-time setup sets it")
+              elif not re.fullmatch(shape, value):
+                  problems.append(f"the variable {name} is not {said}")
+          for problem in problems:
+              print(f"::error::{problem}")
+          if problems:
+              sys.exit(1)
+          print(f"{', '.join(shapes)}: set, each in its shape")
+          PY
+
+      # THE APPROVAL, AT USE TIME: `release.yml`'s own script, unchanged. The
+      # build job's check goes stale while the run waits, so right before the
+      # sign-in this step requires that `acr-qa` still names a required
+      # reviewer and still limits the refs that deploy, and that this run's
+      # review history holds an approval of a deployment to it.
+      - name: this environment still asks a reviewer and limits its refs, and this run's deployment to it was approved
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENVIRONMENT: acr-qa
+        run: |
+          if ! settings=$(gh api "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT"); then
+            echo "::error::the $ENVIRONMENT environment cannot be read, so its reviewer rule is unknown"
+            exit 1
+          fi
+          if ! approvals=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals"); then
+            echo "::error::this run's review history cannot be read"
+            exit 1
+          fi
+          SETTINGS="$settings" APPROVALS="$approvals" python3 - <<'PY'
+          import json, os, sys
+
+          environment, settings = os.environ["ENVIRONMENT"], json.loads(os.environ["SETTINGS"])
+          reviewers = sum(len(rule.get("reviewers") or []) for rule in settings.get("protection_rules") or []
+                          if rule.get("type") == "required_reviewers")
+          if reviewers < 1:
+              sys.exit(f"::error::the {environment} environment names no required reviewer now, "
+                       "so this deployment did not wait for an approval")
+          policy = settings.get("deployment_branch_policy")
+          if not policy or policy.get("custom_branch_policies") is not True:
+              sys.exit(f"::error::the {environment} environment no longer limits the refs that may "
+                       f"deploy to it (deployment_branch_policy {policy!r}), so nothing is uploaded")
+          approved = [review["user"]["login"] for review in json.loads(os.environ["APPROVALS"])
+                      if review.get("state") == "approved"
+                      and any(e.get("name") == environment for e in review.get("environments", []))]
+          if not approved:
+              sys.exit(f"::error::this run's review history holds no approval of a deployment "
+                       f"to {environment}, so nothing is uploaded")
+          print(f"{environment}: a required reviewer is named, the refs that deploy are limited, "
+                f"and this run's deployment was approved by {', '.join(approved)}")
+          PY
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        timeout-minutes: 10
+        with:
+          name: image
+          path: ${{ runner.temp }}/image
+
+      # THE IMAGE IS THE ONE THE BUILD JOB RECORDED: the archive at its
+      # sha256, and, once loaded, the image ID recorded before the scan ran.
+      - name: the archive is the one the build job recorded, and loads as its image
+        timeout-minutes: 5
+        env:
+          ARCHIVE_SHA256: ${{ needs.build.outputs.archive-sha256 }}
+          IMAGE_ID: ${{ needs.build.outputs.image-id }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          archive="$RUNNER_TEMP/image/$IMAGE_NAME.tar"
+          if ! printf '%s  %s\n' "$ARCHIVE_SHA256" "$archive" | sha256sum --strict -c -; then
+            echo "::error::the image archive is not the one the build job recorded, so nothing is pushed"
+            exit 1
+          fi
+          docker load --input "$archive"
+          loaded="$(docker image inspect --format '{{.Id}}' "$IMAGE_NAME:$TAG")"
+          if [ "$loaded" != "$IMAGE_ID" ]; then
+            echo "::error::the archive loads as $loaded, and the build job recorded $IMAGE_ID, so nothing is pushed"
+            exit 1
+          fi
+          echo "$IMAGE_NAME:$TAG is $IMAGE_ID, as the build job recorded"
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        timeout-minutes: 3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # THE PUSH, AND THE DIGEST READ BACK. `az acr login --name` with NO
+      # `--resource-group`: the identity holds only `AcrPush`, a data-plane
+      # role with no read of the registry's resource, so the CLI's lookup of
+      # the registry finds nothing, and it falls back to the cloud's login
+      # server suffix and exchanges the Entra token for a registry token. With
+      # a resource group named, the lookup would be a direct read, and fail.
+      # The digest is the one `docker push` reports; it is then PULLED by that
+      # digest, so the registry is shown to serve it, and the pulled image
+      # must be the image ID the build job recorded.
+      - name: push the image, and read its digest back from the registry
+        id: push
+        timeout-minutes: 20
+        env:
+          ACR_NAME: ${{ vars.ACR_NAME }}
+          IMAGE_ID: ${{ needs.build.outputs.image-id }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          az acr login --name "$ACR_NAME"
+          suffix="$(az cloud show --query suffixes.acrLoginServerEndpoint --output tsv)"
+          server="$(printf '%s%s' "$ACR_NAME" "$suffix" | tr '[:upper:]' '[:lower:]')"
+          remote="$server/$IMAGE_NAME"
+          docker tag "$IMAGE_NAME:$TAG" "$remote:$TAG"
+          docker push "$remote:$TAG" | tee "$RUNNER_TEMP/push.log"
+          digest="$(sed -n 's/^.*digest: \(sha256:[0-9a-f]\{64\}\) size: [0-9][0-9]*$/\1/p' "$RUNNER_TEMP/push.log" | tail -n 1)"
+          if [ -z "$digest" ]; then
+            echo "::error::docker push reported no digest, so the pushed image cannot be named"
+            exit 1
+          fi
+          docker pull "$remote@$digest"
+          pulled="$(docker image inspect --format '{{.Id}}' "$remote@$digest")"
+          if [ "$pulled" != "$IMAGE_ID" ]; then
+            echo "::error::the registry serves $digest as $pulled, and the build job recorded $IMAGE_ID"
+            exit 1
+          fi
+          echo "digest=$digest" | tee -a "$GITHUB_OUTPUT"
+
+      # THE RECORD: the job summary, a notice, and `image-release.json`, with
+      # `image` as the name inside the registry, `digest`, `source_revision`,
+      # `ref` (the revision as dispatched) and `target`. No registry host:
+      # the pull reference is `<ACR_NAME's login server>/<image>@<digest>`.
+      - name: record the pushed image
+        timeout-minutes: 2
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          SHA: ${{ needs.build.outputs.sha }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, sys
+
+          record = {"image": f"{os.environ['IMAGE_NAME']}:{os.environ['TAG']}",
+                    "digest": os.environ["DIGEST"], "source_revision": os.environ["SHA"],
+                    "ref": os.environ["REVISION"], "target": os.environ["TARGET"]}
+          if not re.fullmatch(r"sha256:[0-9a-f]{64}", record["digest"]):
+              sys.exit(f"::error::{record['digest']!r} is not an image digest")
+          if not re.fullmatch(r"[0-9a-f]{40}", record["source_revision"]):
+              sys.exit(f"::error::{record['source_revision']!r} is not a full commit")
+          where = pathlib.Path(os.environ["RUNNER_TEMP"]) / "release"
+          where.mkdir(parents=True, exist_ok=True)
+          (where / "image-release.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+          lines = ["", f"### {record['image']} in the {record['target']} registry", "",
+                   "| | |", "|---|---|"] + [f"| {key} | `{value}` |" for key, value in record.items()]
+          lines += ["", "Opensoft-Tenant's QA overlay is bumped by hand for now: "
+                    "`gitops/azure/opendox/overlays/qa/kustomization.yaml`, the `opendox-runtime` "
+                    f"image's `digest: {record['digest']}` (docs/image-release.md, \"Next step\")."]
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write("\n".join(lines) + "\n")
+          print(json.dumps(record, indent=2))
+          print(f"::notice title={record['image']}::{record['digest']} from {record['source_revision']}")
+          PY
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        timeout-minutes: 5
+        with:
+          name: image-release
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
