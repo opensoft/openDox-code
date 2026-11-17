@@ -38,15 +38,23 @@ name: release
 # The one server-side control over the ref is each environment's deployment
 # limit, and both environments MUST carry one. The build job refuses when
 # either environment has NO CUSTOM DEPLOYMENT LIMIT, and each publish job
-# checks that again at use time. The limit's pattern is the tag `v*` alone,
-# as the lane configured both environments on 2026-10-05 and verified through
-# the API, so a dispatch on `main` or any branch builds and verifies but
-# cannot deploy. The workflow does not re-read the pattern: changing it is an
-# admin act, as is changing the reviewer rule, and an admin can edit this
-# file too (accepted, RULED openxFactory#656 comment 5993462741). The limit
-# that remains, accepted: while sessions act as brettheap, the approval click
-# is the last line of defense, and a ruleset over `v*` tags is recommended,
-# not required.
+# checks that again at use time. The limit is exactly one policy, the tag
+# `v*`, as the lane configured both environments on 2026-10-05 and verified
+# through the API (and read again on 2026-11-17: each lists one policy, `v*`,
+# of type `tag`), so a dispatch on `main` or any branch builds and verifies
+# but cannot deploy. The build job reads each environment's list of policies
+# and refuses anything but exactly that: more, fewer or different policies, a
+# branch pattern spelled `v*`, an answer in a shape it does not know, or a read
+# that fails. Each publish job reads its own again at use time, as `image.yml`
+# does for its environment (RULED openxFactory#656, comment 6957231933). The
+# environment's own configuration is the control, and GitHub enforces it
+# before a job starts; these reads make a reviewed copy of this file notice a
+# limit that was changed, and they do not bind a ref that carries its own copy.
+# Changing the limit or the reviewer rule is an admin act, and an admin can
+# edit this file too (accepted, RULED openxFactory#656 comment 5993462741).
+# The limit that remains, accepted: while sessions act as brettheap, the
+# approval click is the last line of defense, and a ruleset over `v*` tags is
+# recommended, not required.
 #
 # FOUR JOBS, EACH GATED ON THE ONE BEFORE IT:
 #   build            builds the sdist and the wheel in a clean job, runs
@@ -82,9 +90,10 @@ name: release
 # environment the job runs in). `id-token: write` is granted to the two publish
 # jobs and to no other job. The one other credential is GitHub's own automatic
 # `GITHUB_TOKEN`, passed to `gh` for reads of THIS repository's API only: in
-# the build job, the compare with `main` and the environments (`contents:
-# read`, `actions: read`); in each publish job, its environment and this run's
-# review history (`actions: read`). The openDox root's
+# the build job, the compare with `main` and the environments and their
+# deployment policies (`contents: read`, `actions: read`); in each publish job,
+# its environment, its deployment policies and this run's review history
+# (`actions: read`). The openDox root's
 # pin, in another repository, is read over git with no credential at all, in
 # the build job and again right before each upload.
 #
@@ -240,11 +249,10 @@ jobs:
       # environment that any ref may deploy to would publish whatever a branch
       # carries. Each environment must name a required reviewer, and its
       # `deployment_branch_policy` must be set, with `custom_branch_policies`:
-      # a custom deployment limit. Its pattern, the tag `v*`, is configured
-      # and was verified through the API, but this step does not re-read it
-      # (changing it is an admin act). This step refuses either gap, before
-      # anything is built. The environments are public metadata of a public
-      # repository.
+      # a custom deployment limit. This step refuses either gap, before
+      # anything is built; the next step reads the limit's list, which is the
+      # tag `v*` and nothing else. The environments are public metadata of a
+      # public repository.
       - name: both environments ask a reviewer and limit the refs that deploy
         env:
           GH_TOKEN: ${{ github.token }}
@@ -277,6 +285,52 @@ jobs:
               sys.exit(1)
           print(f"{environment}: {reviewers} required reviewer(s), and only the refs its "
                 "deployment limit names can deploy")
+          PY
+          done
+          exit $rc
+
+      # THE LIMIT'S LIST IS READ, NOT JUST ITS PRESENCE. A custom deployment
+      # limit is a list of name patterns of a type, branch or tag, and the step
+      # above does not tell `v*` the tag from `*` or from a branch spelled
+      # `v*`. Each environment's list must be exactly one policy, the tag `v*`:
+      # more, fewer or different refuses, and so does an answer in a shape this
+      # step does not know and a read that fails. The same script runs in each
+      # publish job, at use time. It reads this repository's environments, which
+      # are public metadata, with this job's `actions: read`.
+      - name: both environments' deployment limits are exactly the tag v*
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rc=0
+          for environment in testpypi pypi; do
+            if ! policies=$(gh api "repos/$GITHUB_REPOSITORY/environments/$environment/deployment-branch-policies"); then
+              echo "::error::the $environment environment's deployment branch policies cannot be read, so its deployment limit is unknown"
+              rc=1
+              continue
+            fi
+            ENVIRONMENT="$environment" POLICIES="$policies" python3 - <<'PY' || rc=1
+          import json, os, sys
+
+          environment = os.environ["ENVIRONMENT"]
+          try:
+              document = json.loads(os.environ["POLICIES"])
+          except ValueError:
+              sys.exit(f"::error::the {environment} environment's deployment branch policies are not JSON, "
+                       "so its deployment limit is unknown")
+          listed = document.get("branch_policies") if isinstance(document, dict) else None
+          count = document.get("total_count") if isinstance(document, dict) else None
+          if (not isinstance(listed, list) or type(count) is not int or count != len(listed)
+                  or not all(isinstance(entry, dict) and isinstance(entry.get("name"), str)
+                             and isinstance(entry.get("type"), str) for entry in listed)):
+              sys.exit(f"::error::the {environment} environment's deployment branch policies are not the "
+                       "shape this step reads (a count that matches a list of named, typed policies), "
+                       "so its deployment limit is unknown")
+          found = [f"{entry['type']} {entry['name']!r}" for entry in listed]
+          if len(listed) != 1 or listed[0]["type"] != "tag" or listed[0]["name"] != "v*":
+              sys.exit(f"::error::the {environment} environment's deployment limit must be exactly one policy, "
+                       f"the tag 'v*', and it holds {len(listed)}: {', '.join(found) or 'none'}")
+          print(f"{environment}: its deployment limit is exactly the tag 'v*'")
           PY
           done
           exit $rc
@@ -678,7 +732,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     # THE BUDGET: every step declares its own timeout, and the job's covers
-    # their sum (5 + 2 + 2 + 2 + 3 + 10 = 24 min); the upload's is 10 minutes.
+    # their sum (5 + 2 + 1 + 2 + 2 + 3 + 10 = 25 min); the upload's is 10 minutes.
     # tests/test_release_workflow.py reads each bound from this file.
     timeout-minutes: 25
     environment:
@@ -713,6 +767,46 @@ jobs:
           printf '%s  %s\n%s  %s\n' "$WHEEL_SHA256" "dist/$WHEEL" "$SDIST_SHA256" "dist/$SDIST" \
             | sha256sum --strict -c -
 
+      # THE LIMIT'S LIST, AGAIN, AT USE TIME: the build job's script, for this
+      # job's environment alone (a test holds the scripts equal). It is its own
+      # step, before the approval, so that the approval step below stays as it
+      # was. The environment's own configuration is the control, and GitHub
+      # enforces it before this job starts; this read makes a reviewed copy of
+      # this file notice a limit that was changed.
+      - name: this environment's deployment limit is exactly the tag v*
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENVIRONMENT: testpypi
+        run: |
+          if ! policies=$(gh api "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT/deployment-branch-policies"); then
+            echo "::error::the $ENVIRONMENT environment's deployment branch policies cannot be read, so its deployment limit is unknown and nothing is uploaded"
+            exit 1
+          fi
+          POLICIES="$policies" python3 - <<'PY'
+          import json, os, sys
+
+          environment = os.environ["ENVIRONMENT"]
+          try:
+              document = json.loads(os.environ["POLICIES"])
+          except ValueError:
+              sys.exit(f"::error::the {environment} environment's deployment branch policies are not JSON, "
+                       "so its deployment limit is unknown")
+          listed = document.get("branch_policies") if isinstance(document, dict) else None
+          count = document.get("total_count") if isinstance(document, dict) else None
+          if (not isinstance(listed, list) or type(count) is not int or count != len(listed)
+                  or not all(isinstance(entry, dict) and isinstance(entry.get("name"), str)
+                             and isinstance(entry.get("type"), str) for entry in listed)):
+              sys.exit(f"::error::the {environment} environment's deployment branch policies are not the "
+                       "shape this step reads (a count that matches a list of named, typed policies), "
+                       "so its deployment limit is unknown")
+          found = [f"{entry['type']} {entry['name']!r}" for entry in listed]
+          if len(listed) != 1 or listed[0]["type"] != "tag" or listed[0]["name"] != "v*":
+              sys.exit(f"::error::the {environment} environment's deployment limit must be exactly one policy, "
+                       f"the tag 'v*', and it holds {len(listed)}: {', '.join(found) or 'none'}")
+          print(f"{environment}: its deployment limit is exactly the tag 'v*'")
+          PY
+
       # THE APPROVAL, AT USE TIME. The build job's check of both environments
       # goes stale while the run waits: a rule removed meanwhile would let
       # this job start with nobody approving it, and a deployment limit
@@ -721,7 +815,8 @@ jobs:
       # job's environment still names a required reviewer AND still limits
       # the refs that deploy to it (`custom_branch_policies`), AND that this
       # run's review history holds an approval of a deployment to it. Any one
-      # missing refuses, and nothing is uploaded.
+      # missing refuses, and nothing is uploaded. The limit's own list is read
+      # by the step before this one.
       - name: this environment still asks a reviewer and limits its refs, and this run's deployment to it was approved
         timeout-minutes: 2
         env:
@@ -1042,7 +1137,7 @@ jobs:
     needs: [build, testpypi-install]
     runs-on: ubuntu-latest
     # THE BUDGET: every step declares its own timeout, and the job's covers
-    # their sum (5 + 2 + 2 + 2 + 3 + 10 + 16 = 40 min). The upload is bounded at
+    # their sum (5 + 2 + 1 + 2 + 2 + 3 + 10 + 16 = 41 min). The upload is bounded at
     # 10 minutes, so the JSON step after it always has its 20 reads, each up
     # to 30 s, 15 s apart (15 min, bounded at 16). A cut-off upload stays
     # recoverable: a re-run's preflight and skip-existing upload the rest.
@@ -1078,6 +1173,46 @@ jobs:
           printf '%s  %s\n%s  %s\n' "$WHEEL_SHA256" "dist/$WHEEL" "$SDIST_SHA256" "dist/$SDIST" \
             | sha256sum --strict -c -
 
+      # THE LIMIT'S LIST, AGAIN, AT USE TIME: the build job's script, for this
+      # job's environment alone (a test holds the scripts equal). It is its own
+      # step, before the approval, so that the approval step below stays as it
+      # was. The environment's own configuration is the control, and GitHub
+      # enforces it before this job starts; this read makes a reviewed copy of
+      # this file notice a limit that was changed.
+      - name: this environment's deployment limit is exactly the tag v*
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENVIRONMENT: pypi
+        run: |
+          if ! policies=$(gh api "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT/deployment-branch-policies"); then
+            echo "::error::the $ENVIRONMENT environment's deployment branch policies cannot be read, so its deployment limit is unknown and nothing is uploaded"
+            exit 1
+          fi
+          POLICIES="$policies" python3 - <<'PY'
+          import json, os, sys
+
+          environment = os.environ["ENVIRONMENT"]
+          try:
+              document = json.loads(os.environ["POLICIES"])
+          except ValueError:
+              sys.exit(f"::error::the {environment} environment's deployment branch policies are not JSON, "
+                       "so its deployment limit is unknown")
+          listed = document.get("branch_policies") if isinstance(document, dict) else None
+          count = document.get("total_count") if isinstance(document, dict) else None
+          if (not isinstance(listed, list) or type(count) is not int or count != len(listed)
+                  or not all(isinstance(entry, dict) and isinstance(entry.get("name"), str)
+                             and isinstance(entry.get("type"), str) for entry in listed)):
+              sys.exit(f"::error::the {environment} environment's deployment branch policies are not the "
+                       "shape this step reads (a count that matches a list of named, typed policies), "
+                       "so its deployment limit is unknown")
+          found = [f"{entry['type']} {entry['name']!r}" for entry in listed]
+          if len(listed) != 1 or listed[0]["type"] != "tag" or listed[0]["name"] != "v*":
+              sys.exit(f"::error::the {environment} environment's deployment limit must be exactly one policy, "
+                       f"the tag 'v*', and it holds {len(listed)}: {', '.join(found) or 'none'}")
+          print(f"{environment}: its deployment limit is exactly the tag 'v*'")
+          PY
+
       # THE APPROVAL, AT USE TIME. The build job's check of both environments
       # goes stale while the run waits: a rule removed meanwhile would let
       # this job start with nobody approving it, and a deployment limit
@@ -1086,7 +1221,8 @@ jobs:
       # job's environment still names a required reviewer AND still limits
       # the refs that deploy to it (`custom_branch_policies`), AND that this
       # run's review history holds an approval of a deployment to it. Any one
-      # missing refuses, and nothing is uploaded.
+      # missing refuses, and nothing is uploaded. The limit's own list is read
+      # by the step before this one.
       - name: this environment still asks a reviewer and limits its refs, and this run's deployment to it was approved
         timeout-minutes: 2
         env:

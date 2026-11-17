@@ -40,6 +40,13 @@ What is held:
   * the environment step: both environments with a reviewer and a deployment
     limit pass, and either one without a reviewer, without a limit (or with
     protected branches in place of one), or unreadable, refuses;
+  * the limit's list, read in the build job for both environments and again in
+    each publish job for its own, and brought level with `image.yml`'s check
+    (RULED openxFactory#656, comment 6957231933): the one policy the
+    environments carry, the tag `v*`, passes, and a wildcard, a branch spelled
+    `v*`, another tag or branch, an extra policy, an empty or truncated list,
+    an answer in another shape and a failed read each refuse, in all three
+    places, with one script behind them;
   * `main` is `refs/heads/main`, in the root's fetch and in the compare: a
     stand-in root whose tag `main`, at a commit off the branch, pins another
     commit cannot name the release commit, in any of the three jobs;
@@ -176,9 +183,16 @@ def test_the_four_jobs_are_chained() -> None:
 # The release-commit step and the environment step, with a stand-in `gh`.
 
 FAKE_GH = """#!/usr/bin/env bash
-# A stand-in `gh`: it answers from the case's fixture and records nothing.
+# A stand-in `gh`: it answers from the case's fixture, and records its argv
+# in $FAKE_LOG when the case names one.
+[ -n "${FAKE_LOG:-}" ] && printf '%s\\n' "$*" >> "$FAKE_LOG"
 case "$*" in
   *compare/*) printf '%s\\n' "$FAKE_STATUS" ;;
+  *environments/*/deployment-branch-policies*)
+    args="$*"; environment="${args##*environments/}"; environment="${environment%%/*}"
+    fails="FAKE_POLICIES_FAILS_${environment}"; answer="FAKE_POLICIES_${environment}"
+    [ -n "${!fails:-}" ] && { echo "HTTP 404" >&2; exit 1; }
+    printf '%s\\n' "${!answer}" ;;
   *actions/runs/*/approvals*)
     [ -n "${FAKE_APPROVALS_FAILS:-}" ] && { echo "HTTP 404" >&2; exit 1; }
     printf '%s\\n' "$FAKE_APPROVALS" ;;
@@ -427,6 +441,178 @@ def test_the_environment_step(case: str, tmp_path: Path) -> None:
     else:
         assert result.returncode != 0, result.stdout
         assert refusal in result.stdout, result.stdout
+
+
+# ---------------------------------------------------------------------------
+# The limit's list: the build job reads both environments', each publish job its
+# own, and all three accept exactly the one policy the environments carry, the
+# tag `v*` (read through the API on 2026-11-17: each lists one policy, `v*`, of
+# type `tag`).
+
+LIMIT_STEP_BUILD = "both environments' deployment limits are exactly the tag v*"
+LIMIT_STEP_PUBLISH = "this environment's deployment limit is exactly the tag v*"
+ENVIRONMENTS = ("testpypi", "pypi")
+
+
+def _policies(*entries: tuple[str, str], total: int | None = None) -> str:
+    """The list of deployment branch policies as GitHub answers it (the shape
+    read from this repository's own environments): `entries` as (name pattern,
+    "branch" or "tag"), and `total` as the count it reports, the list's length
+    unless a case says otherwise."""
+    listed = [{"id": 100 + n, "node_id": f"policy{n}", "name": name, "type": kind}
+              for n, (name, kind) in enumerate(entries)]
+    return json.dumps({"total_count": len(listed) if total is None else total, "branch_policies": listed})
+
+
+CONFIGURED = _policies(("v*", "tag"))
+NOT_EXACTLY = "must be exactly one policy, the tag 'v*'"
+NOT_THE_SHAPE = "are not the shape this step reads"
+
+# (the answer, or None when the read fails), then the refusal's words.
+LIMIT_REFUSALS = {
+    "a wildcard tag alone": (_policies(("*", "tag")), NOT_EXACTLY),
+    "a wildcard branch alone": (_policies(("*", "branch")), NOT_EXACTLY),
+    "v* spelt as a branch": (_policies(("v*", "branch")), NOT_EXACTLY),
+    "another tag pattern": (_policies(("v1.*", "tag")), NOT_EXACTLY),
+    "v* in capitals": (_policies(("V*", "tag")), NOT_EXACTLY),
+    "a full ref in place of the name": (_policies(("refs/tags/v*", "tag")), NOT_EXACTLY),
+    "main alone": (_policies(("main", "branch")), NOT_EXACTLY),
+    "an extra tag beside v*": (_policies(("v*", "tag"), ("release-*", "tag")), "holds 2"),
+    "an extra branch beside v*": (_policies(("v*", "tag"), ("main", "branch")), "holds 2"),
+    "a wildcard beside v*": (_policies(("v*", "tag"), ("*", "branch")), "holds 2"),
+    "no policy": (_policies(), "holds 0: none"),
+    "a list GitHub reports as longer": (_policies(("v*", "tag"), total=2), NOT_THE_SHAPE),
+    "a count that is not a number": (
+        json.dumps({"total_count": True, "branch_policies": [{"name": "v*", "type": "tag"}]}), NOT_THE_SHAPE),
+    "no list": (json.dumps({"total_count": 1}), NOT_THE_SHAPE),
+    "a list of nothing named": (json.dumps({"total_count": 1, "branch_policies": [{"id": 1}]}), NOT_THE_SHAPE),
+    "a policy with no type": (
+        json.dumps({"total_count": 1, "branch_policies": [{"id": 1, "name": "v*"}]}), NOT_THE_SHAPE),
+    "an answer that is not an object": ("null", NOT_THE_SHAPE),
+    "an answer that is not JSON": ("<html>Bad gateway</html>", "are not JSON"),
+    "the read failing": (None, "cannot be read"),
+}
+
+
+def _answers(env: dict[str, str], environment: str, answer: str | None) -> None:
+    if answer is None:
+        env[f"FAKE_POLICIES_FAILS_{environment}"] = "1"
+    else:
+        env[f"FAKE_POLICIES_{environment}"] = answer
+
+
+def _heredoc(script: str) -> str:
+    """The Python a step feeds to `python3 - <<'PY'`."""
+    found = re.search(r"<<'PY'[^\n]*\n(.*?)\nPY\n", script, re.S)
+    assert found, script
+    return found.group(1)
+
+
+def test_the_three_limit_checks_are_one_script_in_the_right_place() -> None:
+    jobs = _workflow()["jobs"]
+    build = _step("build", LIMIT_STEP_BUILD)
+    assert build["env"] == {"GH_TOKEN": "${{ github.token }}"}
+    steps = [step.get("name") or step["uses"] for step in jobs["build"]["steps"]]
+    assert steps.index(LIMIT_STEP_BUILD) == steps.index(ENVIRONMENT_STEP) + 1
+    assert steps.index(LIMIT_STEP_BUILD) < next(i for i, s in enumerate(steps) if s.startswith("install the release tools"))
+    assert jobs["build"]["permissions"] == {"contents": "read", "actions": "read"}
+    scripts = {_heredoc(build["run"])}
+    for job in ENVIRONMENTS:
+        step = _step(job, LIMIT_STEP_PUBLISH)
+        assert step["env"] == {"GH_TOKEN": "${{ github.token }}", "ENVIRONMENT": job}, job
+        # The endpoint answers to `actions: read`, which both publish jobs
+        # already hold (GitHub's permissions table for "List deployment branch
+        # policies"), and nothing wider is granted.
+        assert jobs[job]["permissions"] == {"id-token": "write", "actions": "read"}, job
+        names = [s.get("name") or s["uses"] for s in jobs[job]["steps"]]
+        assert names.index(LIMIT_STEP_PUBLISH) + 1 == names.index(APPROVAL_STEP), job
+        assert names.index(LIMIT_STEP_PUBLISH) < names.index(f"{'TestPyPI' if job == 'testpypi' else 'PyPI'} holds no file of this version but the verified ones"), job
+        scripts.add(_heredoc(step["run"]))
+    assert len(scripts) == 1, "the three limit checks run one script"
+    (script,) = scripts
+    assert '!= "tag"' in script and '!= "v*"' in script and "len(listed) != 1" in script
+
+
+def _limit_env(tmp_path: Path, answers: dict[str, str | None]) -> dict[str, str]:
+    env = {"GITHUB_REPOSITORY": REPOSITORY, "GH_TOKEN": "unused", "FAKE_LOG": str(tmp_path / "gh.log")}
+    for environment, answer in answers.items():
+        _answers(env, environment, answer)
+    return env
+
+
+def _reads(tmp_path: Path) -> list[str]:
+    log = tmp_path / "gh.log"
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+def _url(environment: str) -> str:
+    return f"api repos/{REPOSITORY}/environments/{environment}/deployment-branch-policies"
+
+
+@needs_a_shell
+def test_the_build_job_accepts_the_configured_limit_on_both_environments(tmp_path: Path) -> None:
+    result = _run(_step("build", LIMIT_STEP_BUILD)["run"], tmp_path,
+                  _limit_env(tmp_path, {"testpypi": CONFIGURED, "pypi": CONFIGURED}),
+                  (_fake_gh(tmp_path / "bin"),))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "testpypi: its deployment limit is exactly the tag 'v*'" in result.stdout
+    assert "pypi: its deployment limit is exactly the tag 'v*'" in result.stdout
+    assert _reads(tmp_path) == [_url("testpypi"), _url("pypi")], "each list is read once, and nothing else"
+
+
+@needs_a_shell
+@pytest.mark.parametrize("refused", ENVIRONMENTS)
+@pytest.mark.parametrize("case", sorted(LIMIT_REFUSALS))
+def test_the_build_job_refuses_a_limit_that_is_not_the_configured_one(refused: str, case: str,
+                                                                      tmp_path: Path) -> None:
+    answer, refusal = LIMIT_REFUSALS[case]
+    answers = {name: (answer if name == refused else CONFIGURED) for name in ENVIRONMENTS}
+    result = _run(_step("build", LIMIT_STEP_BUILD)["run"], tmp_path, _limit_env(tmp_path, answers),
+                  (_fake_gh(tmp_path / "bin"),))
+    assert result.returncode != 0, result.stdout
+    assert f"the {refused} environment's" in result.stdout + result.stderr
+    assert refusal in result.stdout + result.stderr, result.stdout + result.stderr
+    other = "pypi" if refused == "testpypi" else "testpypi"
+    assert f"{other}: its deployment limit is exactly the tag 'v*'" in result.stdout, \
+        "the other environment is still read and reported"
+
+
+@needs_a_shell
+def test_the_build_job_reports_both_environments_when_both_are_wrong(tmp_path: Path) -> None:
+    result = _run(_step("build", LIMIT_STEP_BUILD)["run"], tmp_path,
+                  _limit_env(tmp_path, {"testpypi": _policies(("*", "branch")), "pypi": None}),
+                  (_fake_gh(tmp_path / "bin"),))
+    assert result.returncode != 0
+    assert "the testpypi environment's deployment limit must be exactly one policy" in result.stdout + result.stderr
+    assert "the pypi environment's deployment branch policies cannot be read" in result.stdout + result.stderr
+
+
+@needs_a_shell
+@pytest.mark.parametrize("job", ENVIRONMENTS)
+@pytest.mark.parametrize("case", ["the configured limit", *sorted(LIMIT_REFUSALS)])
+def test_each_publish_job_checks_its_own_limit_before_the_upload(job: str, case: str, tmp_path: Path) -> None:
+    answer, refusal = (CONFIGURED, None) if case == "the configured limit" else LIMIT_REFUSALS[case]
+    step = _step(job, LIMIT_STEP_PUBLISH)
+    env = {**_limit_env(tmp_path, {job: answer}), "ENVIRONMENT": step["env"]["ENVIRONMENT"]}
+    result = _run(step["run"], tmp_path, env, (_fake_gh(tmp_path / "bin"),))
+    assert _reads(tmp_path) == [_url(job)], "its own list is read once, and nothing else"
+    if refusal is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert f"{job}: its deployment limit is exactly the tag 'v*'" in result.stdout
+    else:
+        assert result.returncode != 0, result.stdout
+        assert refusal in result.stdout + result.stderr, result.stdout + result.stderr
+
+
+def test_the_header_and_the_comments_say_the_limit_is_read() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "does not re-read" not in text and "this step does not re-read" not in text
+    header = text.split("\non:\n", 1)[0]
+    flat = " ".join(line.removeprefix("#").strip() for line in header.splitlines())
+    assert "The limit is exactly one policy, the tag `v*`" in flat
+    assert "each lists one policy, `v*`, of type `tag`" in flat
+    assert "they do not bind a ref that carries its own copy" in flat
+    assert "RULED openxFactory#656, comment 6957231933" in flat
 
 
 # ---------------------------------------------------------------------------
