@@ -68,8 +68,8 @@ def test_the_plan_is_empty_after_apply_and_full_before_it(
             with Database(postgres_dsn, schema=schema) as db:
                 runner = migrations.MigrationRunner(
                     db, migrations_dir=ROOT / "migrations")
-                assert [m.version for m in runner.plan()] == ["0001", "0002"]
-                assert runner.apply() == ["0001", "0002"]
+                assert [m.version for m in runner.plan()] == ["0001", "0002", "0003"]
+                assert runner.apply() == ["0001", "0002", "0003"]
                 assert runner.plan() == []
         finally:
             with admin.transaction() as conn:
@@ -110,8 +110,11 @@ def test_a_tampered_canonical_migration_applies_nothing_at_all(
 def test_editing_an_applied_migration_refuses_rather_than_reapplying(
         database, tmp_path: Path) -> None:
     """Drift between the tree and the database is reported, not papered over."""
+    # THE WHOLE TREE THE `database` FIXTURE APPLIED, `0003_health.sql`
+    # included: its ledger records `0003`, and a copy without it is a tree
+    # missing an applied migration, which the runner refuses by name.
     for name in ("0001_identity_and_coordination.sql",
-                 "0002_migration_state.sql"):
+                 "0002_migration_state.sql", "0003_health.sql"):
         shutil.copyfile(ROOT / "migrations" / name, tmp_path / name)
     edited = tmp_path / "0002_migration_state.sql"
     edited.write_text(edited.read_text(encoding="utf-8") + "\n-- edited\n",
@@ -125,8 +128,11 @@ def test_editing_an_applied_migration_refuses_rather_than_reapplying(
 def test_a_later_migration_is_applied_in_numeric_order(
         database, tmp_path: Path) -> None:
     """`0010` after `0002`, which is the whole point of numeric discovery."""
+    # THE WHOLE TREE THE `database` FIXTURE APPLIED, `0003_health.sql`
+    # included: its ledger records `0003`, and a copy without it is a tree
+    # missing an applied migration, which the runner refuses by name.
     for name in ("0001_identity_and_coordination.sql",
-                 "0002_migration_state.sql"):
+                 "0002_migration_state.sql", "0003_health.sql"):
         shutil.copyfile(ROOT / "migrations" / name, tmp_path / name)
     (tmp_path / "0010_additive_probe.sql").write_text(
         "alter table projects add column probe text;\n", encoding="utf-8")
@@ -357,7 +363,7 @@ def test_status_reports_a_reachable_database_and_its_applied_migrations(
     assert report["database"] == "reachable", report
     # The fixture applied both migrations into this test's own schema; `status`
     # reads them through the same search path.
-    assert report["applied_migrations"] == ["0001", "0002"], report
+    assert report["applied_migrations"] == ["0001", "0002", "0003"], report
     assert report["pending_migrations"] == [], report
 
 
@@ -365,8 +371,11 @@ def test_drift_sees_what_plan_cannot(database, tmp_path: Path) -> None:
     """`plan()` compares VERSIONS. A changed or deleted file is invisible to it
     and is refused by `apply()`, so readiness that trusted `plan()` alone
     called a database healthy that the runner would not migrate."""
+    # THE WHOLE TREE THE `database` FIXTURE APPLIED, `0003_health.sql`
+    # included: its ledger records `0003`, and a copy without it is a tree
+    # missing an applied migration, which the runner refuses by name.
     for name in ("0001_identity_and_coordination.sql",
-                 "0002_migration_state.sql"):
+                 "0002_migration_state.sql", "0003_health.sql"):
         shutil.copyfile(ROOT / "migrations" / name, tmp_path / name)
     runner = migrations.MigrationRunner(database, migrations_dir=tmp_path)
     assert runner.plan() == []
@@ -428,7 +437,7 @@ def test_the_ledger_is_resolved_in_this_schema_and_not_through_public(
                 assert runner.applied() == [], (
                     "the ledger was read through `public`; a fresh schema "
                     "would be reported fully migrated")
-                assert [m.version for m in runner.plan()] == ["0001", "0002"]
+                assert [m.version for m in runner.plan()] == ["0001", "0002", "0003"]
         finally:
             with admin.transaction() as conn:
                 conn.execute(f"drop schema if exists {schema} cascade")
@@ -734,7 +743,7 @@ def test_status_calls_an_unmigrated_database_unhealthy_and_blames_the_tree(
 
             code, report = _status()
             assert report["database"] == "reachable"
-            assert report["pending_migrations"] == ["0001", "0002"]
+            assert report["pending_migrations"] == ["0001", "0002", "0003"]
             assert report["ok"] is False and code == 1, report
 
             # And a tree the runner cannot read blames the TREE.
@@ -827,8 +836,10 @@ def test_a_migrations_directory_rewritten_mid_run_runs_the_bytes_it_gated(
 
     from opendox.runtime.db import Database
 
+    # EVERY MIGRATION, `0003_health.sql` included: the assertion below holds
+    # the run to `identity.TABLES`, which names the health tables (R2Q13 (a)).
     for name in ("0001_identity_and_coordination.sql",
-                 "0002_migration_state.sql"):
+                 "0002_migration_state.sql", "0003_health.sql"):
         shutil.copyfile(ROOT / "migrations" / name, tmp_path / name)
     canonical = tmp_path / "0001_identity_and_coordination.sql"
 
@@ -849,7 +860,7 @@ def test_a_migrations_directory_rewritten_mid_run_runs_the_bytes_it_gated(
                 runner.bootstrap_ledger = _rewrite_then_bootstrap  # type: ignore[method-assign]
                 applied = runner.apply()
 
-                assert applied == ["0001", "0002"], applied
+                assert applied == ["0001", "0002", "0003"], applied
                 assert canonical.read_bytes() == b"create table intruder ();\n", (
                     "the rewrite did not happen, so this test measured nothing")
                 present = _tables_in(db, schema)
@@ -993,7 +1004,7 @@ def test_the_access_preflight_asks_about_this_runtimes_tables_and_the_schema(
                 # It applies: the stranger's table is not this runtime's to
                 # have rights on. Against the previous head this raised
                 # `RuntimeAccessMissingError` naming `somebody_elses`.
-                assert runner.apply() == ["0001", "0002"]
+                assert runner.apply() == ["0001", "0002", "0003"]
 
             # AND THE SCHEMA'S OWN `usage` IS ASKED. Take it away and the same
             # run refuses, naming the schema — against the previous head it
