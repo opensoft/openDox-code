@@ -70,6 +70,8 @@ GOVERNED: dict[str, tuple[str, str] | None] = {
     # openDox's own submit route (plan 038 T015; #1144 12.4a), contributed by
     # its default profile, so a host's map carries no such key
     "submit": ("POST", "/actions/session/submit"),
+    # openDox's own land route (plan 038 T016; #1144 12.6a), the same way
+    "land": ("POST", "/actions/session/land"),
 }
 
 _SERVE_URL = re.compile(r"^serving ideation dashboard at "
@@ -116,9 +118,11 @@ def _assert_every_true_flag_answers(base: tuple[str, int], caps: dict, *,
     has a route that answers something other than `unknown_action`."""
     actions = caps["actions"]
     # PROFILE-AWARE (plan 038 T015; holder ruling, #656 6028383410): `submit`
-    # is openDox's default profile's own key, so the default's map carries
-    # every key here and a composed host's carries every key but that one.
-    expected = set(GOVERNED) if default_profile else set(GOVERNED) - {"submit"}
+    # is openDox's default profile's own key, and `land` too since T016, so
+    # the default's map carries every key here and a composed host's carries
+    # every key but those two.
+    expected = (set(GOVERNED) if default_profile
+                else set(GOVERNED) - {"submit", "land"})
     assert set(actions) == expected, (
         f"the actions map has keys this test does not account for: "
         f"{sorted(set(actions) ^ expected)}")
