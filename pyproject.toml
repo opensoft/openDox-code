@@ -20,7 +20,14 @@ name = "opendox"
 # the API still pre-1.0. This change is the LAST phase-3 openDox-code landing.
 # The openDox root then pins this commit (T087), and `.github/workflows/
 # release.yml` publishes only the commit that root pins, at the cut (T099).
-version = "0.1.0"
+#
+# 0.1.1, A PATCH RELEASE OF 0.1 (RULED openxFactory#656 comment 6936600205):
+# cut on the maintenance branch `release/0.1.x`, made from the commit `v0.1.0`
+# tags, and carrying exactly three changes: the first-start setup-script fix
+# (#102, #103), `certifi` 2026.10.23 in the dependency lock, and this version.
+# The branch is merged into `main` with a merge commit, the openDox root pins
+# this commit, and `release.yml` publishes it from the tag `v0.1.1`.
+version = "0.1.1"
 description = "The openDox code leg — the `opendox` package, carved from openxFactory."
 requires-python = ">=3.12"
 # THE PROJECT PAGE ON PyPI (plan 034 T099; RULED openxFactory#656 comment
