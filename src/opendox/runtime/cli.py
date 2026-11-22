@@ -113,7 +113,10 @@ VERBS: tuple[str, ...] = ("init", "migrate", "serve", "status", "reset")
 #: same reason and read by the same test.
 PROJECT_VERBS: tuple[str, ...] = ("create-repository", "attach-remote", "push")
 
-#: What `reset` will not do without being told twice.
+#: What `reset` will not do without being told twice. BYTE-IDENTICAL whatever
+#: the verb drops: #1144's F14.1 spells this phrase in its ratified command, so
+#: the health tables joining `DROP_ORDER` (plan 038 T042) changed the notes
+#: around it and never the phrase.
 RESET_CONFIRMATION = "yes-drop-the-coordination-database"
 
 #: THE DROP ORDER, TOPOLOGICAL AND WRITTEN OUT. `reversed(identity.TABLES)`
@@ -127,6 +130,11 @@ RESET_CONFIRMATION = "yes-drop-the-coordination-database"
 #: referenced these tables with it; the point of an explicit order is that a
 #: table this list does not know about keeps the drop honest by failing it.
 DROP_ORDER: tuple[str, ...] = (
+    # THE HEALTH STORE FIRST (`0003_`; R2Q13 (a): DOMAIN, and as disposable as
+    # the six, #1144 box 14.3). A finding references its run and nothing else
+    # references either.
+    "health_findings",        # references health_runs
+    "health_runs",
     "drafts",                 # references sessions, projects
     "sessions",               # references users, projects
     "project_repositories",   # references projects
@@ -873,7 +881,9 @@ def cmd_reset(args: argparse.Namespace) -> int:
     THIS VERB CAN EXIST AT ALL BECAUSE OF RULING Q1's LAST SENTENCE: "the
     database is disposable relative to the corpus" — "lose it and you lose
     coordination state, not a governed artifact" (design § D5). It drops the
-    six coordination tables and the migration ledger and nothing else; every
+    six coordination tables, the two health tables (`0003_`; R2Q13 (a) makes
+    them DOMAIN, and #1144 box 14.3 keeps them as disposable: every result is
+    recomputable from git) and the migration ledger, and nothing else; every
     document ever written is in a repository and is not reachable from here.
 
     The confirmation is a SPELLED PHRASE and not a `--force` flag, because a
@@ -943,7 +953,7 @@ def cmd_reset(args: argparse.Namespace) -> int:
                     # on postgres 16.15; the refusal names both schemas.
                     #
                     # AND THE SERVED-SCHEMA DECLARATION IS ASKED BEFORE THE
-                    # FIRST DROP. This verb DELETES the six coordination
+                    # FIRST DROP. This verb DELETES the coordination and health
                     # tables in the schema its own DSN selects, and it never
                     # asked: a mispointed migration DSN plus a confirmed
                     # `reset` dropped another schema's coordination state
@@ -954,7 +964,7 @@ def cmd_reset(args: argparse.Namespace) -> int:
                     # AND THE DATABASE DECLARATION BEFORE THE SCHEMA'S, on
                     # the verb that cannot be undone: a schema comparison made
                     # in the wrong DATABASE compares two names that happen to
-                    # agree, and this is the act that DROPS six tables.
+                    # agree, and this is the act that DROPS the domain's tables.
                     migrations.refuse_a_database_the_api_will_not_read(
                         lock, settings.served_database)
                     migrations.refuse_a_schema_the_api_will_not_read(
@@ -977,8 +987,10 @@ def cmd_reset(args: argparse.Namespace) -> int:
                       "message": _safe_message(exc)}, ok=False)
     return _emit({"verb": "reset", "schema": schema,
                   "dropped": list(DROP_ORDER),
-                  "note": "coordination state only, in this schema alone; "
-                          "every document is in a repository (RULING Q1)"},
+                  "note": "coordination state and health results only, in "
+                          "this schema alone; every document is in a "
+                          "repository (RULING Q1), and every health result is "
+                          "recomputable from it (#1144 box 14.3)"},
                  ok=True)
 
 

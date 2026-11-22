@@ -600,8 +600,11 @@ def test_readiness_refuses_a_database_whose_migration_file_has_changed(
     from tests_runtime.conftest import TEST_AUDIENCE, TEST_ISSUER
 
     root = Path(__file__).resolve().parents[1] / "migrations"
+    # THE WHOLE TREE THE `database` FIXTURE APPLIED, `0003_health.sql`
+    # included (plan 038 T042): its ledger records `0003`, so a copy without
+    # it would report `0003:missing` beside the one edit this test makes.
     for name in ("0001_identity_and_coordination.sql",
-                 "0002_migration_state.sql"):
+                 "0002_migration_state.sql", "0003_health.sql"):
         shutil.copyfile(root / name, tmp_path / name)
     edited = tmp_path / "0002_migration_state.sql"
     edited.write_text(edited.read_text(encoding="utf-8") + "\n-- edited\n",

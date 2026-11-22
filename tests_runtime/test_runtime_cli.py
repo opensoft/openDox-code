@@ -274,7 +274,7 @@ def test_init_creates_the_project_repository_root_and_touches_no_database(
     assert root.is_dir()
     assert evidence["directories_created"] == [str(root)]
     assert evidence["canonical_sha256"] == migrations.CANONICAL_MIGRATION_SHA256
-    assert evidence["migrations_on_disk"] == ["0001", "0002"]
+    assert evidence["migrations_on_disk"] == ["0001", "0002", "0003"]
 
 
 def test_status_redacts_every_secret_setting(
@@ -331,6 +331,8 @@ def test_the_drop_order_is_topological_and_not_reversed_declaration_order() -> N
     references it.
     """
     references = {
+        "health_findings": {"health_runs"},
+        "health_runs": set(),
         "drafts": {"sessions", "projects"},
         "sessions": {"users", "projects"},
         "project_repositories": {"projects"},
