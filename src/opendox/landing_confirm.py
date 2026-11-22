@@ -9,9 +9,13 @@ that spends a token (`redeem`).
 
 THE TWO ISSUERS, and there is no third:
 
-* `confirm_at_terminal(branch, head)`: the `land` verb's prompt. It asks at the
-  CONTROLLING TERMINAL (`/dev/tty`, never stdin), shows the branch and its head,
-  and mints only when the human types the branch's name there. It refuses when
+* `confirm_at_terminal(branch, head, *, operation)`: the `land` verb's prompt.
+  It asks at the CONTROLLING TERMINAL (`/dev/tty`, never stdin), shows the
+  branch, its head and the OPERATION this landing performs (`OPERATIONS`: a
+  merge commit onto `main`, or a submission to the host's instrument, as the
+  caller decided it from the governance reading; holder ruling item 10,
+  #656 `6103915259`), and mints only when the human types the branch's name
+  there. It refuses when
   standard input is not a terminal and when there is no controlling terminal at
   all: 12.6a's "refuses when there is none". There is no bypass flag (N-11).
 * `LandingNonces`: the loopback server's per-branch nonce (OQ-12-13). The
@@ -69,6 +73,9 @@ __all__ = [
     "ISSUER_TTY",
     "ISSUER_VIEW",
     "LandingNonces",
+    "OPERATIONS",
+    "OPERATION_MERGE",
+    "OPERATION_SUBMIT",
     "TERMINAL",
     "confirm_at_terminal",
     "redeem",
@@ -79,6 +86,23 @@ __all__ = [
 ISSUER_TTY = "tty"
 ISSUER_VIEW = "view"
 ISSUERS: tuple[str, ...] = (ISSUER_TTY, ISSUER_VIEW)
+
+#: The two operations a landing performs, as the question names them (holder
+#: ruling item 10, #656 `6103915259`): a merge commit onto `main` where a
+#: lander is bound (`standalone`), or a submission to the host's instrument
+#: where the repository is `governed` and one is contributed (R2Q4 (a)). The
+#: caller decides which BEFORE it asks, from the governance reading that
+#: decides whether `land` can act at all.
+OPERATION_MERGE = "merge"
+OPERATION_SUBMIT = "submit"
+OPERATIONS: tuple[str, ...] = (OPERATION_MERGE, OPERATION_SUBMIT)
+
+#: The question the prompt asks for each operation, and only that one.
+_QUESTIONS = {
+    OPERATION_MERGE: "Land branch {branch} at {head} onto main with a merge commit?",
+    OPERATION_SUBMIT: ("Submit branch {branch} at {head} to the host's instrument? "
+                       "Nothing merges here: the merge stays the governance's act."),
+}
 
 #: The controlling terminal. Never stdin: a stdin can be a pipe a script fills.
 TERMINAL = "/dev/tty"
@@ -312,15 +336,22 @@ def _open_controlling_terminal() -> io.TextIOWrapper:
                             write_through=True)
 
 
-def confirm_at_terminal(branch: str, head: str) -> Confirmation:
+def confirm_at_terminal(branch: str, head: str, *, operation: str) -> Confirmation:
     """THE FIRST ISSUER: ask at the controlling terminal; mint on the typed name.
 
-    Shows the branch and its head, reads ONE line from `/dev/tty`, and mints a
+    Shows the branch, its head and the `operation` this landing performs (one
+    of `OPERATIONS`, a REQUIRED keyword, so no caller leaves the wording to a
+    default; any other value is refused before the terminal is opened), reads
+    ONE line from `/dev/tty`, and mints a
     token bound to that branch and head only when the line is exactly the
     branch's name. Refuses, minting nothing, when standard input is not a
     terminal (12.6a: "a `land` whose stdin is not a terminal" is refused), when
     there is no controlling terminal, and on any other answer."""
     _require_binding(branch, head)
+    if not isinstance(operation, str) or operation not in _QUESTIONS:
+        raise ValueError(
+            f"the prompt states one of the operations {OPERATIONS}, and "
+            f"{operation!r} is not one")
     if not _stdin_is_a_terminal():
         raise ConfirmationRefused(
             "`land` confirms at the controlling terminal, and standard input is "
@@ -338,9 +369,8 @@ def confirm_at_terminal(branch: str, head: str) -> Confirmation:
         # The name is SHOWN escaped where it holds a character a terminal acts
         # on (a bidi override reorders what the human reads); the answer must
         # still be the exact name (Copilot's fourth review of openDox-code#90).
-        terminal.write(
-            f"Land branch {shown(branch)} at {head} onto main with a merge commit?\n"
-            f"Type the branch name to confirm: ")
+        question = _QUESTIONS[operation].format(branch=shown(branch), head=head)
+        terminal.write(f"{question}\nType the branch name to confirm: ")
         terminal.flush()
         answer = terminal.readline(_ANSWER_LIMIT)
     if answer.rstrip("\r\n") != branch:
